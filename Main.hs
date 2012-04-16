@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable,TypeFamilies,FlexibleContexts,RankNTypes #-}
+{-# LANGUAGE DeriveDataTypeable,TypeFamilies,FlexibleContexts,RankNTypes,OverloadedStrings #-}
 module Main where
 
 import MemoryModel
@@ -584,6 +584,7 @@ main = do
                     Nothing -> "~/debug-smt.sh output-" ++ (entryPoint opts) ++ ".smt"
                     Just bin -> bin) $ do
     setOption (ProduceModels True)
+    setLogic "QF_ABV"
     (case memoryModel opts of
         TypedModel -> do
           perform program (entryPoint opts) (bmcDepth opts) :: SMT TypedMemory
