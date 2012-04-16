@@ -540,6 +540,7 @@ data Options = Options
                , bmcDepth :: Integer
                , files :: [String]
                , memoryModel :: MemoryModelOption
+               , solver :: Maybe String
                , showHelp :: Bool
                } deriving (Eq,Ord,Show)
 
@@ -548,6 +549,7 @@ defaultOptions = Options { entryPoint = "main"
                          , bmcDepth = 10
                          , files = []
                          , memoryModel = TypedModel
+                         , solver = Nothing
                          , showHelp = False }
 
 optionDescr :: [OptDescr (Options -> Options)]
@@ -559,6 +561,7 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
                                                                            "block" -> BlockModel
                                                                            _ -> error $ "Unknown memory model "++show str
                                                                       }) "model") "Memory model to use (untyped,typed or block)"
+              ,Option [] ["solver"] (ReqArg (\str opt -> opt { solver = Just str }) "smt-binary") "The SMT solver to use to solve the generated instance"
               ,Option ['h'] ["help"] (NoArg (\opt -> opt { showHelp = True })) "Show this help"
               ]
 
@@ -577,7 +580,9 @@ main = do
     exitSuccess
   progs <- mapM getProgram (files opts)
   let program = foldl1 mergePrograms progs
-  withSMTSolver ("~/debug-smt.sh output-" ++ (entryPoint opts) ++ ".smt") $ do
+  withSMTSolver (case solver opts of
+                    Nothing -> "~/debug-smt.sh output-" ++ (entryPoint opts) ++ ".smt"
+                    Just bin -> bin) $ do
     setOption (ProduceModels True)
     (case memoryModel opts of
         TypedModel -> do
