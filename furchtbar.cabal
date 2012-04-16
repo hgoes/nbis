@@ -1,0 +1,17 @@
+Name:		furchtbar
+Version:	0.1
+Description:	A model checker for LLVM code
+License:	GPL
+License-File:	LICENSE
+Author:		Henning Günther <guenther@iti.cs.tu-bs.de>
+Build-Type:	Simple
+Category:	Testing
+Cabal-Version:	>= 1.2
+
+Executable furchtbar
+  Main-Is:		Main.hs
+  Other-Modules:
+    MemoryModel
+    MemoryModel.Untyped
+    MemoryModel.Typed
+  Build-Depends:	base,llvm-base >= 3,llvm >= 3,bitstream >= 0.2,containers,mtl,smtlib2
