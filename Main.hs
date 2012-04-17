@@ -24,6 +24,7 @@ import System.Console.GetOpt
 import System.Exit
 import Control.Monad (when)
 import Data.Maybe (mapMaybe)
+import Data.Bits as Bits
 
 (!) :: (Show k,Ord k) => Map k a -> k -> a
 (!) mp k = case Map.lookup k mp of
@@ -34,6 +35,7 @@ data Val m = ConstValue { asConst :: BitVector }
            | DirectValue { asValue :: SMTExpr BitVector }
            | PointerValue { asPointer :: Pointer m }
            | ConditionValue { asCondition :: SMTExpr Bool }
+           | ConstCondition { asConstCondition :: Bool }
              deriving (Typeable)
 
 instance Show (Val m) where
@@ -47,6 +49,7 @@ instance MemoryModel m => Eq (Val m) where
     (DirectValue x) == (DirectValue y) = x == y
     (PointerValue x) == (PointerValue y) = x == y
     (ConditionValue x) == (ConditionValue y) = x == y
+    (ConstCondition x) == (ConstCondition y) = x == y
     _ == _ = False
 
 valEq :: MemoryModel m => m -> Val m -> Val m -> SMTExpr Bool
@@ -64,6 +67,9 @@ valEq mem (ConstValue v1) (ConditionValue v2) = if v1 == BitS.pack [True]
                                                 else not' v2
 valEq mem (ConditionValue v1) (DirectValue v2) = v1 .==. (v2 .==. (constantAnn (BitS.pack [True]) 1))
 valEq mem (DirectValue v2) (ConditionValue v1) = v1 .==. (v2 .==. (constantAnn (BitS.pack [True]) 1))
+valEq mem (ConstCondition x) (ConstCondition y) = constant (x == y)
+valEq mem (ConstCondition x) (ConditionValue y) = if x then y else not' y
+valEq mem (ConditionValue x) (ConstCondition y) = if y then x else not' x
 
 valSwitch :: MemoryModel m => m -> TypeDesc -> [(Val m,SMTExpr Bool)] -> Val m
 valSwitch mem _ [(val,_)] = val
@@ -79,11 +85,13 @@ valCond (ConstValue x) = case BitS.unpack x of
   _ -> error "A constant of bit-length > 1 is used in a condition"
 valCond (DirectValue x) = x .==. (constantAnn (BitS.pack [True]) 1)
 valCond (ConditionValue x) = x
+valCond (ConstCondition x) = constant x
 
 valValue :: Val m -> SMTExpr BitVector
 valValue (ConstValue x) = constantAnn x (BitS.length x)
 valValue (DirectValue x) = x
 valValue (ConditionValue x) = ite x (constantAnn (BitS.pack [True]) 1) (constantAnn (BitS.pack [False]) 1)
+valValue (ConstCondition x) = constantAnn (BitS.pack [x]) 1
 
 instance (MemoryModel m,ArgAnnotation (Pointer m) ~ TypeDesc) => Args (Val m) where
     type ArgAnnotation (Val m) = TypeDesc
@@ -108,6 +116,7 @@ getCondition name = getCondition' []
       | otherwise = case cond of
         Nothing -> getCondition' conds rest
         Just rcond -> getCondition' (rcond:conds) rest
+    getCondition' conds [] = constant True
 
 translateProgram :: (MemoryModel mem,ArgAnnotation (Pointer mem) ~ TypeDesc,ArgAnnotation mem ~ [TypeDesc]) 
                     => Map String ([(String,TypeDesc)],TypeDesc,[(String,[(String,InstrDesc)])]) -> String -> Integer -> SMT (mem,mem)
@@ -315,25 +324,43 @@ realizeInstruction fname lbl instr act mem values calls
   = {- trace ("Realizing ("++lbl++") "++show instr++"..") $-} case instr of
       IDRet tp arg -> return (mem,values,Just (Just (argToExpr tp arg values)),[])
       IDRetVoid -> return (mem,values,Just Nothing,[])
-      IDBrCond cond (AL ifT) (AL ifF)
-        -> return (mem,values,Nothing,[(ifT,Just $ valCond $ argToExpr (TDInt False 1) cond values),(ifF,Nothing)])
+      IDBrCond cond (AL ifT) (AL ifF) -> case argToExpr (TDInt False 1) cond values of
+        ConstCondition cond' -> return (mem,values,Nothing,[(if cond' then ifT else ifF,Nothing)])
+        cond' -> return (mem,values,Nothing,[(ifT,Just $ valCond cond'),(ifF,Nothing)])
       IDBrUncond (AL to) -> return (mem,values,Nothing,[(to,Nothing)])
-      IDSwitch tp ((val,AL def):args) -> let v = argToExpr tp val values
-                                         in return (mem,values,Nothing,[ (to,Just $ valEq mem v (argToExpr tp cmp_v values))
-                                                                       | (cmp_v,AL to) <- args
-                                                                       ] ++ [ (def,Nothing) ])
-      IDBinOp op tp lhs rhs -> let lhs' = valValue $ argToExpr tp lhs values
-                                   rhs' = valValue $ argToExpr tp rhs values
-                                   rop = case op of 
-                                           BOXor -> BVXor
-                                           BOAdd -> BVAdd
-                                           BOAnd -> BVAnd
-                                           BOSub -> BVSub
-                                           BOShL -> BVSHL
-                                           BOOr -> BVOr
-                                           _ -> error $ "unsupported operator: "++show op
-                                   nvalues = Map.insert lbl (DirectValue (rop lhs' rhs')) values
-                               in return (mem,nvalues,Nothing,[])
+      IDSwitch tp ((val,AL def):args) -> case argToExpr tp val values of
+        ConstValue v -> case [ to | (cmp_v,AL to) <- args, let ConstValue v' = argToExpr tp cmp_v values, v' == v ] of
+          [] -> return (mem,values,Nothing,[(def,Nothing)])
+          [to] -> return (mem,values,Nothing,[(to,Nothing)])
+        v -> return (mem,values,Nothing,[ (to,Just $ valEq mem v (argToExpr tp cmp_v values))
+                                        | (cmp_v,AL to) <- args
+                                        ] ++ [ (def,Nothing) ])
+      IDBinOp op tp lhs rhs -> let lhs' = argToExpr tp lhs values
+                                   rhs' = argToExpr tp rhs values
+                                   apply (ConstValue lhs) (ConstValue rhs) = let lhs' = BitS.toBits lhs :: Integer
+                                                                                 rhs' = BitS.toBits rhs :: Integer
+                                                                                 rop = case op of
+                                                                                   BOXor -> Bits.xor
+                                                                                   BOAdd -> (+)
+                                                                                   BOAnd -> (.&.)
+                                                                                   BOSub -> (-)
+                                                                                   BOShL -> \x y -> shiftL x (fromIntegral y)
+                                                                                   BOOr -> (.|.)
+                                                                                 nvalues = Map.insert lbl (ConstValue (BitS.fromNBits (BitS.length lhs) (rop lhs' rhs'))) values
+                                                                             in return (mem,nvalues,Nothing,[])
+                                   apply lhs rhs = let lhs' = valValue lhs
+                                                       rhs' = valValue rhs
+                                                       rop = case op of 
+                                                         BOXor -> BVXor
+                                                         BOAdd -> BVAdd
+                                                         BOAnd -> BVAnd
+                                                         BOSub -> BVSub
+                                                         BOShL -> BVSHL
+                                                         BOOr -> BVOr
+                                                         _ -> error $ "unsupported operator: "++show op
+                                                       nvalues = Map.insert lbl (DirectValue (rop lhs' rhs')) values
+                                                   in return (mem,nvalues,Nothing,[])
+                               in apply lhs' rhs'
       IDAlloca tp _ _ -> let (ptr,mem') = memAlloc tp mem
                          in return (mem',Map.insert lbl (PointerValue ptr) values,Nothing,[])
       IDLoad tp arg -> let PointerValue ptr = argToExpr (TDPtr tp) arg values
@@ -352,37 +379,60 @@ realizeInstruction fname lbl instr act mem values calls
       IDBitcast (TDPtr tp) (TDPtr tp') arg -> let PointerValue ptr = argToExpr (TDPtr tp') arg values
                                                   nptr = memCast mem tp ptr
                                               in return (mem,Map.insert lbl (PointerValue nptr) values,Nothing,[])
-      IDICmp pred tp lhs rhs -> let lhs' = valValue $ argToExpr tp lhs values
-                                    rhs' = valValue $ argToExpr tp rhs values
-                                    op = case pred of
-                                           IntEQ -> (.==.)
-                                           IntNE -> \x y -> not' $ x .==. y
-                                           IntUGT -> BVUGT
-                                           IntUGE -> BVUGE
-                                           IntULT -> BVULT
-                                           IntULE -> BVULE
-                                           IntSGT -> BVSGT
-                                           IntSGE -> BVSGE
-                                           IntSLT -> BVSLT
-                                           IntSLE -> BVSLE
-                                in return (mem,Map.insert lbl (ConditionValue (op lhs' rhs')) values,Nothing,[])
+      IDICmp pred tp lhs rhs -> let lhs' = argToExpr tp lhs values
+                                    rhs' = argToExpr tp rhs values
+                                    apply (ConstValue lhs) (ConstValue rhs) = let lhs' = BitS.toBits lhs :: Integer
+                                                                                  rhs' = BitS.toBits rhs :: Integer
+                                                                                  op = case pred of
+                                                                                    IntEQ -> (==)
+                                                                                    IntNE -> (/=)
+                                                                                    IntUGT -> (>)
+                                                                                    IntUGE -> (>=)
+                                                                                    IntULT -> (<)
+                                                                                    IntULE -> (<=)
+                                                                                    IntSGT -> (>)
+                                                                                    IntSGE -> (>=)
+                                                                                    IntSLT -> (<)
+                                                                                    IntSLE -> (<=)
+                                                                              in return (mem,Map.insert lbl (ConstCondition (op lhs' rhs')) values,Nothing,[])
+                                    apply lhs rhs = let lhs' = valValue lhs
+                                                        rhs' = valValue rhs
+                                                        op = case pred of
+                                                          IntEQ -> (.==.)
+                                                          IntNE -> \x y -> not' $ x .==. y
+                                                          IntUGT -> BVUGT
+                                                          IntUGE -> BVUGE
+                                                          IntULT -> BVULT
+                                                          IntULE -> BVULE
+                                                          IntSGT -> BVSGT
+                                                          IntSGE -> BVSGE
+                                                          IntSLT -> BVSLT
+                                                          IntSLE -> BVSLE
+                                                    in return (mem,Map.insert lbl (ConditionValue (op lhs' rhs')) values,Nothing,[])
+                                in apply lhs' rhs'
       IDPhi _ _ -> return (mem,values,Nothing,[])
       IDCall _ (AFP fn) args -> do
         (mem',ret) <- calls fn act mem [ argToExpr tp arg values | (arg,tp) <- args ]
         return (mem',case ret of
                    Nothing -> values
                    Just rret -> Map.insert lbl rret values,Nothing,[])
-      IDSelect tp cond ifT ifF -> return (mem,Map.insert lbl (DirectValue $ ite 
-                                                              (valCond (argToExpr (TDInt False 1) cond values)) 
-                                                              (valValue $ argToExpr tp ifT values) 
-                                                              (valValue $ argToExpr tp ifF values)
-                                                             ) values,Nothing,[])
+      IDSelect tp cond ifT ifF -> let res = case argToExpr (TDInt False 1) cond values of
+                                        ConstCondition c -> if c 
+                                                            then argToExpr tp ifT values
+                                                            else argToExpr tp ifF values
+                                        cond' -> DirectValue $ ite 
+                                                 (valCond cond') 
+                                                 (valValue $ argToExpr tp ifT values) 
+                                                 (valValue $ argToExpr tp ifF values)
+                                  in return (mem,Map.insert lbl res values,Nothing,[])
     where
       argToExpr :: TypeDesc -> ArgDesc -> Map String (Val m) -> Val m
       argToExpr _ (AV var) mp = case Map.lookup var mp of
                                   Just val -> val
                                   Nothing -> error $ "Failed to find variable "++show var
-      argToExpr tp (AI i) _ = ConstValue $ BitS.fromNBits (bitWidth tp) i
+      argToExpr tp (AI i) _ = if bitWidth tp == 1
+                              then ConstCondition (i /= 0)
+                              else ConstValue $ BitS.fromNBits (bitWidth tp) i
       argToExpr tp AE mp = ConstValue $ BitS.fromNBits (bitWidth tp) (0::Integer)
       argToExpr tp arg _ = error $ "argToExpr unimplemented for "++show arg
 
