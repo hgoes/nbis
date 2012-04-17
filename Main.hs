@@ -307,10 +307,13 @@ realizeBlock :: (Monad m,MemoryModel mem) => String -> [(String,InstrDesc)]
 realizeBlock fname ((lbl,instr):instrs) act mem values calls debug
     = do
       debug lbl instr
-      (mem',nvalue,ret,jumps) <- realizeInstruction fname lbl instr act mem values calls
+      (nmem,nvalue,ret,jumps) <- realizeInstruction fname lbl instr act mem values calls
       let values' = case nvalue of
             Nothing -> values
             Just res -> Map.insert lbl res values
+          mem' = case nmem of
+            Nothing -> mem
+            Just n -> n
       case ret of
         Just ret' -> return (mem',values',ret,jumps)
         Nothing -> case jumps of
@@ -322,22 +325,22 @@ realizeInstruction :: (Monad m,MemoryModel mem) => String -> String -> InstrDesc
                       -> mem 
                       -> Map String (Val mem) 
                       -> (String -> SMTExpr Bool -> mem -> [Val mem] -> m (mem,Maybe (Val mem)))
-                      -> m (mem,Maybe (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))])
+                      -> m (Maybe mem,Maybe (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))])
 realizeInstruction fname lbl instr act mem values calls
   = {- trace ("Realizing ("++lbl++") "++show instr++"..") $-} case instr of
-      IDRet tp arg -> return (mem,Nothing,Just (Just (argToExpr tp arg values)),[])
-      IDRetVoid -> return (mem,Nothing,Just Nothing,[])
+      IDRet tp arg -> return (Nothing,Nothing,Just (Just (argToExpr tp arg values)),[])
+      IDRetVoid -> return (Nothing,Nothing,Just Nothing,[])
       IDBrCond cond (AL ifT) (AL ifF) -> case argToExpr (TDInt False 1) cond values of
-        ConstCondition cond' -> return (mem,Nothing,Nothing,[(if cond' then ifT else ifF,Nothing)])
-        cond' -> return (mem,Nothing,Nothing,[(ifT,Just $ valCond cond'),(ifF,Nothing)])
-      IDBrUncond (AL to) -> return (mem,Nothing,Nothing,[(to,Nothing)])
+        ConstCondition cond' -> return (Nothing,Nothing,Nothing,[(if cond' then ifT else ifF,Nothing)])
+        cond' -> return (Nothing,Nothing,Nothing,[(ifT,Just $ valCond cond'),(ifF,Nothing)])
+      IDBrUncond (AL to) -> return (Nothing,Nothing,Nothing,[(to,Nothing)])
       IDSwitch tp ((val,AL def):args) -> case argToExpr tp val values of
         ConstValue v -> case [ to | (cmp_v,AL to) <- args, let ConstValue v' = argToExpr tp cmp_v values, v' == v ] of
-          [] -> return (mem,Nothing,Nothing,[(def,Nothing)])
-          [to] -> return (mem,Nothing,Nothing,[(to,Nothing)])
-        v -> return (mem,Nothing,Nothing,[ (to,Just $ valEq mem v (argToExpr tp cmp_v values))
-                                        | (cmp_v,AL to) <- args
-                                        ] ++ [ (def,Nothing) ])
+          [] -> return (Nothing,Nothing,Nothing,[(def,Nothing)])
+          [to] -> return (Nothing,Nothing,Nothing,[(to,Nothing)])
+        v -> return (Nothing,Nothing,Nothing,[ (to,Just $ valEq mem v (argToExpr tp cmp_v values))
+                                             | (cmp_v,AL to) <- args
+                                             ] ++ [ (def,Nothing) ])
       IDBinOp op tp lhs rhs -> let lhs' = argToExpr tp lhs values
                                    rhs' = argToExpr tp rhs values
                                    apply (ConstValue lhs) (ConstValue rhs) = let lhs' = BitS.toBits lhs :: Integer
@@ -350,7 +353,7 @@ realizeInstruction fname lbl instr act mem values calls
                                                                                    BOShL -> \x y -> shiftL x (fromIntegral y)
                                                                                    BOOr -> (.|.)
                                                                                  nvalue = ConstValue (BitS.fromNBits (BitS.length lhs) (rop lhs' rhs'))
-                                                                             in return (mem,Just nvalue,Nothing,[])
+                                                                             in return (Nothing,Just nvalue,Nothing,[])
                                    apply lhs rhs = let lhs' = valValue lhs
                                                        rhs' = valValue rhs
                                                        rop = case op of 
@@ -362,26 +365,26 @@ realizeInstruction fname lbl instr act mem values calls
                                                          BOOr -> BVOr
                                                          _ -> error $ "unsupported operator: "++show op
                                                        nvalue = DirectValue (rop lhs' rhs')
-                                                   in return (mem,Just nvalue,Nothing,[])
+                                                   in return (Nothing,Just nvalue,Nothing,[])
                                in apply lhs' rhs'
       IDAlloca tp _ _ -> let (ptr,mem') = memAlloc tp mem
-                         in return (mem',Just (PointerValue ptr),Nothing,[])
+                         in return (Just mem',Just (PointerValue ptr),Nothing,[])
       IDLoad tp arg -> let PointerValue ptr = argToExpr (TDPtr tp) arg values
-                       in return (mem,Just (DirectValue $ memLoad tp ptr mem),Nothing,[])
+                       in return (Nothing,Just (DirectValue $ memLoad tp ptr mem),Nothing,[])
       IDStore tp val to -> let PointerValue ptr = argToExpr (TDPtr tp) to values
                                val' = valValue $ argToExpr tp val values
-                           in return (memStore tp ptr val' mem,Nothing,Nothing,[])
+                           in return (Just $ memStore tp ptr val' mem,Nothing,Nothing,[])
       IDGetElementPtr tp_to tp_from (arg:args) -> case argToExpr tp_from arg values of
         PointerValue ptr -> let ptr' = memIndex mem tp_from [ fromIntegral i | AI i <- args ] ptr
-                            in return (mem,Just (PointerValue ptr'),Nothing,[])
+                            in return (Nothing,Just (PointerValue ptr'),Nothing,[])
         v -> error $ "First argument to getelementptr must be a pointer, but I found: "++show v++" ("++fname++")\n"++lbl++": "++show instr
       IDZExt tp tp' var -> let v = valValue $ argToExpr tp' var values
                                d = (bitWidth tp') - (bitWidth tp)
                                nv = bvconcat (constantAnn (BitS.fromNBits d (0::Integer) :: BitVector) (fromIntegral d)) v
-                           in return (mem,Just (DirectValue nv),Nothing,[])
+                           in return (Nothing,Just (DirectValue nv),Nothing,[])
       IDBitcast (TDPtr tp) (TDPtr tp') arg -> let PointerValue ptr = argToExpr (TDPtr tp') arg values
                                                   nptr = memCast mem tp ptr
-                                              in return (mem,Just (PointerValue nptr),Nothing,[])
+                                              in return (Nothing,Just (PointerValue nptr),Nothing,[])
       IDICmp pred tp lhs rhs -> let lhs' = argToExpr tp lhs values
                                     rhs' = argToExpr tp rhs values
                                     apply (ConstValue lhs) (ConstValue rhs) = let lhs' = BitS.toBits lhs :: Integer
@@ -397,7 +400,7 @@ realizeInstruction fname lbl instr act mem values calls
                                                                                     IntSGE -> (>=)
                                                                                     IntSLT -> (<)
                                                                                     IntSLE -> (<=)
-                                                                              in return (mem,Just (ConstCondition (op lhs' rhs')),Nothing,[])
+                                                                              in return (Nothing,Just (ConstCondition (op lhs' rhs')),Nothing,[])
                                     apply lhs rhs = let lhs' = valValue lhs
                                                         rhs' = valValue rhs
                                                         op = case pred of
@@ -411,12 +414,12 @@ realizeInstruction fname lbl instr act mem values calls
                                                           IntSGE -> BVSGE
                                                           IntSLT -> BVSLT
                                                           IntSLE -> BVSLE
-                                                    in return (mem,Just (ConditionValue (op lhs' rhs')),Nothing,[])
+                                                    in return (Nothing,Just (ConditionValue (op lhs' rhs')),Nothing,[])
                                 in apply lhs' rhs'
-      IDPhi _ _ -> return (mem,Nothing,Nothing,[])
+      IDPhi _ _ -> return (Nothing,Nothing,Nothing,[])
       IDCall _ (AFP fn) args -> do
         (mem',ret) <- calls fn act mem [ argToExpr tp arg values | (arg,tp) <- args ]
-        return (mem',ret,Nothing,[])
+        return (Just mem',ret,Nothing,[])
       IDSelect tp cond ifT ifF -> let res = case argToExpr (TDInt False 1) cond values of
                                         ConstCondition c -> if c 
                                                             then argToExpr tp ifT values
@@ -425,7 +428,7 @@ realizeInstruction fname lbl instr act mem values calls
                                                  (valCond cond') 
                                                  (valValue $ argToExpr tp ifT values) 
                                                  (valValue $ argToExpr tp ifF values)
-                                  in return (mem,Just res,Nothing,[])
+                                  in return (Nothing,Just res,Nothing,[])
     where
       argToExpr :: TypeDesc -> ArgDesc -> Map String (Val m) -> Val m
       argToExpr _ (AV var) mp = case Map.lookup var mp of
