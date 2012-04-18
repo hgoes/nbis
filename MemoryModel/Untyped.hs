@@ -42,6 +42,7 @@ instance Args UntypedPointer where
 
 instance MemoryModel UntypedMemory where
     type Pointer UntypedMemory = UntypedPointer
+    memNew tps = argVarsAnn tps
     memInit mem = (memoryNextFree mem) .==. (constant 0)
     memAlloc tp mem = let w = typeWidth' tp
                       in (UntypedPointer $ memoryNextFree mem,mem { memoryNextFree = (memoryNextFree mem) + (constant $ fromIntegral w) })
@@ -83,7 +84,7 @@ instance MemoryModel UntypedMemory where
                                                                                                else p + constant i) val)
                                                                  (memoryBlocks mem) [0..(fromIntegral $ len - 1)]
                                                 }
-    memPtrSwitch _ choices = UntypedPointer (mkSwitch choices)
+    memPtrSwitch _ choices = return $ UntypedPointer (mkSwitch choices)
       where
         mkSwitch [(UntypedPointer ptr,_)] = ptr
         mkSwitch ((UntypedPointer ptr,cond):rest) = ite cond ptr (mkSwitch rest)
@@ -94,3 +95,15 @@ instance MemoryModel UntypedMemory where
                  res <- mapM (\i -> getValue' 8 (select (memoryBlocks mem) (constant (fromIntegral i)))) [0..(nxt-1)]
                  return $ unwords [ ((if r' < 16 then showChar '0' else id) . showHex r') "" | r <- res, let r' = BitS.toBits r :: Word8 ])
         else return "[]"
+    memSwitch [(mem,_)] = return mem
+    memSwitch conds = do
+      nblocks <- varAnn ((),8)
+      nfree <- var
+      let (blocks,free) = mkSwitch conds
+      assert $ nblocks .==. blocks
+      assert $ nfree .==. free
+      return $ UntypedMemory nblocks nfree
+      where
+        mkSwitch [(mem,_)] = (memoryBlocks mem,memoryNextFree mem)
+        mkSwitch ((UntypedMemory mem free,cond):rest) = let (mem',free') = mkSwitch rest
+                                                        in (ite cond mem mem',ite cond free free')

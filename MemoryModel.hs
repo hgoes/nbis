@@ -7,13 +7,15 @@ import Data.Bitstream (Bitstream,Left,Right)
 import qualified Data.Bitstream as BitS
 import Data.Typeable
 import Data.Unit
-import Data.List (genericSplitAt)
+import Data.List (genericSplitAt,genericReplicate)
 
 type BitVector = Bitstream Right
 
-class (Typeable m,Eq (Pointer m),Args m,Args (Pointer m)) => MemoryModel m where
+class (Typeable m,Eq (Pointer m)) => MemoryModel m where
     type Pointer m
+    memNew :: [TypeDesc] -> SMT m
     memInit :: m -> SMTExpr Bool
+    memPtrNew :: m -> TypeDesc -> SMT (Pointer m)
     memAlloc :: TypeDesc -> m -> (Pointer m,m)
     memLoad :: TypeDesc -> Pointer m -> m -> SMTExpr BitVector
     memStore :: TypeDesc -> Pointer m -> SMTExpr BitVector -> m -> m
@@ -21,10 +23,11 @@ class (Typeable m,Eq (Pointer m),Args m,Args (Pointer m)) => MemoryModel m where
     memCast :: m -> TypeDesc -> Pointer m -> Pointer m
     memEq :: m -> m -> SMTExpr Bool
     memPtrEq :: m -> Pointer m -> Pointer m -> SMTExpr Bool
-    memPtrSwitch :: m -> [(Pointer m,SMTExpr Bool)] -> Pointer m
+    memPtrSwitch :: m -> [(Pointer m,SMTExpr Bool)] -> SMT (Pointer m)
     memCopy :: Integer -> Pointer m -> Pointer m -> m -> m
     memSet :: Integer -> SMTExpr BitVector -> Pointer m -> m -> m
     memDump :: m -> SMT String
+    memSwitch :: [(m,SMTExpr Bool)] -> SMT m
 
 typeWidth :: TypeDesc -> Integer
 typeWidth (TDInt _ w)
@@ -48,3 +51,9 @@ getOffset width tp idx = getOffset' tp idx 0
       getOffset' (TDStruct tps _) (i:is) off = let (pre,tp:_) = genericSplitAt i tps
                                                in getOffset' tp is (off + sum (fmap width pre))
       getOffset' (TDArray _ tp) (i:is) off = getOffset' tp is (off + i*(width tp))
+
+flattenType :: TypeDesc -> [TypeDesc]
+flattenType (TDStruct tps _) = concat $ fmap flattenType tps
+flattenType (TDArray n tp) = concat $ genericReplicate n (flattenType tp)
+flattenType (TDVector n tp) = concat $ genericReplicate n (flattenType tp)
+flattenType tp = [tp]

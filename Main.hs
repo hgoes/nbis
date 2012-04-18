@@ -71,10 +71,12 @@ valEq mem (ConstCondition x) (ConstCondition y) = constant (x == y)
 valEq mem (ConstCondition x) (ConditionValue y) = if x then y else not' y
 valEq mem (ConditionValue x) (ConstCondition y) = if y then x else not' x
 
-valSwitch :: MemoryModel m => m -> TypeDesc -> [(Val m,SMTExpr Bool)] -> Val m
-valSwitch mem _ [(val,_)] = val
-valSwitch mem (TDPtr _) choices = PointerValue (memPtrSwitch mem [ (ptr,cond) | (PointerValue ptr,cond) <- choices ])
-valSwitch mem tp choices = DirectValue $ mkSwitch choices
+valSwitch :: MemoryModel m => m -> TypeDesc -> [(Val m,SMTExpr Bool)] -> SMT (Val m)
+valSwitch mem _ [(val,_)] = return val
+valSwitch mem (TDPtr _) choices = do
+  res <- memPtrSwitch mem [ (ptr,cond) | (PointerValue ptr,cond) <- choices ]
+  return $ PointerValue res
+valSwitch mem tp choices = return $ DirectValue $ mkSwitch choices
   where
     mkSwitch [(val,cond)] = valValue val
     mkSwitch ((val,cond):rest) = ite cond (valValue val) (mkSwitch rest)
@@ -93,17 +95,19 @@ valValue (DirectValue x) = x
 valValue (ConditionValue x) = ite x (constantAnn (BitS.pack [True]) 1) (constantAnn (BitS.pack [False]) 1)
 valValue (ConstCondition x) = constantAnn (BitS.pack [x]) 1
 
-instance (MemoryModel m,ArgAnnotation (Pointer m) ~ TypeDesc) => Args (Val m) where
-    type ArgAnnotation (Val m) = TypeDesc
-    foldExprs f s val (TDPtr tp) = let (s',nv) = foldExprs f s (asPointer val) tp
-                                   in (s',PointerValue nv)
-    foldExprs f s val tp = let (s',nv) = f s (asValue val) (fromIntegral $ bitWidth tp)
-                           in (s',DirectValue nv)
+newValue :: MemoryModel mem => mem -> TypeDesc -> SMT (Val mem)
+newValue mem (TDPtr tp) = do
+  ptr <- memPtrNew mem tp
+  return (PointerValue ptr)
+newValue _ tp = do
+  v <- varAnn (fromIntegral $ bitWidth tp)
+  return (DirectValue v)
 
 data RealizedBlock m = RealizedBlock { rblockActivation :: SMTExpr Bool
                                      , rblockMemoryOut  :: m
                                      , rblockOutput     :: Map String (Val m)
                                      , rblockJumps      :: [(String,Maybe (SMTExpr Bool))]
+                                     , rblockReturns    :: Maybe (Maybe (Val m))
                                      }
 
 getCondition :: String -> [(String,Maybe (SMTExpr Bool))] -> SMTExpr Bool
@@ -118,7 +122,7 @@ getCondition name = getCondition' []
         Just rcond -> getCondition' (rcond:conds) rest
     getCondition' conds [] = constant True
 
-translateProgram :: (MemoryModel mem,ArgAnnotation (Pointer mem) ~ TypeDesc,ArgAnnotation mem ~ [TypeDesc]) 
+translateProgram :: (MemoryModel mem) 
                     => Map String ([(String,TypeDesc)],TypeDesc,[(String,[(String,InstrDesc)])]) -> String -> Integer -> SMT (mem,mem)
 translateProgram program entry_point limit = do
   let alltps = foldl (\tps (args,rtp,blocks) 
@@ -133,12 +137,12 @@ translateProgram program entry_point limit = do
                        argVarsAnn tp) args-}
   (arg_vals,mem_in) <- prepareEnvironment alltps args
   comment " Output memory"
-  mem_out <- argVarsAnn alltps
+  mem_out <- memNew alltps
   (mem_out',ret) <- translateFunction alltps program entry_point args rtp blks limit (constant True) mem_in arg_vals
   assert $ memEq mem_out mem_out'
   return (mem_in,mem_out)
 
-translateFunction :: (MemoryModel m,ArgAnnotation m ~ [TypeDesc],ArgAnnotation (Pointer m) ~ TypeDesc)
+translateFunction :: (MemoryModel m)
                      => [TypeDesc]
                      -> Map String ([(String,TypeDesc)],TypeDesc,[(String,[(String,InstrDesc)])])
                      -> String
@@ -151,27 +155,32 @@ translateFunction :: (MemoryModel m,ArgAnnotation m ~ [TypeDesc],ArgAnnotation (
                      -> SMT (m,Maybe (Val m))
 translateFunction allTps program fname argTps tp blocks limit act mem_in args
   = do
-    ret <- case tp of
-      TDVoid -> return Nothing
-      _ -> fmap Just (argVarsAnn tp)
     let blockMp = mkVarBlockMap (fmap fst argTps) blocks
         blockSigs = mkBlockSigs blockMp blocks
         ordMp = Map.fromList (zipWith (\(name,instrs) n -> (name,(instrs,n))) (("",[]):blocks) [0..])
         infoMp = Map.intersectionWith (\(instrs,n) sig -> (instrs,n,sig)) ordMp blockSigs
         inps = zipWith (\(name,_) arg -> (name,arg)) argTps args
-    --liftIO $ print blockMp
-    --liftIO $ print blockSigs
-    rmem <- argVarsAnn allTps
-    bfs allTps infoMp ret rmem (Map.singleton ("",0) (RealizedBlock { rblockActivation = act
-                                                                    , rblockMemoryOut = mem_in
-                                                                    , rblockOutput = Map.fromList inps
-                                                                    , rblockJumps = [(fst $ head blocks,Nothing)] }))
+    bfs allTps infoMp (Map.singleton ("",0) (RealizedBlock { rblockActivation = act
+                                                           , rblockMemoryOut = mem_in
+                                                           , rblockOutput = Map.fromList inps
+                                                           , rblockJumps = [(fst $ head blocks,Nothing)] 
+                                                           , rblockReturns = Nothing }))
       [(fst $ head blocks,0,1)]
-    return (rmem,ret)
   where
-    bfs _ _ _ _ _ [] = return ()
-    bfs tps info ret rmem done (nxt@(name,lvl,_):rest)
-      | Map.member (name,lvl) done = bfs tps info ret rmem done rest
+    bfs _ _ done [] = do
+      rmem <- memSwitch [ (mem,act) | RealizedBlock { rblockReturns = Just _ 
+                                                    , rblockMemoryOut = mem 
+                                                    , rblockActivation = act } <- Map.elems done ]
+      ret <- case tp of
+        TDVoid -> return Nothing
+        _ -> do
+          ret' <- valSwitch rmem tp [ (val,act) | RealizedBlock { rblockReturns = Just (Just val)
+                                                                , rblockActivation = act
+                                                                } <- Map.elems done ]
+          return $ Just ret'
+      return (rmem,ret)
+    bfs tps info done (nxt@(name,lvl,_):rest)
+      | Map.member (name,lvl) done = bfs tps info done rest
       | otherwise = do
         comment $ " Block "++fname++" -> "++name++" ("++show lvl++")"
         nblk <- trans tps done (\f -> case intrinsics f of
@@ -181,45 +190,58 @@ translateFunction allTps program fname argTps tp blocks limit act mem_in args
                                        [] -> error $ "Function "++f++" has no implementation"
                                        _ -> translateFunction allTps program f args rtp blocks (limit-lvl-1)
                                    Just intr -> const intr
-                               ) fname ret rmem info (name,lvl)
+                               ) fname info (name,lvl)
         let (_,lvl_cur,_) = case Map.lookup name info of
               Nothing -> error $ "Internal error: Failed to find block signature for "++name
               Just x -> x
             trgs = [ (trg,lvl',lvl_trg) | (trg,_) <- rblockJumps nblk, let (_,lvl_trg,_) = info!trg,let lvl' = if lvl_cur < lvl_trg then lvl else lvl+1,lvl' < limit ]
-        bfs tps info ret rmem (Map.insert (name,lvl) nblk done) (foldl insert' rest trgs)
+        bfs tps info (Map.insert (name,lvl) nblk done) (foldl insert' rest trgs)
     
     insert' [] it = [it]
     insert' all@((cname,clvl,cord):rest) (name,lvl,ord)
       | clvl > lvl || (clvl==lvl && cord > ord) = (name,lvl,ord):all
       | otherwise = (cname,clvl,cord):(insert' rest (name,lvl,ord))
                          
-trans :: (MemoryModel m,ArgAnnotation m ~ [TypeDesc],ArgAnnotation (Pointer m) ~ TypeDesc) 
+trans :: (MemoryModel m) 
          => [TypeDesc] -> Map (String,Integer) (RealizedBlock m) 
          -> (String -> SMTExpr Bool -> m -> [Val m] -> SMT (m,Maybe (Val m)))
          -> String
-         -> Maybe (Val m) 
-         -> m
          -> Map String ([(String,InstrDesc)],Integer,BlockSig)
          -> (String,Integer) 
          -> SMT (RealizedBlock m)
-trans tps acts calls fname ret rmem blocks (name,lvl) = do
+trans tps acts calls fname blocks (name,lvl) = do
     let (instrs,ord,sig) = blocks!name
     act <- var
-    mem <- argVarsAnn tps
-    mapM_ (\from -> do 
-              let (_,ord_from,sig_from) = blocks!from
-                  lvl_from = if ord_from < ord
-                             then lvl
-                             else lvl-1
-              if lvl_from < 0
-                then return ()
-                else (case Map.lookup (from,lvl_from) acts of
-                         Nothing -> return ()
-                         Just realized -> do
-                           let cond = getCondition name (rblockJumps realized)
-                           assert $ and' [rblockActivation realized,cond] .=>. and' [act
-                                                                                    ,memEq mem (rblockMemoryOut realized)])
-          ) (Set.toList (blockOrigins sig))
+    mem <- case Set.toList (blockOrigins sig) of
+      [from] -> let (_,ord_from,sig_from) = blocks!from
+                    lvl_from = if ord_from < ord
+                               then lvl
+                               else lvl-1
+                in if lvl_from < 0
+                   then memNew tps
+                   else (case Map.lookup (from,lvl_from) acts of
+                            Nothing -> memNew tps
+                            Just realized -> do
+                              let cond = getCondition name (rblockJumps realized)
+                              assert $ and' [rblockActivation realized,cond] .=>. act
+                              return $ rblockMemoryOut realized)
+      froms -> do
+        mem <- memNew tps
+        mapM_ (\from -> do 
+                  let (_,ord_from,sig_from) = blocks!from
+                      lvl_from = if ord_from < ord
+                                 then lvl
+                                 else lvl-1
+                  if lvl_from < 0
+                    then return ()
+                    else (case Map.lookup (from,lvl_from) acts of
+                             Nothing -> return ()
+                             Just realized -> do
+                               let cond = getCondition name (rblockJumps realized)
+                               assert $ and' [rblockActivation realized,cond] .=>. and' [act
+                                                                                        ,memEq mem (rblockMemoryOut realized)])
+              ) froms
+        return mem
     inps <- mapM (\(from,tp) -> case from of
                         [(blk,Left (blk',var))] -> case Map.lookup (blk',lvl) acts of
                           Nothing -> return $ (rblockOutput (acts!(blk',0)))!var
@@ -238,19 +260,16 @@ trans tps acts calls fname ret rmem blocks (name,lvl) = do
                                                                                                            Right bv -> DirectValue (constantAnn bv (fromIntegral $ bitWidth tp)),
                                                                                                         and' [act,rblockActivation realized_from]))
                                                  ) from
-                          return $ valSwitch mem tp choices
+                          valSwitch mem tp choices
                  ) (blockInputs sig)
-    (nmem,outps,ret',jumps) <- realizeBlock fname instrs act mem inps calls (\lbl instr -> comment $ " "++lbl++": "++show instr)
-    case ret' of
-      Just (Just rret') -> let Just rret = ret in do
-        assert $ act .=>. valEq mem rret rret'
-        assert $ act .=>. memEq rmem nmem
-      Just Nothing -> assert $ act .=>. memEq rmem nmem
-      _ -> return ()
+    (nmem,outps,ret',jumps) <- realizeBlock fname instrs act mem False inps calls (\lbl instr -> comment $ " "++lbl++": "++show instr)
     return $ RealizedBlock { rblockActivation = act
-                           , rblockMemoryOut = nmem
+                           , rblockMemoryOut = case nmem of
+                             Nothing -> mem
+                             Just nmem' -> nmem'
                            , rblockOutput = outps
-                           , rblockJumps = jumps }
+                           , rblockJumps = jumps 
+                           , rblockReturns = ret' }
         
 recursiveBlocks :: Map String (BlockSig,Integer) -> Set String
 recursiveBlocks mp = snd $ traceRecursive Set.empty Set.empty ""
@@ -300,25 +319,26 @@ emptyBlockSig = BlockSig { blockInputs = Map.empty
 realizeBlock :: (Monad m,MemoryModel mem) => String -> [(String,InstrDesc)] 
                 -> SMTExpr Bool
                 -> mem
+                -> Bool
                 -> Map String (Val mem) 
                 -> (String -> SMTExpr Bool -> mem -> [Val mem] -> m (mem,Maybe (Val mem)))
                 -> (String -> InstrDesc -> m ())
-                -> m (mem,Map String (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))])
-realizeBlock fname ((lbl,instr):instrs) act mem values calls debug
+                -> m (Maybe mem,Map String (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))])
+realizeBlock fname ((lbl,instr):instrs) act mem changed values calls debug
     = do
       debug lbl instr
       (nmem,nvalue,ret,jumps) <- realizeInstruction fname lbl instr act mem values calls
       let values' = case nvalue of
             Nothing -> values
             Just res -> Map.insert lbl res values
-          mem' = case nmem of
-            Nothing -> mem
-            Just n -> n
+          (mem',changed') = case nmem of
+            Nothing -> (mem,changed)
+            Just n -> (n,True)
       case ret of
-        Just ret' -> return (mem',values',ret,jumps)
+        Just ret' -> return (if changed then Just mem' else Nothing,values',ret,jumps)
         Nothing -> case jumps of
-          _:_ -> return (mem',values',ret,jumps)
-          [] -> realizeBlock fname instrs act mem' values' calls debug
+          _:_ -> return (if changed then Just mem' else Nothing,values',ret,jumps)
+          [] -> realizeBlock fname instrs act mem' changed' values' calls debug
 
 realizeInstruction :: (Monad m,MemoryModel mem) => String -> String -> InstrDesc 
                       -> SMTExpr Bool
@@ -637,20 +657,13 @@ main = do
   withSMTSolver (case solver opts of
                     Nothing -> "~/debug-smt.sh output-" ++ (entryPoint opts) ++ ".smt"
                     Just bin -> bin) $ do
+    setOption (PrintSuccess False)
     setOption (ProduceModels True)
     setLogic "QF_ABV"
     (case memoryModel opts of
         TypedModel -> do
           perform program (entryPoint opts) (bmcDepth opts) :: SMT TypedMemory
           return ()
-          {-
-          (mem_in,mem_out) <- translateProgram program (entryPoint opts) (bmcDepth opts) :: SMT (TypedMemory,TypedMemory)
-          checkSat
-          dump_in <- memDump mem_in
-          dump_out <- memDump mem_out
-          liftIO $ putStrLn dump_in
-          liftIO $ putStrLn dump_out
-          return ()-}
         UntypedModel -> do
           perform program (entryPoint opts) (bmcDepth opts) :: SMT UntypedMemory
           return ()
@@ -659,7 +672,7 @@ main = do
           return ()
       )
   where
-    perform :: (MemoryModel mem,ArgAnnotation mem ~ [TypeDesc],ArgAnnotation (Pointer mem) ~ TypeDesc) 
+    perform :: (MemoryModel mem)
                => Map String ([(String,TypeDesc)],TypeDesc,[(String,[(String,InstrDesc)])]) -> String -> Integer -> SMT mem
     perform program entry depth = do
       (mem_in,mem_out) <- translateProgram program entry depth
@@ -670,16 +683,16 @@ main = do
       liftIO $ putStrLn dump_out
       return mem_in
 
-prepareEnvironment :: (MemoryModel mem,ArgAnnotation mem ~ [TypeDesc],ArgAnnotation (Pointer mem) ~ TypeDesc)
+prepareEnvironment :: (MemoryModel mem)
                       => [TypeDesc] -> [(String,TypeDesc)] -> SMT ([Val mem],mem)
 prepareEnvironment alltp args = do
-  imem <- argVarsAnn alltp
+  imem <- memNew alltp
   assert $ memInit imem
   foldrM (\(name,tp) (args,mem) -> case tp of
              TDPtr tp -> do
                let (ptr,mem') = memAlloc tp mem
                return ((PointerValue ptr):args,mem')
              tp -> do
-               var <- argVarsAnn tp
+               var <- newValue mem tp
                return (var:args,mem)
          ) ([],imem) args

@@ -7,7 +7,7 @@ import Language.SMTLib2.Internals
 import LLVM.Core (TypeDesc(..))
 import Data.Word
 import Data.Typeable
-import Data.List (genericReplicate,mapAccumL)
+import Data.List (genericReplicate,mapAccumL,nub)
 import Data.Map as Map hiding (foldl)
 import qualified Data.Bitstream as BitS
 import Data.Bits
@@ -25,13 +25,7 @@ typeWidth' :: TypeDesc -> Integer
 typeWidth' (TDPtr _) = 8
 typeWidth' tp = typeWidth tp
 
-flattenType :: TypeDesc -> [TypeDesc]
-flattenType (TDStruct tps _) = concat $ fmap flattenType tps
-flattenType (TDArray n tp) = concat $ genericReplicate n (flattenType tp)
-flattenType (TDVector n tp) = concat $ genericReplicate n (flattenType tp)
-flattenType tp = [tp]
-
-instance Args TypedMemory where
+{-instance Args TypedMemory where
     type ArgAnnotation TypedMemory = [TypeDesc]
     foldExprs f s mem tps
         = let (mp,ns) = foldl (\(mp,cs) tp -> if Map.member tp mp
@@ -43,7 +37,7 @@ instance Args TypedMemory where
                                                                                   ) (c1,old_arrs) (flattenType tp)
                                                     in (Map.insert tp (nxt,arrs) mp,c2))
                               ) (Map.empty,s) tps
-          in (ns,TypedMemory mp)
+          in (ns,TypedMemory mp)-}
 
 data TypedPointer' = TypedPointer' { pointerType :: TypeDesc
                                    , pointerLocation :: SMTExpr PtrT
@@ -52,7 +46,7 @@ data TypedPointer' = TypedPointer' { pointerType :: TypeDesc
 
 newtype TypedPointer = TypedPointer { ptrChoices :: [(TypedPointer',SMTExpr Bool)] } deriving (Eq,Typeable)
 
-instance Args TypedPointer where
+{-instance Args TypedPointer where
   type ArgAnnotation TypedPointer = TypeDesc
   foldExprs f s ptrs tp = let (s1,nptr) = foldExprs f s (fst $ head $ ptrChoices ptrs) tp
                               (s2,ncond) = f s (snd $ head $ ptrChoices ptrs) ()
@@ -61,10 +55,19 @@ instance Args TypedPointer where
 instance Args TypedPointer' where
     type ArgAnnotation TypedPointer' = TypeDesc
     foldExprs f s ptr tp = let (s',loc) = f s (pointerLocation ptr) ()
-                           in (s',TypedPointer' tp loc 0)
+                           in (s',TypedPointer' tp loc 0) -}
 
 instance MemoryModel TypedMemory where
   type Pointer TypedMemory = TypedPointer
+  memNew tps = do
+    entrs <- mapM (\tp -> do
+                      ptr <- var
+                      arrs <- mapM (\tp' -> varAnn ((),fromIntegral $ bitWidth tp')) (flattenType tp)
+                      return (tp,(ptr,arrs))) (nub tps)
+    return $ TypedMemory (Map.fromList entrs)
+  memPtrNew _ tp = do
+    loc <- var
+    return $ TypedPointer [(TypedPointer' tp loc 0,constant True)]
   memInit mem = and' [ nxt .==. 0 | (nxt,_) <- Map.elems (memoryBanks mem) ]
   memAlloc tp mem = let (nxt,arrs) = (memoryBanks mem)!tp
                     in (TypedPointer [(TypedPointer' tp nxt 0,constant True)],TypedMemory $ Map.insert tp (nxt + 1,arrs) (memoryBanks mem))
@@ -93,8 +96,7 @@ instance MemoryModel TypedMemory where
   memIndex _ tp idx (TypedPointer ptrs) = TypedPointer $ fmap (\(ptr,cond) -> (ptr { pointerOffset = (pointerOffset ptr) + (getOffset bitWidth' tp idx) },cond)) ptrs
   memCast _ tp ptr = ptr
   memEq mem1 mem2 = and' $ Map.elems $ Map.intersectionWith (\(nxt1,bank1) (nxt2,bank2) -> and' ((nxt1 .==. nxt2):(zipWith (.==.) bank1 bank2))) (memoryBanks mem1) (memoryBanks mem2)
-  {-
-  memPtrEq _ p1 p2
+  {-memPtrEq _ p1 p2
     | pointerType p1 /= pointerType p2     = constant False
     | pointerOffset p1 /= pointerOffset p2 = constant False
     | otherwise = (pointerLocation p1) .==. (pointerLocation p2) -}
@@ -118,10 +120,29 @@ instance MemoryModel TypedMemory where
                         return (("  obj "++show i):(fmap ("    "++) (renderMemObject tp vs)))) [0..(fromIntegral $ rnxt-1 :: PtrT)]
               else return []
       return (unlines $ show tp:concat objs)) (Map.toList $ memoryBanks mem) >>= return.unlines
-  memPtrSwitch _ conds = TypedPointer $ concat [ case ptrs of
-                                                    [(ptr,_)] -> [(ptr,cond)] 
-                                                    _ -> [ (ptr,and' [cond,cond']) | (ptr,cond') <- ptrs ] 
-                                               | (TypedPointer ptrs,cond) <- conds ]
+  memPtrSwitch _ conds = do
+    res <- mapM (\(TypedPointer ptrs,cond) -> do
+                    ncond <- var
+                    assert $ ncond .==. cond
+                    case ptrs of
+                      [(ptr,_)] -> return [(ptr,ncond)]
+                      _ -> return [(ptr,and' [ncond,cond']) | (ptr,cond') <- ptrs ]) conds
+    return $ TypedPointer $ concat res
+  memSwitch [(mem,_)] = return mem
+  memSwitch conds = do
+    rmp <- mapM (\(tp,(ptr,arr)) -> do
+                    nptr <- var
+                    narr <- mapM (\tp' -> varAnn ((),fromIntegral $ bitWidth tp')) (flattenType tp)
+                    assert $ nptr .==. ptr
+                    mapM_ (\(nel,el) -> assert $ nel .==. el) (zip narr arr)
+                    return (tp,(nptr,narr))
+                ) (Map.toAscList $ mkSwitch conds)
+    return $ TypedMemory $ Map.fromAscList rmp
+    where
+      mkSwitch :: [(TypedMemory,SMTExpr Bool)] -> Map TypeDesc (SMTExpr PtrT,[SMTExpr (SMTArray (SMTExpr PtrT) BitVector)])
+      mkSwitch [(TypedMemory mem,cond)] = mem
+      mkSwitch ((TypedMemory mem',cond'):rest)
+        = Map.unionWith (\(ptr1,banks1) (ptr2,banks2) -> (ite cond' ptr1 ptr2,zipWith (ite cond') banks1 banks2)) mem' (mkSwitch rest)
 
 renderMemObject :: TypeDesc -> [BitVector] -> [String]
 renderMemObject tp bvs = snd $ renderMemObject' bvs tp

@@ -41,6 +41,7 @@ instance Args UntypedPointer where
 
 instance MemoryModel UntypedBlockMemory where
     type Pointer UntypedBlockMemory = UntypedPointer
+    memNew = argVarsAnn
     memInit mem = (memoryNextFree mem) .==. (constant 0)
     memAlloc tp mem = (UntypedPointer { pointerBlock = (memoryNextFree mem)
                                       , pointerOffset = 0 }
@@ -68,13 +69,14 @@ instance MemoryModel UntypedBlockMemory where
     memEq mem1 mem2 = and' [ memoryBlocks mem1 .==. memoryBlocks mem2
                            , memoryBlockSizes mem1 .==. memoryBlockSizes mem2
                            , memoryNextFree mem1 .==. memoryNextFree mem2 ]
-    memPtrEq _ p1 p2 = and' [pointerBlock p1 .==. pointerBlock p2
-                            ,pointerOffset p1 .==. pointerOffset p2]
-    memPtrSwitch mem [(ptr,_)] = ptr
-    memPtrSwitch mem ((ptr,cond):rest) = let ptr' = memPtrSwitch mem rest
-                                         in UntypedPointer { pointerBlock = ite cond (pointerBlock ptr) (pointerBlock ptr')
-                                                           , pointerOffset = ite cond (pointerOffset ptr) (pointerOffset ptr')
-                                                           }
+    {-memPtrEq _ p1 p2 = and' [pointerBlock p1 .==. pointerBlock p2
+                            ,pointerOffset p1 .==. pointerOffset p2]-}
+    memPtrSwitch mem [(ptr,_)] = return ptr
+    memPtrSwitch mem ((ptr,cond):rest) = do
+      ptr' <- memPtrSwitch mem rest
+      return UntypedPointer { pointerBlock = ite cond (pointerBlock ptr) (pointerBlock ptr')
+                            , pointerOffset = ite cond (pointerOffset ptr) (pointerOffset ptr')
+                            }
     memSet len val ptr mem = foldl (\cmem i -> cmem { memoryBlocks = store (memoryBlocks cmem) (pointerBlock ptr,if i==0
                                                                                                                  then pointerOffset ptr
                                                                                                                  else (pointerOffset ptr) + (constant $ fromIntegral i)) val
@@ -99,3 +101,19 @@ instance MemoryModel UntypedBlockMemory where
                             ) [0..(blksz-1)] >>= return.unwords
                    ) [0..(nxt-1)] >>= return.unlines
         else return ""
+    memSwitch [(mem,cond)] = return mem
+    memSwitch conds = do
+      nblocks <- varAnn (((),()),8)
+      nsizes <- var
+      nfree <- var
+      let (blocks,sizes,free) = mkSwitch conds
+      assert $ nblocks .==. blocks
+      assert $ nsizes .==. sizes
+      assert $ nfree .==. free
+      return $ UntypedBlockMemory nblocks nsizes nfree
+      where
+        mkSwitch [(mem,_)] = (memoryBlocks mem,memoryBlockSizes mem,memoryNextFree mem)
+        mkSwitch ((mem,cond):rest) = let (blocks,sizes,free) = mkSwitch rest
+                                     in (ite cond (memoryBlocks mem) blocks
+                                        ,ite cond (memoryBlockSizes mem) sizes
+                                        ,ite cond (memoryNextFree mem) free)
