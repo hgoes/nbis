@@ -23,7 +23,7 @@ import Data.Traversable
 import System.Console.GetOpt
 import System.Exit
 import Control.Monad (when)
-import Data.Maybe (mapMaybe)
+import Data.Maybe (mapMaybe,maybeToList)
 import Data.Bits as Bits
 
 (!) :: (Show k,Ord k) => Map k a -> k -> a
@@ -137,9 +137,7 @@ translateProgram program entry_point limit = do
                        argVarsAnn tp) args-}
   (arg_vals,mem_in) <- prepareEnvironment alltps args
   comment " Output memory"
-  mem_out <- memNew alltps
-  (mem_out',ret) <- translateFunction alltps program entry_point args rtp blks limit (constant True) mem_in arg_vals
-  assert $ memEq mem_out mem_out'
+  (mem_out,ret) <- translateFunction alltps program entry_point args rtp blks limit (constant True) mem_in arg_vals
   return (mem_in,mem_out)
 
 translateFunction :: (MemoryModel m)
@@ -211,37 +209,22 @@ trans :: (MemoryModel m)
          -> SMT (RealizedBlock m)
 trans tps acts calls fname blocks (name,lvl) = do
     let (instrs,ord,sig) = blocks!name
-    act <- var
-    mem <- case Set.toList (blockOrigins sig) of
-      [from] -> let (_,ord_from,sig_from) = blocks!from
-                    lvl_from = if ord_from < ord
-                               then lvl
-                               else lvl-1
-                in if lvl_from < 0
-                   then memNew tps
-                   else (case Map.lookup (from,lvl_from) acts of
-                            Nothing -> memNew tps
-                            Just realized -> do
-                              let cond = getCondition name (rblockJumps realized)
-                              assert $ and' [rblockActivation realized,cond] .=>. act
-                              return $ rblockMemoryOut realized)
-      froms -> do
-        mem <- memNew tps
-        mapM_ (\from -> do 
-                  let (_,ord_from,sig_from) = blocks!from
-                      lvl_from = if ord_from < ord
+        froms = [ (rblockActivation realized,rblockMemoryOut realized,getCondition name (rblockJumps realized))
+                | from <- Set.toList (blockOrigins sig), 
+                  let (_,ord_from,sig_from) = blocks!from,
+                  let lvl_from = if ord_from < ord
                                  then lvl
-                                 else lvl-1
-                  if lvl_from < 0
-                    then return ()
-                    else (case Map.lookup (from,lvl_from) acts of
-                             Nothing -> return ()
-                             Just realized -> do
-                               let cond = getCondition name (rblockJumps realized)
-                               assert $ and' [rblockActivation realized,cond] .=>. and' [act
-                                                                                        ,memEq mem (rblockMemoryOut realized)])
-              ) froms
-        return mem
+                                 else lvl-1,
+                  lvl_from >= 0, 
+                  realized <- maybeToList (Map.lookup (from,lvl_from) acts) ]
+    act <- var
+    mapM (\(act',_,cond) -> assert $ and' [act',cond] .=>. act) froms
+    mem <- case froms of
+             [] -> do
+               mem <- memNew tps
+               assert $ memInit mem
+               return mem
+             conds -> memSwitch [ (mem,and' [act,act'])  | (act',mem,_) <- conds ]
     inps <- mapM (\(from,tp) -> case from of
                         [(blk,Left (blk',var))] -> case Map.lookup (blk',lvl) acts of
                           Nothing -> return $ (rblockOutput (acts!(blk',0)))!var
