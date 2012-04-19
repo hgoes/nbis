@@ -106,21 +106,9 @@ newValue _ tp = do
 data RealizedBlock m = RealizedBlock { rblockActivation :: SMTExpr Bool
                                      , rblockMemoryOut  :: m
                                      , rblockOutput     :: Map String (Val m)
-                                     , rblockJumps      :: [(String,Maybe (SMTExpr Bool))]
+                                     , rblockJumps      :: Map String (SMTExpr Bool)
                                      , rblockReturns    :: Maybe (Maybe (Val m))
                                      }
-
-getCondition :: String -> [(String,Maybe (SMTExpr Bool))] -> SMTExpr Bool
-getCondition name = getCondition' []
-  where
-    getCondition' conds ((to,cond):rest)
-      | to==name = case cond of
-        Just rcond -> rcond
-        Nothing -> and' $ fmap not' conds
-      | otherwise = case cond of
-        Nothing -> getCondition' conds rest
-        Just rcond -> getCondition' (rcond:conds) rest
-    getCondition' conds [] = constant True
 
 translateProgram :: (MemoryModel mem) 
                     => Map String ([(String,TypeDesc)],TypeDesc,[(String,[(String,InstrDesc)])]) -> String -> Integer -> SMT (mem,mem)
@@ -161,7 +149,7 @@ translateFunction allTps program fname argTps tp blocks limit act mem_in args
     bfs allTps infoMp (Map.singleton ("",0) (RealizedBlock { rblockActivation = act
                                                            , rblockMemoryOut = mem_in
                                                            , rblockOutput = Map.fromList inps
-                                                           , rblockJumps = [(fst $ head blocks,Nothing)] 
+                                                           , rblockJumps = Map.singleton (fst $ head blocks) (constant True)
                                                            , rblockReturns = Nothing }))
       [(fst $ head blocks,0,1)]
   where
@@ -192,7 +180,9 @@ translateFunction allTps program fname argTps tp blocks limit act mem_in args
         let (_,lvl_cur,_) = case Map.lookup name info of
               Nothing -> error $ "Internal error: Failed to find block signature for "++name
               Just x -> x
-            trgs = [ (trg,lvl',lvl_trg) | (trg,_) <- rblockJumps nblk, let (_,lvl_trg,_) = info!trg,let lvl' = if lvl_cur < lvl_trg then lvl else lvl+1,lvl' < limit ]
+            trgs = [ (trg,lvl',lvl_trg) 
+                   | trg <- Map.keys $ rblockJumps nblk,
+                     let (_,lvl_trg,_) = info!trg,let lvl' = if lvl_cur < lvl_trg then lvl else lvl+1,lvl' < limit ]
         bfs tps info (Map.insert (name,lvl) nblk done) (foldl insert' rest trgs)
     
     insert' [] it = [it]
@@ -209,7 +199,7 @@ trans :: (MemoryModel m)
          -> SMT (RealizedBlock m)
 trans tps acts calls fname blocks (name,lvl) = do
     let (instrs,ord,sig) = blocks!name
-        froms = [ (rblockActivation realized,rblockMemoryOut realized,getCondition name (rblockJumps realized))
+        froms = [ (rblockActivation realized,rblockMemoryOut realized,(rblockJumps realized)!name)
                 | from <- Set.toList (blockOrigins sig), 
                   let (_,ord_from,sig_from) = blocks!from,
                   let lvl_from = if ord_from < ord
@@ -224,7 +214,7 @@ trans tps acts calls fname blocks (name,lvl) = do
                mem <- memNew tps
                assert $ memInit mem
                return mem
-             conds -> memSwitch [ (mem,and' [act,act'])  | (act',mem,_) <- conds ]
+             conds -> memSwitch [ (mem,and' [act',cond])  | (act',mem,cond) <- conds ]
     inps <- mapM (\(from,tp) -> case from of
                         [(blk,Left (blk',var))] -> case Map.lookup (blk',lvl) acts of
                           Nothing -> return $ (rblockOutput (acts!(blk',0)))!var
@@ -241,18 +231,36 @@ trans tps acts calls fname blocks (name,lvl) = do
                                                                             Just realized_from -> Just (case arg of
                                                                                                            Left (blk',var) -> (rblockOutput $ acts!(blk',lvl_from))!var
                                                                                                            Right bv -> DirectValue (constantAnn bv (fromIntegral $ bitWidth tp)),
-                                                                                                        and' [act,rblockActivation realized_from]))
+                                                                                                        and' [rblockActivation realized_from,(rblockJumps realized_from)!name]))
                                                  ) from
                           valSwitch mem tp choices
                  ) (blockInputs sig)
     (nmem,outps,ret',jumps) <- realizeBlock fname instrs act mem False inps calls (\lbl instr -> comment $ " "++lbl++": "++show instr)
+    jumps' <- translateJumps jumps
     return $ RealizedBlock { rblockActivation = act
                            , rblockMemoryOut = case nmem of
                              Nothing -> mem
                              Just nmem' -> nmem'
                            , rblockOutput = outps
-                           , rblockJumps = jumps 
+                           , rblockJumps = jumps'
                            , rblockReturns = ret' }
+
+translateJumps :: [(String,Maybe (SMTExpr Bool))] -> SMT (Map String (SMTExpr Bool))
+translateJumps = translateJumps' []
+  where
+    translateJumps' [] [(from,Nothing)] = return $ Map.singleton from (constant True)
+    translateJumps' _ [] = return Map.empty
+    translateJumps' pre ((from,cond):rest) = do
+      rcond <- case (fmap not' pre) ++ (maybeToList cond) of
+        [] -> return (constant True)
+        xs -> do
+          v <- var
+          assert $ v .==. and' xs
+          return v
+      mp <- translateJumps' (case cond of
+                                Nothing -> pre
+                                Just c -> c:pre) rest
+      return $ Map.insert from rcond mp
         
 showBlockSig :: String -> BlockSig -> [String]
 showBlockSig name sig 
