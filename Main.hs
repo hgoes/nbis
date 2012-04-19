@@ -254,21 +254,6 @@ trans tps acts calls fname blocks (name,lvl) = do
                            , rblockJumps = jumps 
                            , rblockReturns = ret' }
         
-recursiveBlocks :: Map String (BlockSig,Integer) -> Set String
-recursiveBlocks mp = snd $ traceRecursive Set.empty Set.empty ""
-  where
-    traceRecursive visited rec cur 
-      | Set.member cur visited = (visited,rec)
-      | otherwise = let (sig,lvl) = mp!cur
-                        (nvisited,nrec) = if any (\trg -> (snd $ mp!trg) < lvl) (Set.toList (blockJumps sig))
-                                          then mkRec visited rec cur
-                                          else (visited,rec)
-                    in foldl (\(cvisited,crec) trg -> traceRecursive cvisited crec trg) (Set.insert cur nvisited,nrec) (Set.toList (blockJumps sig))
-    mkRec visited rec cur 
-      | Set.member cur rec = (visited,rec)
-      | otherwise = let (sig,lvl) = mp!cur
-                    in foldl (\(cvisited,crec) trg -> mkRec cvisited crec trg) (Set.insert cur visited,Set.insert cur rec) (Set.toList (blockJumps sig))
-
 showBlockSig :: String -> BlockSig -> [String]
 showBlockSig name sig 
   = name:"  inputs":
