@@ -432,6 +432,10 @@ realizeInstruction fname lbl instr act mem values calls
                                                  (valValue $ argToExpr tp ifT values) 
                                                  (valValue $ argToExpr tp ifF values)
                                   in return (Nothing,Just res,Nothing,[])
+      IDTrunc tp_from tp_to arg -> return (Nothing,Just (case argToExpr tp_from arg values of
+                                                            ConstValue bv -> ConstValue (BitS.fromNBits (bitWidth tp_to) (BitS.toBits bv :: Integer))
+                                                            expr -> DirectValue (bvextract (bitWidth tp_to - 1) 0 (valValue expr))),Nothing,[])
+      _ -> error $ "Unsupported instruction: "++show instr
     where
       argToExpr :: TypeDesc -> ArgDesc -> Map String (Val m) -> Val m
       argToExpr _ (AV var) mp = case Map.lookup var mp of
