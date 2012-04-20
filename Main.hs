@@ -208,7 +208,7 @@ trans tps acts calls fname blocks (name,lvl) = do
                   lvl_from >= 0, 
                   realized <- maybeToList (Map.lookup (from,lvl_from) acts) ]
     act <- var
-    mapM (\(act',_,cond) -> assert $ and' [act',cond] .=>. act) froms
+    assert $ act .==. or' [ and' [act',cond] | (act',_,cond) <- froms ]
     mem <- case froms of
              [] -> do
                mem <- memNew tps
@@ -251,15 +251,17 @@ translateJumps = translateJumps' []
     translateJumps' [] [(from,Nothing)] = return $ Map.singleton from (constant True)
     translateJumps' _ [] = return Map.empty
     translateJumps' pre ((from,cond):rest) = do
-      rcond <- case (fmap not' pre) ++ (maybeToList cond) of
-        [] -> return (constant True)
-        xs -> do
+      (npre,rcond) <- case cond of
+        Nothing -> return (pre,case pre of
+                              [] -> constant True
+                              _ -> and' $ fmap not' pre)
+        Just cond' -> do
           v <- var
-          assert $ v .==. and' xs
-          return v
-      mp <- translateJumps' (case cond of
-                                Nothing -> pre
-                                Just c -> c:pre) rest
+          assert $ v .==. cond'
+          return (v:pre,case pre of
+                     [] -> v
+                     _ -> and' (v:(fmap not' pre)))
+      mp <- translateJumps' npre rest
       return $ Map.insert from rcond mp
         
 showBlockSig :: String -> BlockSig -> [String]
@@ -495,7 +497,7 @@ mkBlockSigs lbl_mp blks
                             -> addCall blk fn (fmap snd args) rtp $ foldl (\cmp (arg,tp) -> addArg blk arg tp cmp) mp' args
                           IDSelect tp expr lhs rhs -> addArg blk expr (TDInt False 1) $ addArg blk lhs tp $ addArg blk rhs tp mp'
                           _ -> mp'
-                       ) (Map.insert blk emptyBlockSig mp) instrs
+                       ) (Map.insertWith (\n o -> o) blk emptyBlockSig mp) instrs
             ) (Map.singleton "" (emptyBlockSig { blockJumps = Set.singleton $ fst $ head blks })) blks
       where
         addArg blk arg tp = case arg of
