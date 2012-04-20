@@ -230,7 +230,7 @@ trans tps acts calls fname blocks (name,lvl) = do
                                                                             Nothing -> Nothing
                                                                             Just realized_from -> Just (case arg of
                                                                                                            Left (blk',var) -> (rblockOutput $ acts!(blk',lvl_from))!var
-                                                                                                           Right bv -> DirectValue (constantAnn bv (fromIntegral $ bitWidth tp)),
+                                                                                                           Right bv -> ConstValue bv,
                                                                                                         and' [rblockActivation realized_from,(rblockJumps realized_from)!name]))
                                                  ) from
                           valSwitch mem tp choices
