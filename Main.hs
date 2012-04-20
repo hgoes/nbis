@@ -495,7 +495,7 @@ mkBlockSigs lbl_mp blks
                             -> addCall blk fn (fmap snd args) rtp $ foldl (\cmp (arg,tp) -> addArg blk arg tp cmp) mp' args
                           IDSelect tp expr lhs rhs -> addArg blk expr (TDInt False 1) $ addArg blk lhs tp $ addArg blk rhs tp mp'
                           _ -> mp'
-                       ) mp instrs
+                       ) (Map.insert blk emptyBlockSig mp) instrs
             ) (Map.singleton "" (emptyBlockSig { blockJumps = Set.singleton $ fst $ head blks })) blks
       where
         addArg blk arg tp = case arg of
