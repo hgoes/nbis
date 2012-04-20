@@ -175,7 +175,7 @@ translateFunction allTps program fname argTps tp blocks limit act mem_in args
                                      Just (args,rtp,blocks) -> case blocks of
                                        [] -> error $ "Function "++f++" has no implementation"
                                        _ -> translateFunction allTps program f args rtp blocks (limit-lvl-1)
-                                   Just intr -> const intr
+                                   Just intr -> intr
                                ) fname info (name,lvl)
         let (_,lvl_cur,_) = case Map.lookup name info of
               Nothing -> error $ "Internal error: Failed to find block signature for "++name
@@ -542,22 +542,32 @@ allTypesBlks = allTypes' [] []
                                         IDAlloca tp _ _ -> allTypes' is (tp:tps) blks
                                         _ -> allTypes' is tps blks
 
-intr_memcpy :: (MemoryModel mem,Monad m) => mem -> [Val mem] -> m (mem,Maybe (Val mem))
-intr_memcpy mem [PointerValue to,PointerValue from,ConstValue len,_,_]
+intr_memcpy :: (MemoryModel mem,Monad m) => SMTExpr Bool -> mem -> [Val mem] -> m (mem,Maybe (Val mem))
+intr_memcpy _ mem [PointerValue to,PointerValue from,ConstValue len,_,_]
   = return (memCopy (BitS.toBits len) to from mem,Nothing)
 
-intr_memset :: (MemoryModel mem,Monad m) => mem -> [Val mem] -> m (mem,Maybe (Val mem))
-intr_memset mem [PointerValue dest,val,ConstValue len,_,_]
+intr_memset :: (MemoryModel mem,Monad m) => SMTExpr Bool -> mem -> [Val mem] -> m (mem,Maybe (Val mem))
+intr_memset _ mem [PointerValue dest,val,ConstValue len,_,_]
   = return (memSet (BitS.toBits len) (valValue val) dest mem,Nothing)
 
-intrinsics :: (Monad m,MemoryModel mem) => String -> Maybe (mem -> [Val mem] -> m (mem,Maybe (Val mem)))
+intr_restrict :: MemoryModel mem => SMTExpr Bool -> mem -> [Val mem] -> SMT (mem,Maybe (Val mem))
+intr_restrict act mem [val] = do
+  assert $ act .=>. (not' $ valValue val .==. constantAnn (BitS.fromNBits (32::Int) (0::Integer)) 32)
+  return (mem,Nothing)
+
+intr_nondet :: MemoryModel mem => Integer -> SMTExpr Bool -> mem -> [Val mem] -> SMT (mem,Maybe (Val mem))
+intr_nondet width _ mem [] = do
+  v <- varAnn (fromIntegral width)
+  return (mem,Just (DirectValue v))
+
+intrinsics :: MemoryModel mem => String -> Maybe (SMTExpr Bool -> mem -> [Val mem] -> SMT (mem,Maybe (Val mem)))
 intrinsics "llvm.memcpy.p0i8.p0i8.i64" = Just intr_memcpy
 intrinsics "llvm.memcpy.p0i8.p0i8.i32" = Just intr_memcpy
 intrinsics "llvm.memset.p0i8.i32" = Just intr_memset
 intrinsics "llvm.memset.p0i8.i64" = Just intr_memset
+intrinsics "furchtbar_restrict" = Just intr_restrict
+intrinsics "furchtbar_nondet_i32" = Just (intr_nondet 32)
 intrinsics _ = Nothing
-
-                                                 
                                                  
 getProgram :: String -> IO (Map String ([(String,TypeDesc)],TypeDesc,[(String,[(String,InstrDesc)])]))
 getProgram file = do
