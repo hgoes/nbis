@@ -14,4 +14,6 @@ extern uint16_t furchtbar_nondet_u16(void);
 extern int8_t   furchtbar_nondet_i8(void);
 extern uint8_t  furchtbar_nondet_u8(void);
 
+extern void furchtbar_watch(int num,...);
+
 #endif

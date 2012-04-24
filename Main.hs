@@ -25,6 +25,7 @@ import System.Exit
 import Control.Monad (when)
 import Data.Maybe (mapMaybe,maybeToList)
 import Data.Bits as Bits
+type Watchpoint = (String,SMTExpr Bool,[(TypeDesc,SMTExpr BitVector)])
 
 (!) :: (Show k,Ord k) => Map k a -> k -> a
 (!) mp k = case Map.lookup k mp of
@@ -111,22 +112,16 @@ data RealizedBlock m = RealizedBlock { rblockActivation :: SMTExpr Bool
                                      }
 
 translateProgram :: (MemoryModel mem) 
-                    => Map String ([(String,TypeDesc)],TypeDesc,[(String,[(String,InstrDesc)])]) -> String -> Integer -> SMT (mem,mem)
+                    => Map String ([(String,TypeDesc)],TypeDesc,[(String,[(String,InstrDesc)])]) -> String -> Integer -> SMT (mem,mem,[Watchpoint])
 translateProgram program entry_point limit = do
   let alltps = foldl (\tps (args,rtp,blocks) 
                       -> let tpsArgs = allTypesArgs args
                              tpsBlocks = allTypesBlks blocks
                          in tps++tpsArgs++tpsBlocks) [] program
       (args,rtp,blks) = program!entry_point
-  comment " Input memory"
-  --mem_in <- argVarsAnn alltps -- :: SMT TypedMemory
-  {-arg_vals <- mapM (\(name,tp) -> do
-                       comment $ " Input value "++show name
-                       argVarsAnn tp) args-}
   (arg_vals,mem_in) <- prepareEnvironment alltps args
-  comment " Output memory"
-  (mem_out,ret) <- translateFunction alltps program entry_point args rtp blks limit (constant True) mem_in arg_vals
-  return (mem_in,mem_out)
+  (mem_out,ret,watches) <- translateFunction alltps program entry_point args rtp blks limit (constant True) mem_in (zip arg_vals (fmap snd args))
+  return (mem_in,mem_out,watches)
 
 translateFunction :: (MemoryModel m)
                      => [TypeDesc]
@@ -137,23 +132,24 @@ translateFunction :: (MemoryModel m)
                      -> Integer
                      -> SMTExpr Bool
                      -> m
-                     -> [Val m]
-                     -> SMT (m,Maybe (Val m))
+                     -> [(Val m,TypeDesc)]
+                     -> SMT (m,Maybe (Val m),[Watchpoint])
 translateFunction allTps program fname argTps tp blocks limit act mem_in args
   = do
     let blockMp = mkVarBlockMap (fmap fst argTps) blocks
         blockSigs = mkBlockSigs blockMp blocks
         ordMp = Map.fromList (zipWith (\(name,instrs) n -> (name,(instrs,n))) (("",[]):blocks) [0..])
         infoMp = Map.intersectionWith (\(instrs,n) sig -> (instrs,n,sig)) ordMp blockSigs
-        inps = zipWith (\(name,_) arg -> (name,arg)) argTps args
+        inps = zipWith (\(name,_) (arg,_) -> (name,arg)) argTps args
     bfs allTps infoMp (Map.singleton ("",0) (RealizedBlock { rblockActivation = act
                                                            , rblockMemoryOut = mem_in
                                                            , rblockOutput = Map.fromList inps
                                                            , rblockJumps = Map.singleton (fst $ head blocks) (constant True)
-                                                           , rblockReturns = Nothing }))
-      [(fst $ head blocks,0,1)]
+                                                           , rblockReturns = Nothing 
+                                                           }))
+      [] [(fst $ head blocks,0,1)]
   where
-    bfs _ _ done [] = do
+    bfs _ _ done watch [] = do
       rmem <- memSwitch [ (mem,act) | RealizedBlock { rblockReturns = Just _ 
                                                     , rblockMemoryOut = mem 
                                                     , rblockActivation = act } <- Map.elems done ]
@@ -164,26 +160,26 @@ translateFunction allTps program fname argTps tp blocks limit act mem_in args
                                                                 , rblockActivation = act
                                                                 } <- Map.elems done ]
           return $ Just ret'
-      return (rmem,ret)
-    bfs tps info done (nxt@(name,lvl,_):rest)
-      | Map.member (name,lvl) done = bfs tps info done rest
+      return (rmem,ret,watch)
+    bfs tps info done watch (nxt@(name,lvl,_):rest)
+      | Map.member (name,lvl) done = bfs tps info done watch rest
       | otherwise = do
         comment $ " Block "++fname++" -> "++name++" ("++show lvl++")"
-        nblk <- trans tps done (\f -> case intrinsics f of
-                                   Nothing -> case Map.lookup f program of
-                                     Nothing -> error $ "Function "++show f++" not found"
-                                     Just (args,rtp,blocks) -> case blocks of
-                                       [] -> error $ "Function "++f++" has no implementation"
-                                       _ -> translateFunction allTps program f args rtp blocks (limit-lvl-1)
-                                   Just intr -> intr
-                               ) fname info (name,lvl)
+        (nblk,watch') <- trans tps done (\f -> case intrinsics f of
+                                            Nothing -> case Map.lookup f program of
+                                              Nothing -> error $ "Function "++show f++" not found"
+                                              Just (args,rtp,blocks) -> case blocks of
+                                                [] -> error $ "Function "++f++" has no implementation"
+                                                _ -> translateFunction allTps program f args rtp blocks (limit-lvl-1)
+                                            Just intr -> intr
+                                        ) fname info (name,lvl)
         let (_,lvl_cur,_) = case Map.lookup name info of
               Nothing -> error $ "Internal error: Failed to find block signature for "++name
               Just x -> x
             trgs = [ (trg,lvl',lvl_trg) 
                    | trg <- Map.keys $ rblockJumps nblk,
                      let (_,lvl_trg,_) = info!trg,let lvl' = if lvl_cur < lvl_trg then lvl else lvl+1,lvl' < limit ]
-        bfs tps info (Map.insert (name,lvl) nblk done) (foldl insert' rest trgs)
+        bfs tps info (Map.insert (name,lvl) nblk done) (watch++watch') (foldl insert' rest trgs)
     
     insert' [] it = [it]
     insert' all@((cname,clvl,cord):rest) (name,lvl,ord)
@@ -192,11 +188,11 @@ translateFunction allTps program fname argTps tp blocks limit act mem_in args
                          
 trans :: (MemoryModel m) 
          => [TypeDesc] -> Map (String,Integer) (RealizedBlock m) 
-         -> (String -> SMTExpr Bool -> m -> [Val m] -> SMT (m,Maybe (Val m)))
+         -> (String -> SMTExpr Bool -> m -> [(Val m,TypeDesc)] -> SMT (m,Maybe (Val m),[Watchpoint]))
          -> String
          -> Map String ([(String,InstrDesc)],Integer,BlockSig)
          -> (String,Integer) 
-         -> SMT (RealizedBlock m)
+         -> SMT (RealizedBlock m,[Watchpoint])
 trans tps acts calls fname blocks (name,lvl) = do
     let (instrs,ord,sig) = blocks!name
         froms = [ (rblockActivation realized,rblockMemoryOut realized,(rblockJumps realized)!name)
@@ -235,15 +231,16 @@ trans tps acts calls fname blocks (name,lvl) = do
                                                  ) from
                           valSwitch mem tp choices
                  ) (blockInputs sig)
-    (nmem,outps,ret',jumps) <- realizeBlock fname instrs act mem False inps calls (\lbl instr -> comment $ " "++lbl++": "++show instr)
+    (nmem,outps,ret',jumps,watch) <- realizeBlock fname instrs act mem False inps calls (\lbl instr -> return () {- comment $ " "++lbl++": "++show instr -}) []
     jumps' <- translateJumps jumps
-    return $ RealizedBlock { rblockActivation = act
-                           , rblockMemoryOut = case nmem of
-                             Nothing -> mem
-                             Just nmem' -> nmem'
-                           , rblockOutput = outps
-                           , rblockJumps = jumps'
-                           , rblockReturns = ret' }
+    return $ (RealizedBlock { rblockActivation = act
+                            , rblockMemoryOut = case nmem of
+                              Nothing -> mem
+                              Just nmem' -> nmem'
+                            , rblockOutput = outps
+                            , rblockJumps = jumps'
+                            , rblockReturns = ret'
+                            },watch)
 
 translateJumps :: [(String,Maybe (SMTExpr Bool))] -> SMT (Map String (SMTExpr Bool))
 translateJumps = translateJumps' []
@@ -299,13 +296,14 @@ realizeBlock :: (Monad m,MemoryModel mem) => String -> [(String,InstrDesc)]
                 -> mem
                 -> Bool
                 -> Map String (Val mem) 
-                -> (String -> SMTExpr Bool -> mem -> [Val mem] -> m (mem,Maybe (Val mem)))
+                -> (String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> m (mem,Maybe (Val mem),[Watchpoint]))
                 -> (String -> InstrDesc -> m ())
-                -> m (Maybe mem,Map String (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))])
-realizeBlock fname ((lbl,instr):instrs) act mem changed values calls debug
+                -> [Watchpoint]
+                -> m (Maybe mem,Map String (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint])
+realizeBlock fname ((lbl,instr):instrs) act mem changed values calls debug watch
     = do
       debug lbl instr
-      (nmem,nvalue,ret,jumps) <- realizeInstruction fname lbl instr act mem values calls
+      (nmem,nvalue,ret,jumps,watch') <- realizeInstruction fname lbl instr act mem values calls
       let values' = case nvalue of
             Nothing -> values
             Just res -> Map.insert lbl res values
@@ -313,32 +311,32 @@ realizeBlock fname ((lbl,instr):instrs) act mem changed values calls debug
             Nothing -> (mem,changed)
             Just n -> (n,True)
       case ret of
-        Just ret' -> return (if changed then Just mem' else Nothing,values',ret,jumps)
+        Just ret' -> return (if changed then Just mem' else Nothing,values',ret,jumps,watch++watch')
         Nothing -> case jumps of
-          _:_ -> return (if changed then Just mem' else Nothing,values',ret,jumps)
-          [] -> realizeBlock fname instrs act mem' changed' values' calls debug
+          _:_ -> return (if changed then Just mem' else Nothing,values',ret,jumps,watch++watch')
+          [] -> realizeBlock fname instrs act mem' changed' values' calls debug (watch ++ watch')
 
 realizeInstruction :: (Monad m,MemoryModel mem) => String -> String -> InstrDesc 
                       -> SMTExpr Bool
                       -> mem 
                       -> Map String (Val mem) 
-                      -> (String -> SMTExpr Bool -> mem -> [Val mem] -> m (mem,Maybe (Val mem)))
-                      -> m (Maybe mem,Maybe (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))])
+                      -> (String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> m (mem,Maybe (Val mem),[Watchpoint]))
+                      -> m (Maybe mem,Maybe (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint])
 realizeInstruction fname lbl instr act mem values calls
-  = {- trace ("Realizing ("++lbl++") "++show instr++"..") $-} case instr of
-      IDRet tp arg -> return (Nothing,Nothing,Just (Just (argToExpr tp arg values)),[])
-      IDRetVoid -> return (Nothing,Nothing,Just Nothing,[])
+  = {-trace ("Realizing ("++lbl++") "++show instr++"..") $-} case instr of
+      IDRet tp arg -> return (Nothing,Nothing,Just (Just (argToExpr tp arg values)),[],[])
+      IDRetVoid -> return (Nothing,Nothing,Just Nothing,[],[])
       IDBrCond cond (AL ifT) (AL ifF) -> case argToExpr (TDInt False 1) cond values of
-        ConstCondition cond' -> return (Nothing,Nothing,Nothing,[(if cond' then ifT else ifF,Nothing)])
-        cond' -> return (Nothing,Nothing,Nothing,[(ifT,Just $ valCond cond'),(ifF,Nothing)])
-      IDBrUncond (AL to) -> return (Nothing,Nothing,Nothing,[(to,Nothing)])
+        ConstCondition cond' -> return (Nothing,Nothing,Nothing,[(if cond' then ifT else ifF,Nothing)],[])
+        cond' -> return (Nothing,Nothing,Nothing,[(ifT,Just $ valCond cond'),(ifF,Nothing)],[])
+      IDBrUncond (AL to) -> return (Nothing,Nothing,Nothing,[(to,Nothing)],[])
       IDSwitch tp ((val,AL def):args) -> case argToExpr tp val values of
         ConstValue v -> case [ to | (cmp_v,AL to) <- args, let ConstValue v' = argToExpr tp cmp_v values, v' == v ] of
-          [] -> return (Nothing,Nothing,Nothing,[(def,Nothing)])
-          [to] -> return (Nothing,Nothing,Nothing,[(to,Nothing)])
+          [] -> return (Nothing,Nothing,Nothing,[(def,Nothing)],[])
+          [to] -> return (Nothing,Nothing,Nothing,[(to,Nothing)],[])
         v -> return (Nothing,Nothing,Nothing,[ (to,Just $ valEq mem v (argToExpr tp cmp_v values))
                                              | (cmp_v,AL to) <- args
-                                             ] ++ [ (def,Nothing) ])
+                                             ] ++ [ (def,Nothing) ],[])
       IDBinOp op tp lhs rhs -> let lhs' = argToExpr tp lhs values
                                    rhs' = argToExpr tp rhs values
                                    apply (ConstValue lhs) (ConstValue rhs) = let lhs' = BitS.toBits lhs :: Integer
@@ -351,7 +349,7 @@ realizeInstruction fname lbl instr act mem values calls
                                                                                    BOShL -> \x y -> shiftL x (fromIntegral y)
                                                                                    BOOr -> (.|.)
                                                                                  nvalue = ConstValue (BitS.fromNBits (BitS.length lhs) (rop lhs' rhs'))
-                                                                             in return (Nothing,Just nvalue,Nothing,[])
+                                                                             in return (Nothing,Just nvalue,Nothing,[],[])
                                    apply lhs rhs = let lhs' = valValue lhs
                                                        rhs' = valValue rhs
                                                        rop = case op of 
@@ -363,26 +361,26 @@ realizeInstruction fname lbl instr act mem values calls
                                                          BOOr -> BVOr
                                                          _ -> error $ "unsupported operator: "++show op
                                                        nvalue = DirectValue (rop lhs' rhs')
-                                                   in return (Nothing,Just nvalue,Nothing,[])
+                                                   in return (Nothing,Just nvalue,Nothing,[],[])
                                in apply lhs' rhs'
-      IDAlloca tp _ _ -> let (ptr,mem') = memAlloc tp mem
-                         in return (Just mem',Just (PointerValue ptr),Nothing,[])
+      IDAlloca tp _ _ -> let (ptr,mem') = memAlloc True tp mem
+                         in return (Just mem',Just (PointerValue ptr),Nothing,[],[])
       IDLoad tp arg -> let PointerValue ptr = argToExpr (TDPtr tp) arg values
-                       in return (Nothing,Just (DirectValue $ memLoad tp ptr mem),Nothing,[])
+                       in return (Nothing,Just (DirectValue $ memLoad tp ptr mem),Nothing,[],[])
       IDStore tp val to -> let PointerValue ptr = argToExpr (TDPtr tp) to values
                                val' = valValue $ argToExpr tp val values
-                           in return (Just $ memStore tp ptr val' mem,Nothing,Nothing,[])
+                           in return (Just $ memStore tp ptr val' mem,Nothing,Nothing,[],[])
       IDGetElementPtr tp_to tp_from (arg:args) -> case argToExpr tp_from arg values of
         PointerValue ptr -> let ptr' = memIndex mem tp_from [ fromIntegral i | AI i <- args ] ptr
-                            in return (Nothing,Just (PointerValue ptr'),Nothing,[])
+                            in return (Nothing,Just (PointerValue ptr'),Nothing,[],[])
         v -> error $ "First argument to getelementptr must be a pointer, but I found: "++show v++" ("++fname++")\n"++lbl++": "++show instr
       IDZExt tp tp' var -> let v = valValue $ argToExpr tp' var values
                                d = (bitWidth tp') - (bitWidth tp)
                                nv = bvconcat (constantAnn (BitS.fromNBits d (0::Integer) :: BitVector) (fromIntegral d)) v
-                           in return (Nothing,Just (DirectValue nv),Nothing,[])
+                           in return (Nothing,Just (DirectValue nv),Nothing,[],[])
       IDBitcast (TDPtr tp) (TDPtr tp') arg -> let PointerValue ptr = argToExpr (TDPtr tp') arg values
                                                   nptr = memCast mem tp ptr
-                                              in return (Nothing,Just (PointerValue nptr),Nothing,[])
+                                              in return (Nothing,Just (PointerValue nptr),Nothing,[],[])
       IDICmp pred tp lhs rhs -> let lhs' = argToExpr tp lhs values
                                     rhs' = argToExpr tp rhs values
                                     apply (ConstValue lhs) (ConstValue rhs) = let lhs' = BitS.toBits lhs :: Integer
@@ -398,7 +396,7 @@ realizeInstruction fname lbl instr act mem values calls
                                                                                     IntSGE -> (>=)
                                                                                     IntSLT -> (<)
                                                                                     IntSLE -> (<=)
-                                                                              in return (Nothing,Just (ConstCondition (op lhs' rhs')),Nothing,[])
+                                                                              in return (Nothing,Just (ConstCondition (op lhs' rhs')),Nothing,[],[])
                                     apply lhs rhs = let lhs' = valValue lhs
                                                         rhs' = valValue rhs
                                                         op = case pred of
@@ -412,12 +410,12 @@ realizeInstruction fname lbl instr act mem values calls
                                                           IntSGE -> BVSGE
                                                           IntSLT -> BVSLT
                                                           IntSLE -> BVSLE
-                                                    in return (Nothing,Just (ConditionValue (op lhs' rhs')),Nothing,[])
+                                                    in return (Nothing,Just (ConditionValue (op lhs' rhs')),Nothing,[],[])
                                 in apply lhs' rhs'
-      IDPhi _ _ -> return (Nothing,Nothing,Nothing,[])
+      IDPhi _ _ -> return (Nothing,Nothing,Nothing,[],[])
       IDCall _ (AFP fn) args -> do
-        (mem',ret) <- calls fn act mem [ argToExpr tp arg values | (arg,tp) <- args ]
-        return (Just mem',ret,Nothing,[])
+        (mem',ret,watch) <- calls fn act mem [ (argToExpr tp arg values,tp) | (arg,tp) <- args ]
+        return (Just mem',ret,Nothing,[],watch)
       IDSelect tp cond ifT ifF -> let res = case argToExpr (TDInt False 1) cond values of
                                         ConstCondition c -> if c 
                                                             then argToExpr tp ifT values
@@ -426,10 +424,10 @@ realizeInstruction fname lbl instr act mem values calls
                                                  (valCond cond') 
                                                  (valValue $ argToExpr tp ifT values) 
                                                  (valValue $ argToExpr tp ifF values)
-                                  in return (Nothing,Just res,Nothing,[])
+                                  in return (Nothing,Just res,Nothing,[],[])
       IDTrunc tp_from tp_to arg -> return (Nothing,Just (case argToExpr tp_from arg values of
                                                             ConstValue bv -> ConstValue (BitS.fromNBits (bitWidth tp_to) (BitS.toBits bv :: Integer))
-                                                            expr -> DirectValue (bvextract (bitWidth tp_to - 1) 0 (valValue expr))),Nothing,[])
+                                                            expr -> DirectValue (bvextract (bitWidth tp_to - 1) 0 (valValue expr))),Nothing,[],[])
       _ -> error $ "Unsupported instruction: "++show instr
     where
       argToExpr :: TypeDesc -> ArgDesc -> Map String (Val m) -> Val m
@@ -542,25 +540,29 @@ allTypesBlks = allTypes' [] []
                                         IDAlloca tp _ _ -> allTypes' is (tp:tps) blks
                                         _ -> allTypes' is tps blks
 
-intr_memcpy :: (MemoryModel mem,Monad m) => SMTExpr Bool -> mem -> [Val mem] -> m (mem,Maybe (Val mem))
-intr_memcpy _ mem [PointerValue to,PointerValue from,ConstValue len,_,_]
-  = return (memCopy (BitS.toBits len) to from mem,Nothing)
+intr_memcpy :: (MemoryModel mem,Monad m) => SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> m (mem,Maybe (Val mem),[Watchpoint])
+intr_memcpy _ mem [(PointerValue to,_),(PointerValue from,_),(ConstValue len,_),_,_]
+  = return (memCopy (BitS.toBits len) to from mem,Nothing,[])
 
-intr_memset :: (MemoryModel mem,Monad m) => SMTExpr Bool -> mem -> [Val mem] -> m (mem,Maybe (Val mem))
-intr_memset _ mem [PointerValue dest,val,ConstValue len,_,_]
-  = return (memSet (BitS.toBits len) (valValue val) dest mem,Nothing)
+intr_memset :: (MemoryModel mem,Monad m) => SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> m (mem,Maybe (Val mem),[Watchpoint])
+intr_memset _ mem [(PointerValue dest,_),(val,_),(ConstValue len,_),_,_]
+  = return (memSet (BitS.toBits len) (valValue val) dest mem,Nothing,[])
 
-intr_restrict :: MemoryModel mem => SMTExpr Bool -> mem -> [Val mem] -> SMT (mem,Maybe (Val mem))
-intr_restrict act mem [val] = do
+intr_restrict :: MemoryModel mem => SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint])
+intr_restrict act mem [(val,_)] = do
   assert $ act .=>. (not' $ valValue val .==. constantAnn (BitS.fromNBits (32::Int) (0::Integer)) 32)
-  return (mem,Nothing)
+  return (mem,Nothing,[])
 
-intr_nondet :: MemoryModel mem => Integer -> SMTExpr Bool -> mem -> [Val mem] -> SMT (mem,Maybe (Val mem))
+intr_nondet :: MemoryModel mem => Integer -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint])
 intr_nondet width _ mem [] = do
   v <- varAnn (fromIntegral width)
-  return (mem,Just (DirectValue v))
+  return (mem,Just (DirectValue v),[])
 
-intrinsics :: MemoryModel mem => String -> Maybe (SMTExpr Bool -> mem -> [Val mem] -> SMT (mem,Maybe (Val mem)))
+intr_watch :: MemoryModel mem => SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint])
+intr_watch act mem ((ConstValue num,_):exprs)
+  = return (mem,Nothing,[(show (BitS.toBits num :: Integer),act,[ (tp,valValue val) | (val,tp) <- exprs ])])
+
+intrinsics :: MemoryModel mem => String -> Maybe (SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint]))
 intrinsics "llvm.memcpy.p0i8.p0i8.i64" = Just intr_memcpy
 intrinsics "llvm.memcpy.p0i8.p0i8.i32" = Just intr_memcpy
 intrinsics "llvm.memset.p0i8.i32" = Just intr_memset
@@ -574,6 +576,7 @@ intrinsics "furchtbar_nondet_u64" = Just (intr_nondet 64)
 intrinsics "furchtbar_nondet_u32" = Just (intr_nondet 32)
 intrinsics "furchtbar_nondet_u16" = Just (intr_nondet 16)
 intrinsics "furchtbar_nondet_u8" = Just (intr_nondet 8)
+intrinsics "furchtbar_watch" = Just intr_watch
 intrinsics _ = Nothing
                                                  
 getProgram :: String -> IO (Map String ([(String,TypeDesc)],TypeDesc,[(String,[(String,InstrDesc)])]))
@@ -674,12 +677,21 @@ main = do
     perform :: (MemoryModel mem)
                => Map String ([(String,TypeDesc)],TypeDesc,[(String,[(String,InstrDesc)])]) -> String -> Integer -> SMT mem
     perform program entry depth = do
-      (mem_in,mem_out) <- translateProgram program entry depth
+      (mem_in,mem_out,watches) <- translateProgram program entry depth
       checkSat
       dump_in <- memDump mem_in
       dump_out <- memDump mem_out
       liftIO $ putStrLn dump_in
       liftIO $ putStrLn dump_out
+      mapM_ (\(name,act,vals) -> do
+                ract <- getValue act
+                if ract
+                  then (do
+                           rvals <- mapM (\(tp,val) -> getValue' (fromIntegral $ bitWidth tp) val) vals
+                           liftIO $ putStrLn $ "Watchpoint "++name++":"
+                             ++concat (fmap (\rval -> " "++show (BitS.toBits rval :: Integer)) rvals))
+                  else return ()
+            ) watches
       return mem_in
 
 prepareEnvironment :: (MemoryModel mem)
