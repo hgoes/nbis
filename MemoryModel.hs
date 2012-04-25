@@ -16,7 +16,7 @@ class (Typeable m,Eq (Pointer m)) => MemoryModel m where
     memNew :: [TypeDesc] -> SMT m
     memInit :: m -> SMTExpr Bool
     memPtrNew :: m -> TypeDesc -> SMT (Pointer m)
-    memAlloc :: TypeDesc -> m -> (Pointer m,m)
+    memAlloc :: Bool -> TypeDesc -> m -> SMT (Pointer m,m)
     memLoad :: TypeDesc -> Pointer m -> m -> SMTExpr BitVector
     memStore :: TypeDesc -> Pointer m -> SMTExpr BitVector -> m -> m
     memIndex :: m -> TypeDesc -> [Integer] -> Pointer m -> Pointer m

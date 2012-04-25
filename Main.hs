@@ -291,15 +291,15 @@ emptyBlockSig = BlockSig { blockInputs = Map.empty
                          , blockJumps = Set.empty
                          , blockOrigins = Set.empty }
 
-realizeBlock :: (Monad m,MemoryModel mem) => String -> [(String,InstrDesc)] 
+realizeBlock :: MemoryModel mem => String -> [(String,InstrDesc)] 
                 -> SMTExpr Bool
                 -> mem
                 -> Bool
                 -> Map String (Val mem) 
-                -> (String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> m (mem,Maybe (Val mem),[Watchpoint]))
-                -> (String -> InstrDesc -> m ())
+                -> (String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint]))
+                -> (String -> InstrDesc -> SMT ())
                 -> [Watchpoint]
-                -> m (Maybe mem,Map String (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint])
+                -> SMT (Maybe mem,Map String (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint])
 realizeBlock fname ((lbl,instr):instrs) act mem changed values calls debug watch
     = do
       debug lbl instr
@@ -316,12 +316,12 @@ realizeBlock fname ((lbl,instr):instrs) act mem changed values calls debug watch
           _:_ -> return (if changed then Just mem' else Nothing,values',ret,jumps,watch++watch')
           [] -> realizeBlock fname instrs act mem' changed' values' calls debug (watch ++ watch')
 
-realizeInstruction :: (Monad m,MemoryModel mem) => String -> String -> InstrDesc 
+realizeInstruction :: MemoryModel mem => String -> String -> InstrDesc 
                       -> SMTExpr Bool
                       -> mem 
                       -> Map String (Val mem) 
-                      -> (String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> m (mem,Maybe (Val mem),[Watchpoint]))
-                      -> m (Maybe mem,Maybe (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint])
+                      -> (String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint]))
+                      -> SMT (Maybe mem,Maybe (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint])
 realizeInstruction fname lbl instr act mem values calls
   = {-trace ("Realizing ("++lbl++") "++show instr++"..") $-} case instr of
       IDRet tp arg -> return (Nothing,Nothing,Just (Just (argToExpr tp arg values)),[],[])
@@ -363,8 +363,9 @@ realizeInstruction fname lbl instr act mem values calls
                                                        nvalue = DirectValue (rop lhs' rhs')
                                                    in return (Nothing,Just nvalue,Nothing,[],[])
                                in apply lhs' rhs'
-      IDAlloca tp _ _ -> let (ptr,mem') = memAlloc True tp mem
-                         in return (Just mem',Just (PointerValue ptr),Nothing,[],[])
+      IDAlloca tp _ _ -> do
+        (ptr,mem') <- memAlloc False tp mem
+        return (Just mem',Just (PointerValue ptr),Nothing,[],[])
       IDLoad tp arg -> let PointerValue ptr = argToExpr (TDPtr tp) arg values
                        in return (Nothing,Just (DirectValue $ memLoad tp ptr mem),Nothing,[],[])
       IDStore tp val to -> let PointerValue ptr = argToExpr (TDPtr tp) to values
@@ -701,7 +702,7 @@ prepareEnvironment alltp args = do
   assert $ memInit imem
   foldrM (\(name,tp) (args,mem) -> case tp of
              TDPtr tp -> do
-               let (ptr,mem') = memAlloc tp mem
+               (ptr,mem') <- memAlloc False tp mem
                return ((PointerValue ptr):args,mem')
              tp -> do
                var <- newValue mem tp

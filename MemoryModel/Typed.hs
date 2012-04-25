@@ -69,8 +69,11 @@ instance MemoryModel TypedMemory where
     loc <- var
     return $ TypedPointer [(TypedPointer' tp loc 0,constant True)]
   memInit mem = and' [ nxt .==. 0 | (nxt,_) <- Map.elems (memoryBanks mem) ]
-  memAlloc tp mem = let (nxt,arrs) = (memoryBanks mem)!tp
-                    in (TypedPointer [(TypedPointer' tp nxt 0,constant True)],TypedMemory $ Map.insert tp (nxt + 1,arrs) (memoryBanks mem))
+  memAlloc zero tp mem = let (nxt,arrs) = (memoryBanks mem)!tp
+                             narrs = if zero
+                                     then zipWith (\tp' arr -> store arr nxt (constantAnn (BitS.fromNBits (bitWidth tp') (0::Integer)) (fromIntegral $ bitWidth tp'))) (flattenType tp) arrs
+                                     else arrs
+                         in return (TypedPointer [(TypedPointer' tp nxt 0,constant True)],TypedMemory $ Map.insert tp (nxt + 1,narrs) (memoryBanks mem))
   memLoad tp (TypedPointer ptrs) mem = case ptrs of
     [(ptr,_)] -> loadSingle ptr
     ((ptr,cond):rest) -> ite cond (loadSingle ptr) (memLoad tp (TypedPointer rest) mem)
@@ -142,7 +145,9 @@ instance MemoryModel TypedMemory where
       mkSwitch :: [(TypedMemory,SMTExpr Bool)] -> Map TypeDesc (SMTExpr PtrT,[SMTExpr (SMTArray (SMTExpr PtrT) BitVector)])
       mkSwitch [(TypedMemory mem,cond)] = mem
       mkSwitch ((TypedMemory mem',cond'):rest)
-        = Map.unionWith (\(ptr1,banks1) (ptr2,banks2) -> (ite cond' ptr1 ptr2,zipWith (ite cond') banks1 banks2)) mem' (mkSwitch rest)
+        = Map.unionWith (\(ptr1,banks1) (ptr2,banks2) -> (ite cond' ptr1 ptr2,zipWith (\e1 e2 -> if e1==e2
+                                                                                                 then e1
+                                                                                                 else ite cond' e1 e2) banks1 banks2)) mem' (mkSwitch rest)
 
 renderMemObject :: TypeDesc -> [BitVector] -> [String]
 renderMemObject tp bvs = snd $ renderMemObject' bvs tp

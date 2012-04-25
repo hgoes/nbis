@@ -44,8 +44,9 @@ instance MemoryModel UntypedMemory where
     type Pointer UntypedMemory = UntypedPointer
     memNew tps = argVarsAnn tps
     memInit mem = (memoryNextFree mem) .==. (constant 0)
-    memAlloc tp mem = let w = typeWidth' tp
-                      in (UntypedPointer $ memoryNextFree mem,mem { memoryNextFree = (memoryNextFree mem) + (constant $ fromIntegral w) })
+    -- TODO: zero
+    memAlloc _ tp mem = let w = typeWidth' tp
+                        in return (UntypedPointer $ memoryNextFree mem,mem { memoryNextFree = (memoryNextFree mem) + (constant $ fromIntegral w) })
     memLoad tp (UntypedPointer ptr) mem = let w = typeWidth' tp
                                           in if w==1
                                              then select (memoryBlocks mem) ptr
