@@ -5,6 +5,7 @@ import MemoryModel
 import MemoryModel.Untyped
 import MemoryModel.UntypedBlocks
 import MemoryModel.Typed
+import MemoryModel.Plain
 import Language.SMTLib2
 import Language.SMTLib2.Internals
 import Data.Typeable
@@ -610,6 +611,7 @@ mergePrograms p1 p2 = Map.unionWithKey (\name (args1,tp1,blks1) (args2,tp2,blks2
 data MemoryModelOption = UntypedModel
                        | TypedModel
                        | BlockModel
+                       | PlainModel
                        deriving (Eq,Ord,Show)
 
 data Options = Options
@@ -636,6 +638,7 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
                                                                            "typed" -> TypedModel
                                                                            "untyped" -> UntypedModel
                                                                            "block" -> BlockModel
+                                                                           "plain" -> PlainModel
                                                                            _ -> error $ "Unknown memory model "++show str
                                                                       }) "model") "Memory model to use (untyped,typed or block)"
               ,Option [] ["solver"] (ReqArg (\str opt -> opt { solver = Just str }) "smt-binary") "The SMT solver to use to solve the generated instance"
@@ -672,6 +675,9 @@ main = do
           return ()
         BlockModel -> do
           perform program (entryPoint opts) (bmcDepth opts) :: SMT UntypedBlockMemory
+          return ()
+        PlainModel -> do
+          perform program (entryPoint opts) (bmcDepth opts) :: SMT PlainMemory
           return ()
       )
   where
