@@ -14,4 +14,5 @@ Executable furchtbar
     MemoryModel
     MemoryModel.Untyped
     MemoryModel.Typed
+    MemoryModel.Plain
   Build-Depends:	base,llvm-base >= 3,llvm >= 3,bitstream >= 0.2,containers,mtl,smtlib2
