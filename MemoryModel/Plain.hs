@@ -327,28 +327,28 @@ instance MemoryModel PlainMemory where
                                                                                            return (False,res)
                                                                                     ) (fmap return mp1) (fmap return mp2)
                                            ) mem res
-  memLoad tp ptr (PlainMem mem) = load' [ let (indir,cont) = (mem!(ptrType ptr')!(ptrLocation ptr'))
-                                              off = if indir 
-                                                    then ptrOffset ptr'
-                                                    else case ptrOffset ptr' of
-                                                      [] -> []
-                                                      Left 0:rest -> rest
-                                                      _ -> error $ "invalid memory indirection in load: "++show (ptrOffset ptr')
-                                              rtp = if indir
-                                                    then TDPtr (ptrType ptr')
-                                                    else ptrType ptr'
-                                              paths = allSuccIdx rtp off
-                                              banks = fmap (\path -> let (stat,dyn) = translateIdx rtp path
-                                                                     in plainResolve cont stat dyn) paths
-                                          in (case typedLoad (bitWidth tp) [(ptrType ptr')] banks of
-                                                 [bv] -> bv
-                                                 bvs -> bvconcats bvs,cond) | (Just ptr',cond) <- ptr ]
+  memLoad tp ptr (PlainMem mem) = (load' [ let (indir,cont) = (mem!(ptrType ptr')!(ptrLocation ptr'))
+                                               off = if indir 
+                                                     then ptrOffset ptr'
+                                                     else case ptrOffset ptr' of
+                                                       [] -> []
+                                                       Left 0:rest -> rest
+                                                       _ -> error $ "invalid memory indirection in load: "++show (ptrOffset ptr')
+                                               rtp = if indir
+                                                     then TDPtr (ptrType ptr')
+                                                     else ptrType ptr'
+                                               paths = allSuccIdx rtp off
+                                               banks = fmap (\path -> let (stat,dyn) = translateIdx rtp path
+                                                                      in plainResolve cont stat dyn) paths
+                                           in (case typedLoad (bitWidth tp) [(ptrType ptr')] banks of
+                                                  [bv] -> bv
+                                                  bvs -> bvconcats bvs,cond) | (Just ptr',cond) <- ptr ],[])
     where
       load' [(bv,cond)] = bv
       load' ((bv,cond):rest) = ite cond bv (load' rest)
       load' [] = constantAnn (BitS.fromNBits (bitWidth tp) (0::Integer)) (fromIntegral $ bitWidth tp)
   memLoadPtr tp ptr (PlainMem mem)
-    = concat [ [ (cont',and' [cond,cond']) | (cont',cond') <- ptr_cont ]
+    = (concat [ [ (cont',and' [cond,cond']) | (cont',cond') <- ptr_cont ]
              | (Just ptr',cond) <- ptr,
                let (indir,PlainPtrs cont) = mem!(ptrType ptr')!(ptrLocation ptr')  
                    off = if indir 
@@ -362,8 +362,8 @@ instance MemoryModel PlainMemory where
                          else ptrType ptr'
                    (stat,dyn) = translateIdx (ptrType ptr') off
                    (ptr_cont,_) = plainModifyPtr cont stat dyn (\ocont -> (ocont,ocont))
-             ]
-  memStore tp ptr cont (PlainMem mem) = PlainMem $ store' ptr mem []
+             ],[])
+  memStore tp ptr cont (PlainMem mem) = (PlainMem $ store' ptr mem [],[])
     where
       store' [] mem _ = mem
       store' ((Nothing,cond):ptrs) mem prev = store' ptrs mem ((not' cond):prev)
@@ -382,7 +382,7 @@ instance MemoryModel PlainMemory where
                                                                                                                        ))
                                                                  in (indir,ncont)
                                               ) (ptrLocation ptr)) (ptrType ptr) mem) ((not' cond):prev)
-  memStorePtr tp trg src (PlainMem mem) = PlainMem $ store' trg mem []
+  memStorePtr tp trg src (PlainMem mem) = (PlainMem $ store' trg mem [],[])
     where
       store' [] mem _ = mem
       store' ((Just ptr,cond):ptrs) mem prev

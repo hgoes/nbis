@@ -34,6 +34,8 @@ import Text.Show
 
 type Watchpoint = (String,SMTExpr Bool,[(TypeDesc,SMTExpr BitVector)])
 
+type MemGuard = (MemoryError,SMTExpr Bool)
+
 (!) :: (Show k,Ord k) => Map k a -> k -> a
 (!) mp k = case Map.lookup k mp of
              Nothing -> error $ "Couldn't find key "++show k++" in "++show (Map.keys mp)
@@ -121,7 +123,7 @@ data RealizedBlock m = RealizedBlock { rblockActivation :: SMTExpr Bool
                                      }
 
 translateProgram :: (MemoryModel mem) 
-                    => ProgDesc -> String -> Integer -> SMT (mem,mem,[Watchpoint])
+                    => ProgDesc -> String -> Integer -> SMT (mem,mem,[Watchpoint],[MemGuard])
 translateProgram (program,globs) entry_point limit = do
   let alltps = foldl (\tps (args,rtp,blocks) 
                       -> let tpsArgs = allTypesArgs args
@@ -130,8 +132,8 @@ translateProgram (program,globs) entry_point limit = do
       (args,rtp,blks) = program!entry_point
   liftIO $ print globs
   (arg_vals,globals,mem_in) <- prepareEnvironment alltps args globs
-  (mem_out,ret,watches) <- translateFunction alltps program entry_point args rtp blks globals limit (constant True) mem_in (zip arg_vals (fmap snd args))
-  return (mem_in,mem_out,watches)
+  (mem_out,ret,watches,guards) <- translateFunction alltps program entry_point args rtp blks globals limit (constant True) mem_in (zip arg_vals (fmap snd args))
+  return (mem_in,mem_out,watches,guards)
 
 translateFunction :: (MemoryModel m)
                      => [TypeDesc]
@@ -144,7 +146,7 @@ translateFunction :: (MemoryModel m)
                      -> SMTExpr Bool
                      -> m
                      -> [(Val m,TypeDesc)]
-                     -> SMT (m,Maybe (Val m),[Watchpoint])
+                     -> SMT (m,Maybe (Val m),[Watchpoint],[MemGuard])
 translateFunction allTps program fname argTps tp blocks globals limit act mem_in args
   = do
     --liftIO $ putStr $ unlines $ concat [ (fname++" :: "++show args++" -> "++show rtype):concat [ ("  "++blkname++":"):[ "    "++show instr | instr <- instrs ]  | (blkname,instrs) <- blks ] | (fname,(args,rtype,blks)) <- Map.toList program ]
@@ -164,9 +166,9 @@ translateFunction allTps program fname argTps tp blocks globals limit act mem_in
                                            , rblockJumps = Map.singleton (fst $ head blocks) (constant True)
                                            , rblockReturns = Nothing 
                                            }))
-      [] [(fst $ head blocks,0,1)]
+      [] [] [(fst $ head blocks,0,1)]
   where
-    bfs _ _ _ done watch [] = do
+    bfs _ _ _ done watch guard [] = do
       rmem <- memSwitch [ (mem,act) | RealizedBlock { rblockReturns = Just _ 
                                                     , rblockMemoryOut = mem 
                                                     , rblockActivation = act } <- Map.elems done ]
@@ -177,28 +179,28 @@ translateFunction allTps program fname argTps tp blocks globals limit act mem_in
                                                                 , rblockActivation = act
                                                                 } <- Map.elems done ]
           return $ Just ret'
-      return (rmem,ret,watch)
-    bfs tps info preds done watch (nxt@(name,lvl,_):rest)
-      | Map.member (name,lvl) done = bfs tps info preds done watch rest
+      return (rmem,ret,watch,guard)
+    bfs tps info preds done watch guard (nxt@(name,lvl,_):rest)
+      | Map.member (name,lvl) done = bfs tps info preds done watch guard rest
       | otherwise = do
         --liftIO $ putStrLn $ " Block "++fname++" -> "++name++" ("++show lvl++")"
         comment $ " Block "++fname++" -> "++name++" ("++show lvl++")"
-        (nblk,watch') <- trans tps done 
-                         (\f name -> case intrinsics f of
-                             Nothing -> case Map.lookup f program of
-                               Nothing -> error $ "Function "++show f++" not found"
-                               Just (args,rtp,blocks) -> case blocks of
-                                 [] -> error $ "Function "++f++" has no implementation"
-                                 _ -> translateFunction allTps program f args rtp blocks globals (limit-lvl-1)
-                             Just intr -> intr (Map.lookup name preds)
-                         ) fname globals info (name,lvl)
+        (nblk,watch',guard') <- trans tps done 
+                                (\f name -> case intrinsics f of
+                                    Nothing -> case Map.lookup f program of
+                                      Nothing -> error $ "Function "++show f++" not found"
+                                      Just (args,rtp,blocks) -> case blocks of
+                                        [] -> error $ "Function "++f++" has no implementation"
+                                        _ -> translateFunction allTps program f args rtp blocks globals (limit-lvl-1)
+                                    Just intr -> intr (Map.lookup name preds)
+                                ) fname globals info (name,lvl)
         let (_,lvl_cur,_) = case Map.lookup name info of
               Nothing -> error $ "Internal error: Failed to find block signature for "++name
               Just x -> x
             trgs = [ (trg,lvl',lvl_trg) 
                    | trg <- Map.keys $ rblockJumps nblk,
                      let (_,lvl_trg,_) = info!trg,let lvl' = if lvl_cur < lvl_trg then lvl else lvl+1,lvl' < limit ]
-        bfs tps info preds (Map.insert (name,lvl) nblk done) (watch++watch') (foldl insert' rest trgs)
+        bfs tps info preds (Map.insert (name,lvl) nblk done) (watch++watch') (guard++guard') (foldl insert' rest trgs)
     
     insert' [] it = [it]
     insert' all@((cname,clvl,cord):rest) (name,lvl,ord)
@@ -207,12 +209,12 @@ translateFunction allTps program fname argTps tp blocks globals limit act mem_in
                          
 trans :: (MemoryModel m) 
          => [TypeDesc] -> Map (String,Integer) (RealizedBlock m) 
-         -> (String -> String -> SMTExpr Bool -> m -> [(Val m,TypeDesc)] -> SMT (m,Maybe (Val m),[Watchpoint]))
+         -> (String -> String -> SMTExpr Bool -> m -> [(Val m,TypeDesc)] -> SMT (m,Maybe (Val m),[Watchpoint],[MemGuard]))
          -> String
          -> Map String (Pointer m)
          -> Map String ([Instruction],Integer,BlockSig)
          -> (String,Integer) 
-         -> SMT (RealizedBlock m,[Watchpoint])
+         -> SMT (RealizedBlock m,[Watchpoint],[MemGuard])
 trans tps acts calls fname globals blocks (name,lvl) = do
     let (instrs,ord,sig) = blocks!name
         froms = [ (rblockActivation realized,rblockMemoryOut realized,(rblockJumps realized)!name)
@@ -264,7 +266,7 @@ trans tps acts calls fname globals blocks (name,lvl) = do
                          res <- valSwitch mem tp choices
                          return (iname,res)
                      ) (Map.toList $ blockInputsPhi sig)
-    (nmem,outps,ret',jumps,watch) <- realizeBlock fname instrs act mem False (Map.union inp0 (Map.fromList inps_phi)) calls []
+    (nmem,outps,ret',jumps,watch,guard) <- realizeBlock fname instrs act mem False (Map.union inp0 (Map.fromList inps_phi)) calls [] []
     jumps' <- translateJumps jumps
     return $ (RealizedBlock { rblockActivation = act
                             , rblockMemoryOut = case nmem of
@@ -273,7 +275,7 @@ trans tps acts calls fname globals blocks (name,lvl) = do
                             , rblockOutput = outps
                             , rblockJumps = jumps'
                             , rblockReturns = ret'
-                            },watch)
+                            },watch,guard)
 
 translateJumps :: [(String,Maybe (SMTExpr Bool))] -> SMT (Map String (SMTExpr Bool))
 translateJumps = translateJumps' []
@@ -334,14 +336,15 @@ realizeBlock :: MemoryModel mem => String -> [Instruction]
                 -> mem
                 -> Bool
                 -> Map String (Val mem) 
-                -> (String -> String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint]))
+                -> (String -> String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[MemGuard]))
                 -> [Watchpoint]
-                -> SMT (Maybe mem,Map String (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint])
-realizeBlock fname (instr:instrs) act mem changed values calls watch
+                -> [MemGuard]
+                -> SMT (Maybe mem,Map String (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint],[MemGuard])
+realizeBlock fname (instr:instrs) act mem changed values calls watch guard
     = do
       --liftIO $ print instr
       --liftIO $ putStrLn $ "Values: "++show values
-      (nmem,nvalue,ret,jumps,watch') <- realizeInstruction fname instr act mem values calls
+      (nmem,nvalue,ret,jumps,watch',guard') <- realizeInstruction fname instr act mem values calls
       let values' = case nvalue of
             Nothing -> values
             Just (lbl,res) -> Map.insert lbl res values
@@ -349,10 +352,10 @@ realizeBlock fname (instr:instrs) act mem changed values calls watch
             Nothing -> (mem,changed)
             Just n -> (n,True)
       case ret of
-        Just ret' -> return (if changed then Just mem' else Nothing,values',ret,jumps,watch++watch')
+        Just ret' -> return (if changed then Just mem' else Nothing,values',ret,jumps,watch++watch',guard++guard')
         Nothing -> case jumps of
-          _:_ -> return (if changed then Just mem' else Nothing,values',ret,jumps,watch++watch')
-          [] -> realizeBlock fname instrs act mem' changed' values' calls (watch ++ watch')
+          _:_ -> return (if changed then Just mem' else Nothing,values',ret,jumps,watch++watch',guard++guard')
+          [] -> realizeBlock fname instrs act mem' changed' values' calls (watch ++ watch') (guard++guard')
 
 argToExpr :: MemoryModel mem => Expr -> Map String (Val mem) -> mem -> Val mem
 argToExpr e values mem = {-trace ("argToExpr: "++show e++" "++show (Map.toList values)) $-} case exprDesc e of
@@ -464,45 +467,49 @@ realizeInstruction :: MemoryModel mem => String -> Instruction
                       -> SMTExpr Bool
                       -> mem 
                       -> Map String (Val mem) 
-                      -> (String -> String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint]))
-                      -> SMT (Maybe mem,Maybe (String,Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint])
+                      -> (String -> String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[MemGuard]))
+                      -> SMT (Maybe mem,Maybe (String,Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint],[MemGuard])
 realizeInstruction fname instr act mem values calls
   = {-trace ("Realizing "++show instr++"..") $-} case instr of
-    IRet e -> return (Nothing,Nothing,Just (Just (argToExpr e values mem)),[],[])
-    IRetVoid -> return (Nothing,Nothing,Just Nothing,[],[])
-    IBr to -> return (Nothing,Nothing,Nothing,[(to,Nothing)],[])
+    IRet e -> return (Nothing,Nothing,Just (Just (argToExpr e values mem)),[],[],[])
+    IRetVoid -> return (Nothing,Nothing,Just Nothing,[],[],[])
+    IBr to -> return (Nothing,Nothing,Nothing,[(to,Nothing)],[],[])
     IBrCond cond ifT ifF -> case argToExpr cond values mem of
-      ConstCondition cond' -> return (Nothing,Nothing,Nothing,[(if cond' then ifT else ifF,Nothing)],[])
-      cond' -> return (Nothing,Nothing,Nothing,[(ifT,Just $ valCond cond'),(ifF,Nothing)],[])
+      ConstCondition cond' -> return (Nothing,Nothing,Nothing,[(if cond' then ifT else ifF,Nothing)],[],[])
+      cond' -> return (Nothing,Nothing,Nothing,[(ifT,Just $ valCond cond'),(ifF,Nothing)],[],[])
     ISwitch val def args -> case argToExpr val values mem of
       ConstValue v -> case [ to | (cmp_v,to) <- args, let ConstValue v' = argToExpr cmp_v values mem, v' == v ] of
-        [] -> return (Nothing,Nothing,Nothing,[(def,Nothing)],[])
-        [to] -> return (Nothing,Nothing,Nothing,[(to,Nothing)],[])
+        [] -> return (Nothing,Nothing,Nothing,[(def,Nothing)],[],[])
+        [to] -> return (Nothing,Nothing,Nothing,[(to,Nothing)],[],[])
       v -> return (Nothing,Nothing,Nothing,[ (to,Just $ valEq mem v (argToExpr cmp_v values mem))
                                            | (cmp_v,to) <- args
-                                           ] ++ [ (def,Nothing) ],[])
-    IAssign trg expr -> return (Nothing,Just (trg,argToExpr expr values mem),Nothing,[],[])
-    IAlloca trg tp size align -> do -- TODO: Ignores the size parameter for now
+                                           ] ++ [ (def,Nothing) ],[],[])
+    IAssign trg expr -> return (Nothing,Just (trg,argToExpr expr values mem),Nothing,[],[],[])
+    IAlloca trg tp size align -> do
       (ptr,mem') <- memAlloc tp (case argToExpr size values mem of
                                     ConstValue bv -> Left $ BitS.toBits bv
                                     DirectValue bv -> Right bv) Nothing mem
-      return (Just mem',Just (trg,PointerValue ptr),Nothing,[],[])
+      return (Just mem',Just (trg,PointerValue ptr),Nothing,[],[],[])
     IStore val to align -> let PointerValue ptr = argToExpr to values mem
                            in case exprType val of
                              TDPtr tp -> case argToExpr val values mem of
-                               PointerValue ptr2 -> return (Just $ memStorePtr tp ptr ptr2 mem,Nothing,Nothing,[],[])
-                             tp -> return (Just $ memStore tp ptr (valValue $ argToExpr val values mem) mem,Nothing,Nothing,[],[])
-    IPhi _ _ -> return (Nothing,Nothing,Nothing,[],[])
+                               PointerValue ptr2 -> let (mem',guards) = memStorePtr tp ptr ptr2 mem
+                                                    in return (Just mem',Nothing,Nothing,[],[],guards)
+                             tp -> let (mem',guards) = memStore tp ptr (valValue $ argToExpr val values mem) mem
+                                   in return (Just mem',Nothing,Nothing,[],[],guards)
+    IPhi _ _ -> return (Nothing,Nothing,Nothing,[],[],[])
     ICall rtp trg _ f args -> case exprDesc f of
                                    EDNamed fn -> do
-                                     (mem',ret,watch) <- calls fn trg act mem [ (argToExpr arg values mem,exprType arg) | arg <- args ]
+                                     (mem',ret,watch,guards) <- calls fn trg act mem [ (argToExpr arg values mem,exprType arg) | arg <- args ]
                                      return (Just mem',case ret of
                                                 Nothing -> Nothing
-                                                Just ret' -> Just (trg,ret'),Nothing,[],watch)
+                                                Just ret' -> Just (trg,ret'),Nothing,[],watch,guards)
     ILoad trg arg align -> let PointerValue ptr = argToExpr arg values mem
                            in case exprType arg of
-                             TDPtr (TDPtr tp) -> return (Nothing,Just (trg,PointerValue $ memLoadPtr tp ptr mem),Nothing,[],[])
-                             TDPtr tp -> return (Nothing,Just (trg,DirectValue $ memLoad tp ptr mem),Nothing,[],[])
+                             TDPtr (TDPtr tp) -> let (res,guards) = memLoadPtr tp ptr mem
+                                                 in return (Nothing,Just (trg,PointerValue res),Nothing,[],[],guards)
+                             TDPtr tp -> let (res,guards) = memLoad tp ptr mem
+                                         in return (Nothing,Just (trg,DirectValue res),Nothing,[],[],guards)
     _ -> error $ "Implement realizeInstruction for "++show instr
     {-
       IDRet tp arg -> return (Nothing,Nothing,Just (Just (argToExpr tp arg values)),[],[])
@@ -793,35 +800,35 @@ allTypesBlks = allTypes' [] []
                                         
                                         _ -> allTypes' is tps blks
 
-intr_memcpy,intr_memset,intr_restrict,intr_watch,intr_malloc :: MemoryModel mem => Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint])
+intr_memcpy,intr_memset,intr_restrict,intr_watch,intr_malloc :: MemoryModel mem => Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[MemGuard])
 intr_memcpy _ _ mem [(PointerValue to,_),(PointerValue from,_),(ConstValue len,_),_,_]
-  = return (memCopy (BitS.toBits len) to from mem,Nothing,[])
+  = return (memCopy (BitS.toBits len) to from mem,Nothing,[],[])
 
 intr_memset _ _ mem [(PointerValue dest,_),(val,_),(ConstValue len,_),_,_]
-  = return (memSet (BitS.toBits len) (valValue val) dest mem,Nothing,[])
+  = return (memSet (BitS.toBits len) (valValue val) dest mem,Nothing,[],[])
 
 intr_restrict _ act mem [(val,_)] = do
   comment " Restriction:"
   case val of
     ConditionValue val _ -> assert $ act .=>. val
     _ -> assert $ act .=>. (not' $ valValue val .==. constantAnn (BitS.fromNBits (32::Int) (0::Integer)) 32)
-  return (mem,Nothing,[])
+  return (mem,Nothing,[],[])
 
 intr_watch _ act mem ((ConstValue num,_):exprs)
-  = return (mem,Nothing,[(show (BitS.toBits num :: Integer),act,[ (tp,valValue val) | (val,tp) <- exprs ])])
+  = return (mem,Nothing,[(show (BitS.toBits num :: Integer),act,[ (tp,valValue val) | (val,tp) <- exprs ])],[])
 
 intr_malloc (Just tp) act mem [(size,sztp)] = do
   (ptr,mem') <- memAlloc tp (case size of
                                 ConstValue bv -> Left $ BitS.toBits bv
                                 DirectValue bv -> Right bv) Nothing mem
-  return (mem',Just (PointerValue ptr),[])
+  return (mem',Just (PointerValue ptr),[],[])
 
-intr_nondet :: MemoryModel mem => Integer -> Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint])
+intr_nondet :: MemoryModel mem => Integer -> Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[MemGuard])
 intr_nondet width _ _ mem [] = do
   v <- varAnn (fromIntegral width)
-  return (mem,Just (DirectValue v),[])
+  return (mem,Just (DirectValue v),[],[])
 
-intrinsics :: MemoryModel mem => String -> Maybe (Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint]))
+intrinsics :: MemoryModel mem => String -> Maybe (Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[MemGuard]))
 intrinsics "llvm.memcpy.p0i8.p0i8.i64" = Just intr_memcpy
 intrinsics "llvm.memcpy.p0i8.p0i8.i32" = Just intr_memcpy
 intrinsics "llvm.memset.p0i8.i32" = Just intr_memset
@@ -994,7 +1001,7 @@ main = do
     perform :: (MemoryModel mem)
                => ProgDesc -> String -> Integer -> SMT mem
     perform program entry depth = do
-      (mem_in,mem_out,watches) <- translateProgram program entry depth
+      (mem_in,mem_out,watches,guards) <- translateProgram program entry depth
       liftIO $ putStrLn "Done translating program"
       checkSat
       liftIO $ putStrLn "Found a solution"

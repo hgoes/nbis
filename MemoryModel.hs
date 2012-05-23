@@ -16,16 +16,21 @@ data MemContent = MemCell (SMTExpr BitVector)
                 | MemNull
                 deriving Show
 
+data MemoryError = NullDeref
+                 | Overrun
+                 | FreeAccess
+                 deriving (Show,Eq,Ord)
+
 class (Typeable m) => MemoryModel m where
     type Pointer m
     memNew :: [TypeDesc] -> SMT m
     memInit :: m -> SMTExpr Bool
     memPtrNew :: m -> TypeDesc -> SMT (Pointer m)
     memAlloc :: TypeDesc -> Either Integer (SMTExpr BitVector) -> Maybe MemContent -> m -> SMT (Pointer m,m)
-    memLoad :: TypeDesc -> Pointer m -> m -> SMTExpr BitVector
-    memLoadPtr :: TypeDesc -> Pointer m -> m -> Pointer m
-    memStore :: TypeDesc -> Pointer m -> SMTExpr BitVector -> m -> m
-    memStorePtr :: TypeDesc -> Pointer m -> Pointer m -> m -> m
+    memLoad :: TypeDesc -> Pointer m -> m -> (SMTExpr BitVector,[(MemoryError,SMTExpr Bool)])
+    memLoadPtr :: TypeDesc -> Pointer m -> m -> (Pointer m,[(MemoryError,SMTExpr Bool)])
+    memStore :: TypeDesc -> Pointer m -> SMTExpr BitVector -> m -> (m,[(MemoryError,SMTExpr Bool)])
+    memStorePtr :: TypeDesc -> Pointer m -> Pointer m -> m -> (m,[(MemoryError,SMTExpr Bool)])
     memIndex :: m -> TypeDesc -> [Either Integer (SMTExpr BitVector)] -> Pointer m -> Pointer m
     memCast :: m -> TypeDesc -> Pointer m -> Pointer m
     memEq :: m -> m -> SMTExpr Bool

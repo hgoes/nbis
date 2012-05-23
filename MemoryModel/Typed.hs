@@ -74,9 +74,9 @@ instance MemoryModel TypedMemory where
                                --        then zipWith (\tp' arr -> store arr nxt (constantAnn (BitS.fromNBits (bitWidth tp') (0::Integer)) (fromIntegral $ bitWidth tp'))) (flattenType tp) arrs
                                --        else arrs
                            in return (TypedPointer [(TypedPointer' tp nxt 0,constant True)],TypedMemory $ Map.insert tp (nxt + 1,arrs) (memoryBanks mem))
-  memLoad tp (TypedPointer ptrs) mem = case ptrs of
-    [(ptr,_)] -> loadSingle ptr
-    ((ptr,cond):rest) -> ite cond (loadSingle ptr) (memLoad tp (TypedPointer rest) mem)
+  memLoad tp (TypedPointer ptrs) mem = (case ptrs of
+                                           [(ptr,_)] -> loadSingle ptr
+                                           ((ptr,cond):rest) -> ite cond (loadSingle ptr) (fst $ memLoad tp (TypedPointer rest) mem),[])
     where
       banks ptr = [ select bank (pointerLocation ptr) | bank <- snd $ (memoryBanks mem)!(pointerType ptr) ]
       loadSingle ptr = if pointerType ptr == tp && pointerOffset ptr == 0
@@ -84,7 +84,7 @@ instance MemoryModel TypedMemory where
                                 [bank] -> bank
                                 bs -> bvconcats bs)
                        else typedLoad (pointerOffset ptr) (bitWidth' tp) (flattenType $ pointerType ptr) (banks ptr)
-  memStore tp (TypedPointer ptrs) val mem = TypedMemory $ store' ptrs (memoryBanks mem)
+  memStore tp (TypedPointer ptrs) val mem = (TypedMemory $ store' ptrs (memoryBanks mem),[])
     where
       store' [(ptr,_)] mem = let (nxt,banks) = mem!(pointerType ptr)
                                  nbanks = fmap fst $ typedStore (pointerOffset ptr) (bitWidth' tp) 0 (flattenType $ pointerType ptr) (pointerLocation ptr) val banks

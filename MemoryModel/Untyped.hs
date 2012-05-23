@@ -48,22 +48,22 @@ instance MemoryModel UntypedMemory where
     memAlloc tp _ cont mem = let w = typeWidth' tp
                              in return (UntypedPointer $ memoryNextFree mem,mem { memoryNextFree = (memoryNextFree mem) + (constant $ fromIntegral w) })
     memLoad tp (UntypedPointer ptr) mem = let w = typeWidth' tp
-                                          in if w==1
-                                             then select (memoryBlocks mem) ptr
-                                             else bvconcats [ select (memoryBlocks mem) (if i==0
-                                                                                         then ptr
-                                                                                         else ptr + (constant $ fromIntegral i))
-                                                              | i <- [0..(w-1)] ]
+                                          in (if w==1
+                                              then select (memoryBlocks mem) ptr
+                                              else bvconcats [ select (memoryBlocks mem) (if i==0
+                                                                                          then ptr
+                                                                                          else ptr + (constant $ fromIntegral i))
+                                                             | i <- [0..(w-1)] ],[])
     memStore tp (UntypedPointer ptr) val mem
       = let w = typeWidth' tp
-        in mem { memoryBlocks = if w==1
-                                then store (memoryBlocks mem) ptr val
-                                else letAnn (fromIntegral w) val 
-                                     $ \val' -> foldl (\cmem (blk,off) -> store cmem (if off==0
-                                                                                                 then ptr
-                                                                                                 else ptr + (constant $ fromIntegral off)) blk)
-                                                           (memoryBlocks mem) 
-                                                           [ (bvextract ((i+1)*8 - 1) (i*8) val',w-i-1) | i <- [0..(w-1)] ] }
+        in (mem { memoryBlocks = if w==1
+                                 then store (memoryBlocks mem) ptr val
+                                 else letAnn (fromIntegral w) val 
+                                      $ \val' -> foldl (\cmem (blk,off) -> store cmem (if off==0
+                                                                                       then ptr
+                                                                                       else ptr + (constant $ fromIntegral off)) blk)
+                                                 (memoryBlocks mem) 
+                                                 [ (bvextract ((i+1)*8 - 1) (i*8) val',w-i-1) | i <- [0..(w-1)] ] },[])
     memCast _ tp ptr = ptr
     memIndex _ tp idx (UntypedPointer ptr) = UntypedPointer $ case fromIntegral $ getOffset typeWidth' tp (fmap (\(Left i) -> i) idx) of
       0 -> ptr
