@@ -7,7 +7,7 @@ import Language.SMTLib2
 import Data.Map as Map hiding (foldl,(!))
 import Data.Typeable
 import Data.Maybe
-import Data.Bitstream as BitS hiding (foldl,zipWith,zipWith3,concat,zip)
+import Data.Bitstream as BitS (fromNBits,toBits)
 import Data.Traversable
 import Prelude hiding (mapM,sequence)
 import Data.List (genericReplicate,genericIndex,genericDrop,intersperse,genericLength)
@@ -17,6 +17,9 @@ import Data.Bits
 (!) mp k = case Map.lookup k mp of
              Nothing -> error $ "Couldn't find key "++show k++" in "++show (Map.keys mp)
              Just r -> r
+
+newBV :: Integer -> Integer -> SMTExpr BitVector
+newBV sz val = constantAnn (BitS.fromNBits sz val) (fromIntegral sz)
 
 data PlainMemory = PlainMem (Map TypeDesc (Map Int (Bool,PlainCont)))
                  deriving Typeable
@@ -31,7 +34,7 @@ data PlainPointer = PlainPtr { ptrType :: TypeDesc
                              } deriving (Typeable,Show)
 
 data PlainCont = PlainStruct [PlainCont] 
-               | forall p. PlainIdx p => PlainSingle (SMTExpr p)
+               | forall p. PlainIdx p => PlainSingle (SMTExpr p) [SMTExpr BitVector]
                | PlainPtrs PlainPtrCont
 
 data PlainPtrCont = PlainPtrArray [PlainPtrCont]
@@ -97,13 +100,13 @@ allSuccIdx tp idx = error $ "Indexing type "++show tp++" with "++show idx
 plainResolve :: PlainCont -> [Integer] -> [SMTExpr BitVector] -> SMTExpr BitVector
 plainResolve (PlainStruct conts) (i:is) dis = plainResolve (conts `genericIndex` i) is dis
 plainResolve (PlainStruct _) [] _ = error "plainResolve: There are too few static indices"
-plainResolve (PlainSingle el) [] [] = case plainWithCell el (\x -> (x,Nothing)) of
+plainResolve (PlainSingle el _) [] [] = case plainWithCell el (\x -> (x,Nothing)) of
   Nothing -> error "plainResolve: Too few dynamic indices"
   Just (res,_) -> res
-plainResolve (PlainSingle el) [] (i:is) = case plainWithIdx el i (\np -> (plainResolve (PlainSingle np) [] is,Nothing)) of
+plainResolve (PlainSingle el dims) [] (i:is) = case plainWithIdx el i (\np -> (plainResolve (PlainSingle np (tail dims)) [] is,Nothing)) of
   Nothing -> error "plainResolve: Too many dynamic indices"
   Just (res,_) -> res
-plainResolve (PlainSingle _) _ _ = error "plainResolve: Too many static indices"
+plainResolve (PlainSingle _ _) _ _ = error "plainResolve: Too many static indices"
 
 plainModify :: PlainCont -> [Integer] -> [SMTExpr BitVector] -> (SMTExpr BitVector -> (a,Maybe (SMTExpr BitVector))) -> (a,PlainCont)
 plainModify (PlainStruct conts) (i:is) dis f = let (res,conts') = modifyStruct i conts 
@@ -114,11 +117,11 @@ plainModify (PlainStruct conts) (i:is) dis f = let (res,conts') = modifyStruct i
     modifyStruct i (x:xs) = let (a,xs') = modifyStruct (i-1) xs
                             in (a,x:xs')
 plainModify (PlainStruct _) [] _ _ = error "plainModify: Too few static indices"
-plainModify (PlainSingle el) [] dis f = let (res,nel) = modify' el dis f
-                                            rnel = case nel of
-                                              Nothing -> el
-                                              Just el' -> el'
-                                        in (res,PlainSingle rnel)
+plainModify (PlainSingle el dim) [] dis f = let (res,nel) = modify' el dis f
+                                                rnel = case nel of
+                                                  Nothing -> el
+                                                  Just el' -> el'
+                                            in (res,PlainSingle rnel dim)
   where
     modify' :: PlainIdx p => SMTExpr p -> [SMTExpr BitVector] -> (SMTExpr BitVector -> (a,Maybe (SMTExpr BitVector))) -> (a,Maybe (SMTExpr p))
     modify' el [] f = case plainWithCell el (\bv -> f bv) of
@@ -127,7 +130,7 @@ plainModify (PlainSingle el) [] dis f = let (res,nel) = modify' el dis f
     modify' arr (i:is) f = case plainWithIdx arr i (\el -> modify' el is f) of
       Just res -> res
       Nothing -> error "plainModify: Too many dynamic indices"
-plainModify (PlainSingle _) _ _ _ = error "plainModify: Too many static indices"
+plainModify (PlainSingle _ _) _ _ _ = error "plainModify: Too many static indices"
 
 plainModifyPtr :: PlainPtrCont -> [Integer] -> [SMTExpr BitVector] -> ([(Maybe PlainPointer,SMTExpr Bool)] -> (a,[(Maybe PlainPointer,SMTExpr Bool)])) -> (a,PlainPtrCont)
 plainModifyPtr _ _ (_:_) _ = error "Dynamic indices not allowed for pointer arrays"
@@ -174,18 +177,21 @@ expandIdx = fmap (\v -> case v of
 contentToCell :: MemContent -> [Integer] -> SMTExpr BitVector
 contentToCell (MemArray arr) (i:is) = contentToCell (genericIndex arr i) is
 contentToCell (MemCell e) [] = e
-  
-plainNew :: TypeDesc -> [Integer] -> SMT PlainCont
+
+plainNew :: TypeDesc -> [Either Integer (SMTExpr BitVector)] -> SMT PlainCont
 plainNew (TDStruct tps _) d = do
   subs <- mapM (\tp -> plainNew tp d) tps
   return $ PlainStruct subs
-plainNew (TDArray len tp) d = plainNew tp (d++[len])
-plainNew (TDVector len tp) d = plainNew tp (d++[len])
+plainNew (TDArray len tp) d = plainNew tp (d++[Left len])
+plainNew (TDVector len tp) d = plainNew tp (d++[Left len])
 plainNew (TDPtr tp) d = return $ PlainPtrs $ plainNewPtr d
   where
-    plainNewPtr (l:ls) = PlainPtrArray $ genericReplicate l (plainNewPtr ls)
+    plainNewPtr (Left l:ls) = PlainPtrArray $ genericReplicate l (plainNewPtr ls)
     plainNewPtr [] = PlainPtrCell [(Nothing,constant True)]
-plainNew tp d = mkPlainIdx (bitWidth tp) (genericLength d) (return.PlainSingle)
+plainNew tp d = mkPlainIdx (bitWidth tp) (genericLength d) (\r -> return (PlainSingle r (fmap (\d' -> case d' of
+                                                                                                  Left rd -> newBV 64 rd
+                                                                                                  Right sz -> sz
+                                                                                              ) d)))
 
 plainAssign :: TypeDesc -> PlainCont -> MemContent -> [Integer] -> SMT ()
 plainAssign (TDStruct tps _) (PlainStruct conts) (MemArray cells) path
@@ -195,7 +201,7 @@ plainAssign (TDArray len tp) cont (MemArray cells) path
 plainAssign (TDArray len tp) cont (MemArray cells) path
   = mapM_ (\(i,cell) -> plainAssign tp cont cell (i:path)) (zip [0..] cells)
 plainAssign (TDPtr tp) cont mem path = return ()
-plainAssign tp (PlainSingle el) (MemCell bv) path
+plainAssign tp (PlainSingle el _) (MemCell bv) path
   = assert $ (resolve' el (Prelude.reverse path)) .==. bv
   where
     resolve' :: PlainIdx p => SMTExpr p -> [Integer] -> SMTExpr BitVector
@@ -221,27 +227,33 @@ plainSwitch cond tp (PlainPtrs p1) (PlainPtrs p2) 0 = switchPtr cond tp p1 p2 >>
                                                                             [ (trg,and' [c,not' cond]) | (trg,c) <- c2 ])
 plainSwitch cond (TDArray len tp) p1 p2 d = plainSwitch cond tp p1 p2 (d+1)
 plainSwitch cond (TDVector len tp) p1 p2 d = plainSwitch cond tp p1 p2 (d+1)
-plainSwitch cond tp (PlainSingle c1) (PlainSingle c2) d = case cast c2 of
+plainSwitch cond tp (PlainSingle c1 dims1) (PlainSingle c2 dims2) d = case cast c2 of
   Just c2' -> if c1 == c2'
-              then return (PlainSingle c1)
+              then return (PlainSingle c1 dims1)
               else mkPlainIdx (bitWidth tp) d (\nc -> case cast nc of
                                                   Just nc' -> do
                                                     assert $ nc' .==. (ite cond c1 c2')
-                                                    return (PlainSingle nc'))
+                                                    dims <- mapM (\(d1,d2) -> if d1==d2
+                                                                              then return d1
+                                                                              else (do
+                                                                                       d <- varAnn 64
+                                                                                       assert $ d .==. ite cond d1 d2
+                                                                                       return d)) (zip dims1 dims2)
+                                                    return (PlainSingle nc' dims))
 
 addIndirection :: PlainCont -> SMT PlainCont
 addIndirection (PlainStruct cs) = do
   cs' <- mapM addIndirection cs
   return (PlainStruct cs')
-addIndirection (PlainSingle expr) = do
+addIndirection (PlainSingle expr dims) = do
   nvar <- varAnn (64,extractAnnotation expr)
   assert $ (select nvar (constantAnn (BitS.fromNBits 64 (0::Integer)) 64::SMTExpr BitVector)) .==. expr
-  return (PlainSingle nvar)
+  return (PlainSingle nvar ((constantAnn (BitS.fromNBits 64 (1::Integer)) 64):dims))
 addIndirection (PlainPtrs cont) = return $ PlainPtrs (PlainPtrArray [cont])
 
 plainEq :: PlainCont -> PlainCont -> SMT ()
 plainEq (PlainStruct s1) (PlainStruct s2) = mapM_ (\(x,y) -> plainEq x y) (zip s1 s2)
-plainEq (PlainSingle s1) (PlainSingle s2) = case cast s2 of
+plainEq (PlainSingle s1 _) (PlainSingle s2 _) = case cast s2 of
   Just s2' -> assert $ s1 .==. s2'
 
 
@@ -256,7 +268,8 @@ plainDup (PlainMem mem) = do
                                     in mapM (\(indir,PlainPtrs ptr) -> dupPtrs ptr >>= \ptr' -> return (indir,PlainPtrs ptr')) bank >>= \bank' -> return (TDPtr tp,bank')
                  (tp,bank) -> do
                    bank' <- mapM (\(indir,cont) -> do
-                                     var <- plainNew tp (if indir then [0] else [])
+                                     var <- plainNew tp (if indir then [case cont of
+                                                                           PlainSingle _ (bv:_) -> Right bv] else [])
                                      plainEq cont var
                                      return (indir,var)) bank
                    return (tp,bank')
@@ -274,7 +287,7 @@ instance MemoryModel PlainMemory where
         off = if indir
               then [Left 0]
               else []
-    res <- plainNew tp (if indir then [0] else [])
+    res <- plainNew tp (if indir then [sz] else [])
     case cont of
       Nothing -> return ()
       Just cont' -> plainAssign tp res cont' []
@@ -399,12 +412,12 @@ instance MemoryModel PlainMemory where
         return $ "{ " ++ concat (intersperse ", " res) ++ " }"
       dumpPlainCont (TDArray len tp) plain limits = dumpPlainCont tp plain (limits++[len])
       dumpPlainCont (TDVector len tp) plain limits = dumpPlainCont tp plain (limits++[len])
-      dumpPlainCont tp (PlainSingle cont) [] = case plainWithCell cont (\x -> (x,Nothing)) of
+      dumpPlainCont tp (PlainSingle cont _) [] = case plainWithCell cont (\x -> (x,Nothing)) of
         Just (r,_) -> do
           v <- getValue' (fromIntegral $ bitWidth tp) r
           return $ show (BitS.toBits v :: Integer)
-      dumpPlainCont tp (PlainSingle cont) (l:ls) = do
-        res <- mapM (\i -> case plainWithIdx cont (constantAnn (BitS.fromNBits 64 i) 64) (\expr -> (dumpPlainCont tp (PlainSingle expr) ls,Nothing)) of
+      dumpPlainCont tp (PlainSingle cont dims) (l:ls) = do
+        res <- mapM (\i -> case plainWithIdx cont (constantAnn (BitS.fromNBits 64 i) 64) (\expr -> (dumpPlainCont tp (PlainSingle expr (tail dims)) ls,Nothing)) of
                         Just (r,_) -> r) [0..(l-1)]
         return $ "[ "++concat (intersperse ", " res)++" ]"
   memCast _ to ptr = fmap (\(ptr',cond) -> case ptr' of
