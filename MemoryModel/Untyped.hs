@@ -44,9 +44,9 @@ instance MemoryModel UntypedMemory where
     type Pointer UntypedMemory = UntypedPointer
     memNew tps = argVarsAnn tps
     memInit mem = (memoryNextFree mem) .==. (constant 0)
-    -- TODO: zero
-    memAlloc _ tp mem = let w = typeWidth' tp
-                        in return (UntypedPointer $ memoryNextFree mem,mem { memoryNextFree = (memoryNextFree mem) + (constant $ fromIntegral w) })
+    -- TODO: Constant init
+    memAlloc tp _ cont mem = let w = typeWidth' tp
+                             in return (UntypedPointer $ memoryNextFree mem,mem { memoryNextFree = (memoryNextFree mem) + (constant $ fromIntegral w) })
     memLoad tp (UntypedPointer ptr) mem = let w = typeWidth' tp
                                           in if w==1
                                              then select (memoryBlocks mem) ptr
@@ -65,7 +65,7 @@ instance MemoryModel UntypedMemory where
                                                            (memoryBlocks mem) 
                                                            [ (bvextract ((i+1)*8 - 1) (i*8) val',w-i-1) | i <- [0..(w-1)] ] }
     memCast _ tp ptr = ptr
-    memIndex _ tp idx (UntypedPointer ptr) = UntypedPointer $ case fromIntegral $ getOffset typeWidth' tp idx of
+    memIndex _ tp idx (UntypedPointer ptr) = UntypedPointer $ case fromIntegral $ getOffset typeWidth' tp (fmap (\(Left i) -> i) idx) of
       0 -> ptr
       off' ->  ptr + (constant off')
     memEq mem1 mem2 = and' [ memoryBlocks mem1 .==. memoryBlocks mem2

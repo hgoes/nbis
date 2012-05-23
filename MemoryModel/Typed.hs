@@ -69,11 +69,11 @@ instance MemoryModel TypedMemory where
     loc <- var
     return $ TypedPointer [(TypedPointer' tp loc 0,constant True)]
   memInit mem = and' [ nxt .==. 0 | (nxt,_) <- Map.elems (memoryBanks mem) ]
-  memAlloc zero tp mem = let (nxt,arrs) = (memoryBanks mem)!tp
-                             narrs = if zero
-                                     then zipWith (\tp' arr -> store arr nxt (constantAnn (BitS.fromNBits (bitWidth tp') (0::Integer)) (fromIntegral $ bitWidth tp'))) (flattenType tp) arrs
-                                     else arrs
-                         in return (TypedPointer [(TypedPointer' tp nxt 0,constant True)],TypedMemory $ Map.insert tp (nxt + 1,narrs) (memoryBanks mem))
+  memAlloc tp _ cont mem = let (nxt,arrs) = (memoryBanks mem)!tp
+                               --narrs = if zero
+                               --        then zipWith (\tp' arr -> store arr nxt (constantAnn (BitS.fromNBits (bitWidth tp') (0::Integer)) (fromIntegral $ bitWidth tp'))) (flattenType tp) arrs
+                               --        else arrs
+                           in return (TypedPointer [(TypedPointer' tp nxt 0,constant True)],TypedMemory $ Map.insert tp (nxt + 1,arrs) (memoryBanks mem))
   memLoad tp (TypedPointer ptrs) mem = case ptrs of
     [(ptr,_)] -> loadSingle ptr
     ((ptr,cond):rest) -> ite cond (loadSingle ptr) (memLoad tp (TypedPointer rest) mem)
@@ -96,7 +96,7 @@ instance MemoryModel TypedMemory where
                                                                                  else obank
                                                            ) banks nbanks
                                      in store' ptrs (Map.insert (pointerType ptr) (nxt,nbanks') mem)
-  memIndex _ tp idx (TypedPointer ptrs) = TypedPointer $ fmap (\(ptr,cond) -> (ptr { pointerOffset = (pointerOffset ptr) + (getOffset bitWidth' tp idx) },cond)) ptrs
+  memIndex _ tp idx (TypedPointer ptrs) = TypedPointer $ fmap (\(ptr,cond) -> (ptr { pointerOffset = (pointerOffset ptr) + (getOffset bitWidth' tp (fmap (\(Left i) -> i) idx)) },cond)) ptrs
   memCast _ tp ptr = ptr
   memEq mem1 mem2 = and' $ Map.elems $ Map.intersectionWith (\(nxt1,bank1) (nxt2,bank2) -> and' ((nxt1 .==. nxt2):(zipWith (.==.) bank1 bank2))) (memoryBanks mem1) (memoryBanks mem2)
   {-memPtrEq _ p1 p2

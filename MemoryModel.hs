@@ -11,15 +11,22 @@ import Data.List (genericSplitAt,genericReplicate)
 
 type BitVector = Bitstream Right
 
-class (Typeable m,Eq (Pointer m)) => MemoryModel m where
+data MemContent = MemCell (SMTExpr BitVector)
+                | MemArray [MemContent]
+                | MemNull
+                deriving Show
+
+class (Typeable m) => MemoryModel m where
     type Pointer m
     memNew :: [TypeDesc] -> SMT m
     memInit :: m -> SMTExpr Bool
     memPtrNew :: m -> TypeDesc -> SMT (Pointer m)
-    memAlloc :: Bool -> TypeDesc -> m -> SMT (Pointer m,m)
+    memAlloc :: TypeDesc -> Either Integer (SMTExpr BitVector) -> Maybe MemContent -> m -> SMT (Pointer m,m)
     memLoad :: TypeDesc -> Pointer m -> m -> SMTExpr BitVector
+    memLoadPtr :: TypeDesc -> Pointer m -> m -> Pointer m
     memStore :: TypeDesc -> Pointer m -> SMTExpr BitVector -> m -> m
-    memIndex :: m -> TypeDesc -> [Integer] -> Pointer m -> Pointer m
+    memStorePtr :: TypeDesc -> Pointer m -> Pointer m -> m -> m
+    memIndex :: m -> TypeDesc -> [Either Integer (SMTExpr BitVector)] -> Pointer m -> Pointer m
     memCast :: m -> TypeDesc -> Pointer m -> Pointer m
     memEq :: m -> m -> SMTExpr Bool
     memPtrEq :: m -> Pointer m -> Pointer m -> SMTExpr Bool
@@ -28,6 +35,11 @@ class (Typeable m,Eq (Pointer m)) => MemoryModel m where
     memSet :: Integer -> SMTExpr BitVector -> Pointer m -> m -> m
     memDump :: m -> SMT String
     memSwitch :: [(m,SMTExpr Bool)] -> SMT m
+    memPtrNull :: m -> Pointer m
+
+flattenMemContent :: MemContent -> [SMTExpr BitVector]
+flattenMemContent (MemCell x) = [x]
+flattenMemContent (MemArray xs) = concat $ fmap flattenMemContent xs
 
 typeWidth :: TypeDesc -> Integer
 typeWidth (TDInt _ w)

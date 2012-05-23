@@ -43,12 +43,12 @@ instance MemoryModel UntypedBlockMemory where
     type Pointer UntypedBlockMemory = UntypedPointer
     memNew = argVarsAnn
     memInit mem = (memoryNextFree mem) .==. (constant 0)
-    -- TODO: zero
-    memAlloc _ tp mem = return (UntypedPointer { pointerBlock = (memoryNextFree mem)
-                                               , pointerOffset = 0 },
-                                mem { memoryNextFree = (memoryNextFree mem) + 1 
-                                    , memoryBlockSizes = store (memoryBlockSizes mem) (memoryNextFree mem) (constant $ fromIntegral $ typeWidth tp)
-                                    })
+    -- TODO: constant init
+    memAlloc tp _ cont mem = return (UntypedPointer { pointerBlock = (memoryNextFree mem)
+                                                    , pointerOffset = 0 },
+                                     mem { memoryNextFree = (memoryNextFree mem) + 1 
+                                         , memoryBlockSizes = store (memoryBlockSizes mem) (memoryNextFree mem) (constant $ fromIntegral $ typeWidth tp)
+                                         })
     memLoad tp ptr mem = let w = typeWidth tp
                          in if w==1
                             then select (memoryBlocks mem) (pointerBlock ptr,pointerOffset ptr)
@@ -66,7 +66,7 @@ instance MemoryModel UntypedBlockMemory where
                                                                       (memoryBlocks mem) 
                                                                       [ (bvextract ((i+1)*8 - 1) (i*8) val',w-i-1) | i <- [0..(w-1)] ] }
     memCast _ tp ptr = ptr
-    memIndex _ tp idx ptr = ptr { pointerOffset = pointerOffset ptr + (constant $ fromIntegral $ getOffset typeWidth tp idx) }
+    memIndex _ tp idx ptr = ptr { pointerOffset = pointerOffset ptr + (constant $ fromIntegral $ getOffset typeWidth tp (fmap (\(Left i) -> i) idx)) }
     memEq mem1 mem2 = and' [ memoryBlocks mem1 .==. memoryBlocks mem2
                            , memoryBlockSizes mem1 .==. memoryBlockSizes mem2
                            , memoryNextFree mem1 .==. memoryNextFree mem2 ]

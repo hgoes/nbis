@@ -1,32 +1,486 @@
-{-# LANGUAGE DeriveDataTypeable,TypeFamilies #-}
-module MemoryModel.Plain where
+{-# LANGUAGE DeriveDataTypeable,TypeFamilies,RankNTypes,FlexibleInstances,TypeSynonymInstances,ExistentialQuantification #-}
+module MemoryModel.Plain (PlainMemory) where
 
 import MemoryModel
 import LLVM.Core (TypeDesc(..))
 import Language.SMTLib2
-import Data.Map as Map hiding (foldl)
+import Data.Map as Map hiding (foldl,(!))
 import Data.Typeable
 import Data.Maybe
 import Data.Bitstream as BitS hiding (foldl,zipWith,zipWith3,concat,zip)
 import Data.Traversable
 import Prelude hiding (mapM,sequence)
-import Data.List (genericReplicate)
+import Data.List (genericReplicate,genericIndex,genericDrop,intersperse,genericLength)
 import Data.Bits
 
-newtype PlainMemory = PlainMem (Map TypeDesc (Map Int [SMTExpr BitVector])) deriving (Eq,Typeable)
+(!) :: (Show k,Ord k) => Map k a -> k -> a
+(!) mp k = case Map.lookup k mp of
+             Nothing -> error $ "Couldn't find key "++show k++" in "++show (Map.keys mp)
+             Just r -> r
+
+data PlainMemory = PlainMem (Map TypeDesc (Map Int (Bool,PlainCont)))
+                 deriving Typeable
+
+debugMem :: PlainMemory -> String
+debugMem (PlainMem mp) = show [ (tp,Map.keys bank) | (tp,bank) <- Map.toList mp ]
+
 
 data PlainPointer = PlainPtr { ptrType :: TypeDesc
                              , ptrLocation :: Int
-                             , ptrOffset :: Int
-                             } deriving (Eq,Ord,Show,Typeable)
+                             , ptrOffset :: [Either Integer (SMTExpr BitVector)]
+                             } deriving (Typeable,Show)
 
+data PlainCont = PlainStruct [PlainCont] 
+               | forall p. PlainIdx p => PlainSingle (SMTExpr p)
+               | PlainPtrs PlainPtrCont
+
+data PlainPtrCont = PlainPtrArray [PlainPtrCont]
+                  | PlainPtrCell [(Maybe PlainPointer,SMTExpr Bool)]
+
+class SMTType p => PlainIdx p where
+  plainWithIdx :: SMTExpr p -> SMTExpr BitVector -> (forall q. PlainIdx q => SMTExpr q -> (a,Maybe (SMTExpr q))) -> Maybe (a,Maybe (SMTExpr p))
+  plainWithCell :: SMTExpr p -> (SMTExpr BitVector -> (a,Maybe (SMTExpr BitVector))) -> Maybe (a,Maybe (SMTExpr p))
+  plainAnn :: p -> Integer -> SMTAnnotation p
+
+instance PlainIdx BitVector where
+  plainWithIdx _ _ _ = Nothing
+  plainWithCell expr f = Just (f expr)
+  plainAnn _ w = fromIntegral w
+
+instance PlainIdx a => PlainIdx (SMTArray (SMTExpr BitVector) a) where
+  plainWithIdx arr idx f = let (r,nv) = f (select arr idx)
+                               narr = case nv of
+                                 Nothing -> Nothing
+                                 Just rnv -> Just $ store arr idx rnv
+                           in Just (r,narr)
+  plainWithCell _ _ = Nothing
+  plainAnn u w = (64,plainAnn (fromUndefArray u) w)
+    where
+      fromUndefArray :: SMTArray (SMTExpr BitVector) a -> a
+      fromUndefArray _ = undefined
+
+mkPlainIdx :: Integer -> Integer -> (forall p. PlainIdx p => SMTExpr p -> SMT a) -> SMT a
+mkPlainIdx w n f = undefFor n (\u -> do
+                                  v <- varAnn (plainAnn (plainUndef u) w)
+                                  f (enforceEq u v))
+  where
+    plainUndef :: SMTExpr p -> p
+    plainUndef _ = undefined
+    
+    enforceEq :: u -> u -> u
+    enforceEq _ = id
+
+    undefFor :: Integer -> (forall p. PlainIdx p => SMTExpr p -> a) -> a
+    undefFor 0 f = f (undefined::SMTExpr BitVector)
+    undefFor n f = undefFor (n-1) (\u -> f (toUndefArray u))
+
+    toUndefArray :: SMTExpr a -> SMTExpr (SMTArray (SMTExpr BitVector) a)
+    toUndefArray _ = undefined
+
+allIdx :: TypeDesc -> [[Integer]]
+allIdx (TDStruct tps _) = concat $ zipWith (\n tp -> fmap (n:) (allIdx tp)) [0..] tps
+allIdx (TDArray l tp) = concat $ fmap (\n -> fmap (n:) (allIdx tp)) [0..(l-1)]
+allIdx (TDVector l tp) = concat $ fmap (\n -> fmap (n:) (allIdx tp)) [0..(l-1)]
+allIdx _ = [[]]
+
+allSuccIdx :: TypeDesc -> [Either Integer (SMTExpr BitVector)] -> [[Either Integer (SMTExpr BitVector)]]
+allSuccIdx tp [] = fmap (fmap Left) (allIdx tp)
+allSuccIdx (TDStruct tps _) ((Left i):is) = concat $ zipWith (\n tp -> fmap ((Left n):) (allSuccIdx tp is)) [i..] (genericDrop i tps)
+allSuccIdx (TDArray l tp) ((Left i):is) = concat $ fmap (\n -> fmap ((Left n):) (allSuccIdx tp is)) [i..(l-1)]
+allSuccIdx (TDArray l tp) ((Right i):is) = concat $ fmap (\n -> fmap ((Right $ if n==0 then i else bvadd i (constantAnn (BitS.fromNBits 64 (n::Integer)) 64)):) (allSuccIdx tp is)) [0..]
+allSuccIdx (TDVector l tp) ((Left i):is) = concat $ fmap (\n -> fmap ((Left n):) (allSuccIdx tp is)) [i..(l-1)]
+allSuccIdx (TDArray l tp) ((Right i):is) = concat $ fmap (\n -> fmap ((Right $ if n==0 then i else bvadd i (constantAnn (BitS.fromNBits 64 (n::Integer)) 64)):) (allSuccIdx tp is)) [0..]
+allSuccIdx (TDPtr tp) ((Left i):is) = concat $ fmap (\n -> fmap ((Left n):) (allSuccIdx tp is)) [i..]
+allSuccIdx (TDPtr tp) ((Right i):is) = concat $ fmap (\n -> fmap ((Right $ if n==0 then i else bvadd i (constantAnn (BitS.fromNBits 64 (n::Integer)) 64)):) (allSuccIdx tp is)) [0..]
+allSuccIdx tp idx = error $ "Indexing type "++show tp++" with "++show idx
+
+plainResolve :: PlainCont -> [Integer] -> [SMTExpr BitVector] -> SMTExpr BitVector
+plainResolve (PlainStruct conts) (i:is) dis = plainResolve (conts `genericIndex` i) is dis
+plainResolve (PlainStruct _) [] _ = error "plainResolve: There are too few static indices"
+plainResolve (PlainSingle el) [] [] = case plainWithCell el (\x -> (x,Nothing)) of
+  Nothing -> error "plainResolve: Too few dynamic indices"
+  Just (res,_) -> res
+plainResolve (PlainSingle el) [] (i:is) = case plainWithIdx el i (\np -> (plainResolve (PlainSingle np) [] is,Nothing)) of
+  Nothing -> error "plainResolve: Too many dynamic indices"
+  Just (res,_) -> res
+plainResolve (PlainSingle _) _ _ = error "plainResolve: Too many static indices"
+
+plainModify :: PlainCont -> [Integer] -> [SMTExpr BitVector] -> (SMTExpr BitVector -> (a,Maybe (SMTExpr BitVector))) -> (a,PlainCont)
+plainModify (PlainStruct conts) (i:is) dis f = let (res,conts') = modifyStruct i conts 
+                                               in (res,PlainStruct conts')
+  where
+    modifyStruct 0 (x:xs) = let (a,nx) = plainModify x is dis f
+                            in (a,nx:xs)
+    modifyStruct i (x:xs) = let (a,xs') = modifyStruct (i-1) xs
+                            in (a,x:xs')
+plainModify (PlainStruct _) [] _ _ = error "plainModify: Too few static indices"
+plainModify (PlainSingle el) [] dis f = let (res,nel) = modify' el dis f
+                                            rnel = case nel of
+                                              Nothing -> el
+                                              Just el' -> el'
+                                        in (res,PlainSingle rnel)
+  where
+    modify' :: PlainIdx p => SMTExpr p -> [SMTExpr BitVector] -> (SMTExpr BitVector -> (a,Maybe (SMTExpr BitVector))) -> (a,Maybe (SMTExpr p))
+    modify' el [] f = case plainWithCell el (\bv -> f bv) of
+      Just res -> res
+      Nothing -> error "plainModify: Too few dynamic indices"
+    modify' arr (i:is) f = case plainWithIdx arr i (\el -> modify' el is f) of
+      Just res -> res
+      Nothing -> error "plainModify: Too many dynamic indices"
+plainModify (PlainSingle _) _ _ _ = error "plainModify: Too many static indices"
+
+plainModifyPtr :: PlainPtrCont -> [Integer] -> [SMTExpr BitVector] -> ([(Maybe PlainPointer,SMTExpr Bool)] -> (a,[(Maybe PlainPointer,SMTExpr Bool)])) -> (a,PlainPtrCont)
+plainModifyPtr _ _ (_:_) _ = error "Dynamic indices not allowed for pointer arrays"
+plainModifyPtr (PlainPtrArray arr) (i:is) dyn f = (res,PlainPtrArray new)
+  where
+    (res,new) = modify' arr i
+    
+    modify' (x:xs) 0 = let (res,new) = plainModifyPtr x is dyn f
+                       in (res,new:xs)
+    modify' (x:xs) n = let (res,new) = modify' xs (n-1)
+                       in (res,x:new)
+plainModifyPtr (PlainPtrCell alts) [] dyn f = let (res,nalts) = f alts
+                                              in (res,PlainPtrCell nalts)
+
+translateIdx :: TypeDesc -> [Either Integer (SMTExpr BitVector)] -> ([Integer],[SMTExpr BitVector])
+translateIdx (TDStruct tps _) ((Left idx):rest) = let (rst,rdyn) = translateIdx (genericIndex tps idx) rest
+                                                  in (idx:rst,rdyn)
+translateIdx (TDArray len tp) (idx:rest) = let (rst,rdyn) = translateIdx tp rest
+                                               nidx = case idx of
+                                                 Left st -> constantAnn (BitS.fromNBits 64 st) 64
+                                                 Right bv -> bv
+                                           in (rst,nidx:rdyn)
+translateIdx (TDVector len tp)  (idx:rest) = let (rst,rdyn) = translateIdx tp rest
+                                                 nidx = case idx of
+                                                   Left st -> constantAnn (BitS.fromNBits 64 st) 64
+                                                   Right bv -> bv
+                                             in (rst,nidx:rdyn)
+translateIdx (TDPtr tp) (idx:rest) = let (rst,rdyn) = translateIdx tp rest
+                                         nidx = case idx of
+                                           Left st -> constantAnn (BitS.fromNBits 64 st) 64
+                                           Right bv -> bv
+                                     in (rst,nidx:rdyn)
+translateIdx _ [] = ([],[])
+translateIdx tp idx = error $ "Implement translateIdx for "++show tp++" "++show idx
+
+expandIdx :: [Either Integer (SMTExpr BitVector)] -> [Either Integer (SMTExpr BitVector)]
+expandIdx = fmap (\v -> case v of
+                     Left i -> Left i
+                     Right bv -> let BitstreamLen w = extractAnnotation bv
+                                 in if w < 64
+                                    then Right $ bvconcat (constantAnn (BitS.fromNBits (64-w) (0::Integer) :: BitVector) (fromIntegral $ 64-w)) bv
+                                    else Right bv)
+
+contentToCell :: MemContent -> [Integer] -> SMTExpr BitVector
+contentToCell (MemArray arr) (i:is) = contentToCell (genericIndex arr i) is
+contentToCell (MemCell e) [] = e
+  
+plainNew :: TypeDesc -> [Integer] -> SMT PlainCont
+plainNew (TDStruct tps _) d = do
+  subs <- mapM (\tp -> plainNew tp d) tps
+  return $ PlainStruct subs
+plainNew (TDArray len tp) d = plainNew tp (d++[len])
+plainNew (TDVector len tp) d = plainNew tp (d++[len])
+plainNew (TDPtr tp) d = return $ PlainPtrs $ plainNewPtr d
+  where
+    plainNewPtr (l:ls) = PlainPtrArray $ genericReplicate l (plainNewPtr ls)
+    plainNewPtr [] = PlainPtrCell [(Nothing,constant True)]
+plainNew tp d = mkPlainIdx (bitWidth tp) (genericLength d) (return.PlainSingle)
+
+plainAssign :: TypeDesc -> PlainCont -> MemContent -> [Integer] -> SMT ()
+plainAssign (TDStruct tps _) (PlainStruct conts) (MemArray cells) path
+  = mapM_ (\(tp,cont,cell) -> plainAssign tp cont cell path) (Prelude.zip3 tps conts cells)
+plainAssign (TDArray len tp) cont (MemArray cells) path
+  = mapM_ (\(i,cell) -> plainAssign tp cont cell (i:path)) (zip [0..] cells)
+plainAssign (TDArray len tp) cont (MemArray cells) path
+  = mapM_ (\(i,cell) -> plainAssign tp cont cell (i:path)) (zip [0..] cells)
+plainAssign (TDPtr tp) cont mem path = return ()
+plainAssign tp (PlainSingle el) (MemCell bv) path
+  = assert $ (resolve' el (Prelude.reverse path)) .==. bv
+  where
+    resolve' :: PlainIdx p => SMTExpr p -> [Integer] -> SMTExpr BitVector
+    resolve' el (i:is) = case plainWithIdx el bv (\nel -> (resolve' nel is,Nothing)) of
+      Just (res,_) -> res
+    resolve' el [] = case plainWithCell el (\bv -> (bv,Nothing)) of
+      Just (res,_) -> res
+
+plainSwitch :: SMTExpr Bool -> TypeDesc -> PlainCont -> PlainCont -> Integer -> SMT PlainCont
+plainSwitch cond (TDStruct tps _) (PlainStruct c1) (PlainStruct c2) d = do
+  c3 <- mapM (\(tp,x,y) -> plainSwitch cond tp x y d) (Prelude.zip3 tps c1 c2)
+  return $ PlainStruct c3
+plainSwitch cond tp (PlainPtrs p1) (PlainPtrs p2) 0 = switchPtr cond tp p1 p2 >>= return.PlainPtrs
+  where
+    switchPtr cond (TDArray _ tp) (PlainPtrArray a1) (PlainPtrArray a2) = do
+      res <- mapM (\(x,y) -> switchPtr cond tp x y) (zip a1 a2)
+      return $ PlainPtrArray res
+    switchPtr cond (TDVector _ tp) (PlainPtrArray a1) (PlainPtrArray a2) = do
+      res <- mapM (\(x,y) -> switchPtr cond tp x y) (zip a1 a2)
+      return $ PlainPtrArray res
+    switchPtr cond (TDPtr tp) (PlainPtrCell c1) (PlainPtrCell c2) = return (PlainPtrCell $
+                                                                            [ (trg,and' [c,cond]) | (trg,c) <- c1 ] ++
+                                                                            [ (trg,and' [c,not' cond]) | (trg,c) <- c2 ])
+plainSwitch cond (TDArray len tp) p1 p2 d = plainSwitch cond tp p1 p2 (d+1)
+plainSwitch cond (TDVector len tp) p1 p2 d = plainSwitch cond tp p1 p2 (d+1)
+plainSwitch cond tp (PlainSingle c1) (PlainSingle c2) d = case cast c2 of
+  Just c2' -> if c1 == c2'
+              then return (PlainSingle c1)
+              else mkPlainIdx (bitWidth tp) d (\nc -> case cast nc of
+                                                  Just nc' -> do
+                                                    assert $ nc' .==. (ite cond c1 c2')
+                                                    return (PlainSingle nc'))
+
+addIndirection :: PlainCont -> SMT PlainCont
+addIndirection (PlainStruct cs) = do
+  cs' <- mapM addIndirection cs
+  return (PlainStruct cs')
+addIndirection (PlainSingle expr) = do
+  nvar <- varAnn (64,extractAnnotation expr)
+  assert $ (select nvar (constantAnn (BitS.fromNBits 64 (0::Integer)) 64::SMTExpr BitVector)) .==. expr
+  return (PlainSingle nvar)
+addIndirection (PlainPtrs cont) = return $ PlainPtrs (PlainPtrArray [cont])
+
+plainEq :: PlainCont -> PlainCont -> SMT ()
+plainEq (PlainStruct s1) (PlainStruct s2) = mapM_ (\(x,y) -> plainEq x y) (zip s1 s2)
+plainEq (PlainSingle s1) (PlainSingle s2) = case cast s2 of
+  Just s2' -> assert $ s1 .==. s2'
+
+
+plainDup :: PlainMemory -> SMT PlainMemory
+plainDup (PlainMem mem) = do
+  mp <- mapM (\arg -> case arg of
+                 (TDPtr tp,bank) -> let dupPtrs (PlainPtrArray arr) = mapM dupPtrs arr >>= return.PlainPtrArray
+                                        dupPtrs (PlainPtrCell cell) = mapM (\(c,cond) -> do
+                                                                               ncond <- var
+                                                                               assert $ ncond .==. cond
+                                                                               return (c,ncond)) cell >>= return.PlainPtrCell
+                                    in mapM (\(indir,PlainPtrs ptr) -> dupPtrs ptr >>= \ptr' -> return (indir,PlainPtrs ptr')) bank >>= \bank' -> return (TDPtr tp,bank')
+                 (tp,bank) -> do
+                   bank' <- mapM (\(indir,cont) -> do
+                                     var <- plainNew tp (if indir then [0] else [])
+                                     plainEq cont var
+                                     return (indir,var)) bank
+                   return (tp,bank')
+             ) (Map.toList mem)
+  return $ PlainMem $ Map.fromList mp
+
+instance MemoryModel PlainMemory where
+  type Pointer PlainMemory = [(Maybe PlainPointer,SMTExpr Bool)]
+  memNew tps = return $ PlainMem $ Map.fromList [ (tp,Map.empty) | tp <- tps ]
+  memInit _ = constant True
+  memAlloc tp sz cont (PlainMem mp) = do
+    let indir = case sz of
+          Left 1 -> False
+          _ -> True
+        off = if indir
+              then [Left 0]
+              else []
+    res <- plainNew tp (if indir then [0] else [])
+    case cont of
+      Nothing -> return ()
+      Just cont' -> plainAssign tp res cont' []
+    let (bank,mp') = Map.updateLookupWithKey (\_ entrs -> Just (Map.insert (Map.size entrs) (indir,res) entrs)) tp mp
+    return $ case bank of
+      Nothing -> ([(Just $ PlainPtr tp 0 off,constant True)],PlainMem (Map.insert tp (Map.singleton 0 (indir,res)) mp))
+      Just bank' -> ([(Just $ PlainPtr tp (Map.size bank' - 1) off,constant True)],PlainMem mp')
+  memIndex _ _ idx ptr = let nidx = expandIdx idx
+                         in fmap (\(ptr',cond) -> (case ptr' of
+                                                      Just ptr'' -> Just $ plainOffset ptr'' nidx
+                                                      Nothing -> Nothing,cond)) ptr
+  memSwitch choices = do 
+    mem <- mkSwitch choices
+    plainDup (PlainMem mem)
+    where
+      mkSwitch [(PlainMem mem,_)] = return mem
+      mkSwitch ((PlainMem mem,cond):rest) = do
+        res <- mkSwitch rest
+        sequence $ Map.intersectionWithKey (\tp mp1 mp2 -> sequence $ Map.unionWith (\o1 o2
+                                                                                     -> do
+                                                                                       (i1,b1) <- o1
+                                                                                       (i2,b2) <- o2
+                                                                                       case (i1,i2) of
+                                                                                         (False,True) -> do
+                                                                                           b1' <- addIndirection b1
+                                                                                           res <- plainSwitch cond tp b1' b2 1
+                                                                                           return (True,res)
+                                                                                         (True,False) -> do
+                                                                                           b2' <- addIndirection b2
+                                                                                           res <- plainSwitch cond tp b1 b2' 1
+                                                                                           return (True,res)
+                                                                                         (True,True) -> do
+                                                                                           res <- plainSwitch cond tp b1 b2 1
+                                                                                           return (True,res)
+                                                                                         (False,False) -> do
+                                                                                           res <- plainSwitch cond tp b1 b2 0
+                                                                                           return (False,res)
+                                                                                    ) (fmap return mp1) (fmap return mp2)
+                                           ) mem res
+  memLoad tp ptr (PlainMem mem) = load' [ let (indir,cont) = (mem!(ptrType ptr')!(ptrLocation ptr'))
+                                              off = if indir 
+                                                    then ptrOffset ptr'
+                                                    else case ptrOffset ptr' of
+                                                      [] -> []
+                                                      Left 0:rest -> rest
+                                                      _ -> error $ "invalid memory indirection in load: "++show (ptrOffset ptr')
+                                              rtp = if indir
+                                                    then TDPtr (ptrType ptr')
+                                                    else ptrType ptr'
+                                              paths = allSuccIdx rtp off
+                                              banks = fmap (\path -> let (stat,dyn) = translateIdx rtp path
+                                                                     in plainResolve cont stat dyn) paths
+                                          in (case typedLoad (bitWidth tp) [(ptrType ptr')] banks of
+                                                 [bv] -> bv
+                                                 bvs -> bvconcats bvs,cond) | (Just ptr',cond) <- ptr ]
+    where
+      load' [(bv,cond)] = bv
+      load' ((bv,cond):rest) = ite cond bv (load' rest)
+      load' [] = constantAnn (BitS.fromNBits (bitWidth tp) (0::Integer)) (fromIntegral $ bitWidth tp)
+  memLoadPtr tp ptr (PlainMem mem)
+    = concat [ [ (cont',and' [cond,cond']) | (cont',cond') <- ptr_cont ]
+             | (Just ptr',cond) <- ptr,
+               let (indir,PlainPtrs cont) = mem!(ptrType ptr')!(ptrLocation ptr')  
+                   off = if indir 
+                         then ptrOffset ptr'
+                         else case ptrOffset ptr' of
+                           [] -> []
+                           Left 0:rest -> rest
+                           _ -> error $ "invalid memory indirection in load: "++show (ptrOffset ptr')
+                   rtp = if indir
+                         then TDPtr (ptrType ptr')
+                         else ptrType ptr'
+                   (stat,dyn) = translateIdx (ptrType ptr') off
+                   (ptr_cont,_) = plainModifyPtr cont stat dyn (\ocont -> (ocont,ocont))
+             ]
+  memStore tp ptr cont (PlainMem mem) = PlainMem $ store' ptr mem []
+    where
+      store' [] mem _ = mem
+      store' ((Nothing,cond):ptrs) mem prev = store' ptrs mem ((not' cond):prev)
+      store' ((Just ptr,cond):ptrs) mem prev
+        = store' ptrs (Map.adjust (Map.adjust (\(indir,pcont) -> let off = if indir then ptrOffset ptr
+                                                                           else case ptrOffset ptr of
+                                                                             [] -> []
+                                                                             Left 0:rest -> rest
+                                                                             _ -> error "invalid memory indirection in store"
+                                                                     rtp = if indir then TDPtr (ptrType ptr)
+                                                                           else ptrType ptr
+                                                                     (stat,dyn) = translateIdx rtp off
+                                                                     (_,ncont) = plainModify pcont stat dyn (\ocont -> ((),Just $ if Prelude.null ptrs && Prelude.null prev
+                                                                                                                                  then cont
+                                                                                                                                  else ite (and' (cond:prev)) cont ocont
+                                                                                                                       ))
+                                                                 in (indir,ncont)
+                                              ) (ptrLocation ptr)) (ptrType ptr) mem) ((not' cond):prev)
+  memStorePtr tp trg src (PlainMem mem) = PlainMem $ store' trg mem []
+    where
+      store' [] mem _ = mem
+      store' ((Just ptr,cond):ptrs) mem prev
+        = store' ptrs (Map.adjust (Map.adjust (\(indir,PlainPtrs cont) 
+                                               -> let off = if indir then ptrOffset ptr
+                                                            else case ptrOffset ptr of
+                                                              [] -> []
+                                                              Left 0:rest -> rest
+                                                              _ -> error "invalid memory indirection in store"
+                                                      rtp = if indir then TDPtr (ptrType ptr)
+                                                            else ptrType ptr
+                                                      (stat,dyn) = translateIdx rtp off
+                                                      (_,ncont) = plainModifyPtr cont stat dyn 
+                                                                  (\ocont -> ((),[ (n,and' $ cond:c:prev) | (n,c) <- src ]))
+                                                  in (indir,PlainPtrs ncont)
+                                              ) (ptrLocation ptr)) (ptrType ptr) mem) ((not' cond):prev)
+  memDump (PlainMem mem) = mapM (\(tp,bank) -> do
+                                    res <- mapM (\(nr,(indir,cont)) -> do
+                                                    res <- dumpPlainCont tp cont (if indir then [1] else [])
+                                                    return $ "  obj "++show nr++"\n    "++res
+                                                ) (Map.toList bank)
+                                    return $ unlines $ show tp:res
+                                ) (Map.toList mem) >>= return.unlines
+    where
+      dumpPlainCont (TDStruct tps _) (PlainStruct conts) limits = do
+        res <- mapM (\(tp,cont) -> dumpPlainCont tp cont limits) (zip tps conts)
+        return $ "{ " ++ concat (intersperse ", " res) ++ " }"
+      dumpPlainCont (TDArray len tp) plain limits = dumpPlainCont tp plain (limits++[len])
+      dumpPlainCont (TDVector len tp) plain limits = dumpPlainCont tp plain (limits++[len])
+      dumpPlainCont tp (PlainSingle cont) [] = case plainWithCell cont (\x -> (x,Nothing)) of
+        Just (r,_) -> do
+          v <- getValue' (fromIntegral $ bitWidth tp) r
+          return $ show (BitS.toBits v :: Integer)
+      dumpPlainCont tp (PlainSingle cont) (l:ls) = do
+        res <- mapM (\i -> case plainWithIdx cont (constantAnn (BitS.fromNBits 64 i) 64) (\expr -> (dumpPlainCont tp (PlainSingle expr) ls,Nothing)) of
+                        Just (r,_) -> r) [0..(l-1)]
+        return $ "[ "++concat (intersperse ", " res)++" ]"
+  memCast _ to ptr = fmap (\(ptr',cond) -> case ptr' of
+                              Just ptr'' -> if ptrType ptr'' /= to
+                                            then error $ "Can't yet cast pointers from "++show (ptrType ptr'')++" to "++show to
+                                            else (Just ptr'',cond)
+                              Nothing -> (Nothing,cond)) ptr
+  memPtrEq _ ptr1 ptr2 = or' [ and' $ [c1,c2]++extra 
+                             | (ptr1',c1) <- ptr1,
+                               (ptr2',c2) <- ptr2,
+                               extra <- case ptr1' of
+                                  Nothing -> case ptr2' of
+                                    Nothing -> [[]]
+                                    Just _ -> []
+                                  Just ptr1'' -> case ptr2' of
+                                    Nothing -> []
+                                    Just ptr2'' -> if ptrType ptr1'' == ptrType ptr2'' && ptrLocation ptr1'' == ptrLocation ptr2''
+                                                   then (case offEq (ptrOffset ptr1'') (ptrOffset ptr2'') of
+                                                            Nothing -> []
+                                                            Just res -> [res])
+                                                   else []
+                             ]
+    where
+      offEq [] [] = Just []
+      offEq (x:xs) (y:ys) = case offEq xs ys of
+        Nothing -> Nothing
+        Just rest -> case x of
+          Left ix -> case y of
+            Left iy -> if ix==iy
+                       then Just rest
+                       else Nothing
+            Right by -> let rw@(BitstreamLen w) = extractAnnotation by
+                        in Just $ (constantAnn (BitS.fromNBits w ix) rw .==. by):rest
+          Right bx -> case y of
+            Left iy -> let rw@(BitstreamLen w) = extractAnnotation bx
+                        in Just $ (constantAnn (BitS.fromNBits w iy) rw .==. bx):rest
+            Right by -> Just $ (bx .==. by):rest
+  memPtrNull _ = [(Nothing,constant True)]
+  memPtrSwitch _ ptrs = return $ concat [ [ (ptr',and' [cond',cond]) | (ptr',cond') <- ptr ] | (ptr,cond) <- ptrs ]
+      
+
+typedLoad :: Integer -> [TypeDesc] -> [SMTExpr BitVector] -> [SMTExpr BitVector]
+typedLoad 0 _ _ = []
+typedLoad l ((TDStruct tps _):rest) banks = typedLoad l (tps++rest) banks
+typedLoad l ((TDArray len tp):rest) banks = typedLoad l ((genericReplicate len tp)++rest) banks
+typedLoad l ((TDVector len tp):rest) banks = typedLoad l ((genericReplicate len tp)++rest) banks
+typedLoad l (tp:tps) (bank:banks) = case compare l (bitWidth tp) of
+  EQ -> [bank]
+  GT -> bank : typedLoad (l - (bitWidth tp)) tps banks
+  LT -> [bvextract ((bitWidth tp)-1) ((bitWidth tp)-l) bank]
+  
+plainOffset :: PlainPointer -> [Either Integer (SMTExpr BitVector)] -> PlainPointer
+plainOffset ptr idx = ptr { ptrOffset = plainIdxMerge (ptrOffset ptr) idx }
+  where
+    plainIdxMerge [] idx = idx
+    plainIdxMerge idx [] = idx
+    plainIdxMerge [Left x] (Left y:ys) = Left (x+y):ys
+    plainIdxMerge [Right x] (Right y:ys) = Right (bvadd x y):ys
+    plainIdxMerge [Left x] (Right y:ys) = Right (bvadd (constantAnn (BitS.fromNBits 64 x) 64) y):ys
+    plainIdxMerge [Right x] (Left y:ys) = Right (bvadd x (constantAnn (BitS.fromNBits 64 y) 64)):ys
+    plainIdxMerge (x:xs) ys = x:plainIdxMerge xs ys
+
+{-
 instance MemoryModel PlainMemory where
   type Pointer PlainMemory = [(PlainPointer,SMTExpr Bool)]
   memNew tps = return $ PlainMem $ Map.fromList [ (tp,Map.empty) | tp <- tps ]
   memInit _ = constant True
   -- TODO: zero
-  memAlloc _ tp (PlainMem mp) = do
-    res <- mapM (\tp' -> varAnn (fromIntegral $ bitWidth tp')) (flattenType tp)
+  memAlloc tp cont (PlainMem mp) = do
+    res <- case cont of
+      Nothing -> mapM (\tp' -> varAnn (fromIntegral $ bitWidth tp')) (flattenType tp)
+      Just rcont -> mapM (\(tp',bv) -> do
+                             v <- varAnn (fromIntegral $ bitWidth tp')
+                             assert $ v .==. bv
+                             return v
+                         ) (zip (flattenType tp) (flattenMemContent rcont))
     let (bank,mp') = Map.updateLookupWithKey (\_ entrs -> Just (Map.insert (Map.size entrs) res entrs)) tp mp
     return $ case bank of
       Nothing -> ([(PlainPtr tp 0 0,constant True)],PlainMem (Map.insert tp (Map.singleton 0 res) mp))
@@ -107,7 +561,7 @@ typedStore offset len eoff (tp:tps) expr (arr:arrs)
                                                                        bvextract (offset+len-eoff-1) 0 arr)
                                                 in (bvconcat orig_l (bvconcat expr orig_r),True):(fmap (\x -> (x,False)) arrs)
     where
-      tlen = bitWidth tp
+      tlen = bitWidth tp-}
 
 renderMemObject :: TypeDesc -> [BitVector] -> [String]
 renderMemObject tp bvs = snd $ renderMemObject' bvs tp
