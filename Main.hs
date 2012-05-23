@@ -34,7 +34,7 @@ import Text.Show
 
 type Watchpoint = (String,SMTExpr Bool,[(TypeDesc,SMTExpr BitVector)])
 
-type MemGuard = (MemoryError,SMTExpr Bool)
+type Guard = (ErrorDesc,SMTExpr Bool)
 
 (!) :: (Show k,Ord k) => Map k a -> k -> a
 (!) mp k = case Map.lookup k mp of
@@ -123,7 +123,7 @@ data RealizedBlock m = RealizedBlock { rblockActivation :: SMTExpr Bool
                                      }
 
 translateProgram :: (MemoryModel mem) 
-                    => ProgDesc -> String -> Integer -> SMT (mem,mem,[Watchpoint],[MemGuard])
+                    => ProgDesc -> String -> Integer -> SMT (mem,mem,[Watchpoint],[Guard])
 translateProgram (program,globs) entry_point limit = do
   let alltps = foldl (\tps (args,rtp,blocks) 
                       -> let tpsArgs = allTypesArgs args
@@ -146,7 +146,7 @@ translateFunction :: (MemoryModel m)
                      -> SMTExpr Bool
                      -> m
                      -> [(Val m,TypeDesc)]
-                     -> SMT (m,Maybe (Val m),[Watchpoint],[MemGuard])
+                     -> SMT (m,Maybe (Val m),[Watchpoint],[Guard])
 translateFunction allTps program fname argTps tp blocks globals limit act mem_in args
   = do
     --liftIO $ putStr $ unlines $ concat [ (fname++" :: "++show args++" -> "++show rtype):concat [ ("  "++blkname++":"):[ "    "++show instr | instr <- instrs ]  | (blkname,instrs) <- blks ] | (fname,(args,rtype,blks)) <- Map.toList program ]
@@ -209,12 +209,12 @@ translateFunction allTps program fname argTps tp blocks globals limit act mem_in
                          
 trans :: (MemoryModel m) 
          => [TypeDesc] -> Map (String,Integer) (RealizedBlock m) 
-         -> (String -> String -> SMTExpr Bool -> m -> [(Val m,TypeDesc)] -> SMT (m,Maybe (Val m),[Watchpoint],[MemGuard]))
+         -> (String -> String -> SMTExpr Bool -> m -> [(Val m,TypeDesc)] -> SMT (m,Maybe (Val m),[Watchpoint],[Guard]))
          -> String
          -> Map String (Pointer m)
          -> Map String ([Instruction],Integer,BlockSig)
          -> (String,Integer) 
-         -> SMT (RealizedBlock m,[Watchpoint],[MemGuard])
+         -> SMT (RealizedBlock m,[Watchpoint],[Guard])
 trans tps acts calls fname globals blocks (name,lvl) = do
     let (instrs,ord,sig) = blocks!name
         froms = [ (rblockActivation realized,rblockMemoryOut realized,(rblockJumps realized)!name)
@@ -336,10 +336,10 @@ realizeBlock :: MemoryModel mem => String -> [Instruction]
                 -> mem
                 -> Bool
                 -> Map String (Val mem) 
-                -> (String -> String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[MemGuard]))
+                -> (String -> String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[Guard]))
                 -> [Watchpoint]
-                -> [MemGuard]
-                -> SMT (Maybe mem,Map String (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint],[MemGuard])
+                -> [Guard]
+                -> SMT (Maybe mem,Map String (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint],[Guard])
 realizeBlock fname (instr:instrs) act mem changed values calls watch guard
     = do
       --liftIO $ print instr
@@ -467,8 +467,8 @@ realizeInstruction :: MemoryModel mem => String -> Instruction
                       -> SMTExpr Bool
                       -> mem 
                       -> Map String (Val mem) 
-                      -> (String -> String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[MemGuard]))
-                      -> SMT (Maybe mem,Maybe (String,Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint],[MemGuard])
+                      -> (String -> String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[Guard]))
+                      -> SMT (Maybe mem,Maybe (String,Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint],[Guard])
 realizeInstruction fname instr act mem values calls
   = {-trace ("Realizing "++show instr++"..") $-} case instr of
     IRet e -> return (Nothing,Nothing,Just (Just (argToExpr e values mem)),[],[],[])
@@ -800,7 +800,7 @@ allTypesBlks = allTypes' [] []
                                         
                                         _ -> allTypes' is tps blks
 
-intr_memcpy,intr_memset,intr_restrict,intr_watch,intr_malloc :: MemoryModel mem => Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[MemGuard])
+intr_memcpy,intr_memset,intr_restrict,intr_watch,intr_malloc :: MemoryModel mem => Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[Guard])
 intr_memcpy _ _ mem [(PointerValue to,_),(PointerValue from,_),(ConstValue len,_),_,_]
   = return (memCopy (BitS.toBits len) to from mem,Nothing,[],[])
 
@@ -813,6 +813,11 @@ intr_restrict _ act mem [(val,_)] = do
     ConditionValue val _ -> assert $ act .=>. val
     _ -> assert $ act .=>. (not' $ valValue val .==. constantAnn (BitS.fromNBits (32::Int) (0::Integer)) 32)
   return (mem,Nothing,[],[])
+intr_assert _ act mem [(val,_)] = do
+  return (mem,Nothing,[],[(Custom,case val of
+                              ConditionValue val _ -> and' [act,not' val]
+                              _ -> and' [act,valValue val .==. constantAnn (BitS.fromNBits (32::Int) (0::Integer)) 32])])
+
 
 intr_watch _ act mem ((ConstValue num,_):exprs)
   = return (mem,Nothing,[(show (BitS.toBits num :: Integer),act,[ (tp,valValue val) | (val,tp) <- exprs ])],[])
@@ -823,17 +828,18 @@ intr_malloc (Just tp) act mem [(size,sztp)] = do
                                 DirectValue bv -> Right bv) Nothing mem
   return (mem',Just (PointerValue ptr),[],[])
 
-intr_nondet :: MemoryModel mem => Integer -> Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[MemGuard])
+intr_nondet :: MemoryModel mem => Integer -> Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[Guard])
 intr_nondet width _ _ mem [] = do
   v <- varAnn (fromIntegral width)
   return (mem,Just (DirectValue v),[],[])
 
-intrinsics :: MemoryModel mem => String -> Maybe (Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[MemGuard]))
+intrinsics :: MemoryModel mem => String -> Maybe (Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[Guard]))
 intrinsics "llvm.memcpy.p0i8.p0i8.i64" = Just intr_memcpy
 intrinsics "llvm.memcpy.p0i8.p0i8.i32" = Just intr_memcpy
 intrinsics "llvm.memset.p0i8.i32" = Just intr_memset
 intrinsics "llvm.memset.p0i8.i64" = Just intr_memset
 intrinsics "furchtbar_restrict" = Just intr_restrict
+intrinsics "furchtbar_assert" = Just intr_assert
 intrinsics "furchtbar_nondet_i64" = Just (intr_nondet 64)
 intrinsics "furchtbar_nondet_i32" = Just (intr_nondet 32)
 intrinsics "furchtbar_nondet_i16" = Just (intr_nondet 16)
@@ -937,6 +943,8 @@ data Options = Options
                , files :: [String]
                , memoryModel :: MemoryModelOption
                , solver :: Maybe String
+               , checkUser :: Bool
+               , checkMemoryAccess :: Bool
                , showHelp :: Bool
                } deriving (Eq,Ord,Show)
 
@@ -946,6 +954,8 @@ defaultOptions = Options { entryPoint = "main"
                          , files = []
                          , memoryModel = PlainModel
                          , solver = Nothing
+                         , checkUser = False
+                         , checkMemoryAccess = False
                          , showHelp = False }
 
 optionDescr :: [OptDescr (Options -> Options)]
@@ -959,6 +969,8 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
                                                                            _ -> error $ "Unknown memory model "++show str
                                                                       }) "model") "Memory model to use (untyped,typed or block)"
               ,Option [] ["solver"] (ReqArg (\str opt -> opt { solver = Just str }) "smt-binary") "The SMT solver to use to solve the generated instance"
+              ,Option [] ["check-user"] (NoArg (\opt -> opt { checkUser = True })) "Validate user assertions"
+              ,Option [] ["check-mem"] (NoArg (\opt -> opt { checkMemoryAccess = True })) "Validate memory accesses"
               ,Option ['h'] ["help"] (NoArg (\opt -> opt { showHelp = True })) "Show this help"
               ]
 
@@ -985,39 +997,67 @@ main = do
     setLogic "QF_ABV"
     (case memoryModel opts of
         TypedModel -> do
-          perform program (entryPoint opts) (bmcDepth opts) :: SMT TypedMemory
+          perform program (entryPoint opts) (bmcDepth opts) (checkUser opts) (checkMemoryAccess opts) :: SMT TypedMemory
           return ()
         UntypedModel -> do
-          perform program (entryPoint opts) (bmcDepth opts) :: SMT UntypedMemory
+          perform program (entryPoint opts) (bmcDepth opts) (checkUser opts) (checkMemoryAccess opts) :: SMT UntypedMemory
           return ()
         BlockModel -> do
-          perform program (entryPoint opts) (bmcDepth opts) :: SMT UntypedBlockMemory
+          perform program (entryPoint opts) (bmcDepth opts) (checkUser opts) (checkMemoryAccess opts) :: SMT UntypedBlockMemory
           return ()
         PlainModel -> do
-          perform program (entryPoint opts) (bmcDepth opts) :: SMT PlainMemory
+          perform program (entryPoint opts) (bmcDepth opts) (checkUser opts) (checkMemoryAccess opts) :: SMT PlainMemory
           return ()
       )
   where
     perform :: (MemoryModel mem)
-               => ProgDesc -> String -> Integer -> SMT mem
-    perform program entry depth = do
+               => ProgDesc -> String -> Integer -> Bool -> Bool -> SMT mem
+    perform program entry depth check_user check_mem = do
       (mem_in,mem_out,watches,guards) <- translateProgram program entry depth
+      guard_vars <- mapM (\(descr,expr) -> if (case descr of
+                                                  Custom -> check_user
+                                                  NullDeref -> check_mem
+                                                  Overrun -> check_mem
+                                                  FreeAccess -> check_mem)
+                                           then (do
+                                                    expr' <- var
+                                                    assert $ expr' .==. expr
+                                                    return $ Just (case descr of
+                                                                      Custom -> "User error"
+                                                                      NullDeref -> "Null dereference"
+                                                                      Overrun -> "Memory overrun"
+                                                                      FreeAccess -> "Accessing free'd memory",expr'))
+                                           else return Nothing
+                         ) guards
+      let all_checks = [ x | Just x <- guard_vars ]
+      assert $ or' $ fmap snd all_checks
       liftIO $ putStrLn "Done translating program"
-      checkSat
-      liftIO $ putStrLn "Found a solution"
+      res <- checkSat
+      if res
+        then (do
+                 liftIO $ putStrLn "Error(s) found:"
+                 mapM_ (\(descr,cond) -> do
+                           isOn <- getValue cond
+                           if isOn
+                             then liftIO $ putStrLn descr
+                             else return ()
+                       ) all_checks
+                 liftIO $ putStrLn "Watchpoints:"
+                 mapM_ (\(name,act,vals) -> do
+                           ract <- getValue act
+                           if ract
+                             then (do
+                                      rvals <- mapM (\(tp,val) -> getValue' (fromIntegral $ bitWidth tp) val) vals
+                                      liftIO $ putStrLn $ "Watchpoint "++name++":"
+                                        ++concat (fmap (\rval -> " "++show (BitS.toBits rval :: Integer)) rvals))
+                             else return ()
+                       ) watches
+             )
+        else liftIO $ putStrLn "No error found"
       --dump_in <- memDump mem_in
       --dump_out <- memDump mem_out
       --liftIO $ putStrLn dump_in
       --liftIO $ putStrLn dump_out
-      mapM_ (\(name,act,vals) -> do
-                ract <- getValue act
-                if ract
-                  then (do
-                           rvals <- mapM (\(tp,val) -> getValue' (fromIntegral $ bitWidth tp) val) vals
-                           liftIO $ putStrLn $ "Watchpoint "++name++":"
-                             ++concat (fmap (\rval -> " "++show (BitS.toBits rval :: Integer)) rvals))
-                  else return ()
-            ) watches
       return mem_in
 
 prepareEnvironment :: (MemoryModel mem)

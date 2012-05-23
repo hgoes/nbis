@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 extern void furchtbar_restrict(int cond);
+extern void furchtbar_assert(int cond);
 
 extern int64_t  furchtbar_nondet_i64(void);
 extern uint64_t furchtbar_nondet_u64(void);
