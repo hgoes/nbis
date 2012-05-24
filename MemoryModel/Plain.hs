@@ -371,25 +371,28 @@ instance MemoryModel PlainMemory where
                    (stat,dyn) = translateIdx (ptrType ptr') off
                    (ptr_cont,_) = plainModifyPtr cont stat dyn (\ocont -> (ocont,ocont))
              ],[])
-  memStore tp ptr cont (PlainMem mem) = (PlainMem $ store' ptr mem [],[])
+  memStore tp ptr cont (PlainMem mem) = (PlainMem mem',errs)
     where
-      store' [] mem _ = mem
-      store' ((Nothing,cond):ptrs) mem prev = store' ptrs mem ((not' cond):prev)
-      store' ((Just ptr,cond):ptrs) mem prev
-        = store' ptrs (Map.adjust (Map.adjust (\(indir,pcont) -> let off = if indir then ptrOffset ptr
-                                                                           else case ptrOffset ptr of
-                                                                             [] -> []
-                                                                             Left 0:rest -> rest
-                                                                             _ -> error "invalid memory indirection in store"
-                                                                     rtp = if indir then TDPtr (ptrType ptr)
-                                                                           else ptrType ptr
-                                                                     (stat,dyn) = translateIdx rtp off
-                                                                     (_,ncont,errs) = plainModify pcont stat dyn (\ocont -> ((),Just $ if Prelude.null ptrs && Prelude.null prev
-                                                                                                                                       then cont
-                                                                                                                                       else ite (and' (cond:prev)) cont ocont
-                                                                                                                            ))
-                                                                 in (indir,ncont)
-                                              ) (ptrLocation ptr)) (ptrType ptr) mem) ((not' cond):prev)
+      (mem',errs) = store' ptr mem [] []
+      
+      store' [] mem errs _ = (mem,errs)
+      store' ((Nothing,cond):ptrs) mem errs prev = store' ptrs mem ((NullDeref,and' $ cond:prev):errs) ((not' cond):prev)
+      store' ((Just ptr,cond):ptrs) mem errs prev
+        = let bank = mem!(ptrType ptr)
+              (indir,pcont) = bank!(ptrLocation ptr)
+              off = if indir then ptrOffset ptr
+                    else case ptrOffset ptr of
+                      [] -> []
+                      Left 0:rest -> rest
+                      _ -> error "invalid memory indirection in store"
+              rtp = if indir then TDPtr (ptrType ptr)
+                    else ptrType ptr
+              (stat,dyn) = translateIdx rtp off
+              (_,ncont,errs') = plainModify pcont stat dyn (\ocont -> ((),Just $ if Prelude.null ptrs && Prelude.null prev
+                                                                                 then cont
+                                                                                 else ite (and' (cond:prev)) cont ocont
+                                                                      ))
+          in store' ptrs (Map.insert (ptrType ptr) (Map.insert (ptrLocation ptr) (indir,ncont) bank) mem) (errs'++errs) ((not' cond):prev)
   memStorePtr tp trg src (PlainMem mem) = (PlainMem $ store' trg mem [],[])
     where
       store' [] mem _ = mem
