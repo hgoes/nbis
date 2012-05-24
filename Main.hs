@@ -56,14 +56,6 @@ instance Show (Val m) where
   show (ConditionValue c _) = show c
   show (ConstCondition c) = show c
 
-instance MemoryModel m => Eq (Val m) where
-    (ConstValue x) == (ConstValue y) = x == y
-    (DirectValue x) == (DirectValue y) = x == y
-    --(PointerValue x) == (PointerValue y) = x == y
-    (ConditionValue x _) == (ConditionValue y _) = x == y
-    (ConstCondition x) == (ConstCondition y) = x == y
-    _ == _ = False
-
 valEq :: MemoryModel m => m -> Val m -> Val m -> SMTExpr Bool
 valEq mem (ConstValue x) (ConstValue y) = if x==y then constant True else constant False
 valEq mem (ConstValue x) (DirectValue y) = y .==. constantAnn x (BitS.length x)
@@ -511,137 +503,6 @@ realizeInstruction fname instr act mem values calls
                              TDPtr tp -> let (res,guards) = memLoad tp ptr mem
                                          in return (Nothing,Just (trg,DirectValue res),Nothing,[],[],guards)
     _ -> error $ "Implement realizeInstruction for "++show instr
-    {-
-      IDRet tp arg -> return (Nothing,Nothing,Just (Just (argToExpr tp arg values)),[],[])
-      IDRetVoid -> return (Nothing,Nothing,Just Nothing,[],[])
-      IDBrCond cond (AL ifT) (AL ifF) -> case argToExpr (TDInt False 1) cond values of
-        ConstCondition cond' -> return (Nothing,Nothing,Nothing,[(if cond' then ifT else ifF,Nothing)],[])
-        cond' -> return (Nothing,Nothing,Nothing,[(ifT,Just $ valCond cond'),(ifF,Nothing)],[])
-      IDBrUncond (AL to) -> return (Nothing,Nothing,Nothing,[(to,Nothing)],[])
-      IDSwitch tp ((val,AL def):args) -> case argToExpr tp val values of
-        ConstValue v -> case [ to | (cmp_v,AL to) <- args, let ConstValue v' = argToExpr tp cmp_v values, v' == v ] of
-          [] -> return (Nothing,Nothing,Nothing,[(def,Nothing)],[])
-          [to] -> return (Nothing,Nothing,Nothing,[(to,Nothing)],[])
-        v -> return (Nothing,Nothing,Nothing,[ (to,Just $ valEq mem v (argToExpr tp cmp_v values))
-                                             | (cmp_v,AL to) <- args
-                                             ] ++ [ (def,Nothing) ],[])
-      IDBinOp op tp lhs rhs -> let lhs' = argToExpr tp lhs values
-                                   rhs' = argToExpr tp rhs values
-                                   apply (ConstValue lhs) (ConstValue rhs) = let lhs' = BitS.toBits lhs :: Integer
-                                                                                 rhs' = BitS.toBits rhs :: Integer
-                                                                                 rop = case op of
-                                                                                   BOXor -> Bits.xor
-                                                                                   BOAdd -> (+)
-                                                                                   BOAnd -> (.&.)
-                                                                                   BOSub -> (-)
-                                                                                   BOShL -> \x y -> shiftL x (fromIntegral y)
-                                                                                   BOOr -> (.|.)
-                                                                                 nvalue = ConstValue (BitS.fromNBits (BitS.length lhs) (rop lhs' rhs'))
-                                                                             in return (Nothing,Just nvalue,Nothing,[],[])
-                                   apply lhs rhs = let lhs' = valValue lhs
-                                                       rhs' = valValue rhs
-                                                       rop = case op of 
-                                                         BOXor -> BVXor
-                                                         BOAdd -> BVAdd
-                                                         BOAnd -> BVAnd
-                                                         BOSub -> BVSub
-                                                         BOShL -> BVSHL
-                                                         BOOr -> BVOr
-                                                         _ -> error $ "unsupported operator: "++show op
-                                                       nvalue = DirectValue (rop lhs' rhs')
-                                                   in return (Nothing,Just nvalue,Nothing,[],[])
-                               in apply lhs' rhs'
-      IDAlloca tp _ _ -> do
-        (ptr,mem') <- memAlloc False tp mem
-        return (Just mem',Just (PointerValue ptr),Nothing,[],[])
-      IDLoad tp arg -> let PointerValue ptr = argToExpr (TDPtr tp) arg values
-                       in return (Nothing,Just (DirectValue $ memLoad tp ptr mem),Nothing,[],[])
-      IDStore tp val to -> let PointerValue ptr = argToExpr (TDPtr tp) to values
-                               val' = valValue $ argToExpr tp val values
-                           in return (Just $ memStore tp ptr val' mem,Nothing,Nothing,[],[])
-      IDGetElementPtr tp_to tp_from (arg:args) -> case argToExpr tp_from arg values of
-        PointerValue ptr -> let ptr' = memIndex mem tp_from [ fromIntegral i | AI i <- args ] ptr
-                            in return (Nothing,Just (PointerValue ptr'),Nothing,[],[])
-        v -> error $ "First argument to getelementptr must be a pointer, but I found: "++show v++" ("++fname++")\n"++show instr
-      IDZExt tp tp' var -> let v = valValue $ argToExpr tp' var values
-                               d = (bitWidth tp') - (bitWidth tp)
-                               nv = bvconcat (constantAnn (BitS.fromNBits d (0::Integer) :: BitVector) (fromIntegral d)) v
-                           in return (Nothing,Just (DirectValue nv),Nothing,[],[])
-      IDSExt tp tp' var -> let v = valValue $ argToExpr tp' var values
-                               d = (bitWidth tp') - (bitWidth tp)
-                               s = (bvextract ((bitWidth tp)-1) ((bitWidth tp)-1) v) .==. (constantAnn (BitS.fromNBits 1 (1::Integer)) 1)
-                               ext = ite s
-                                     (constantAnn (BitS.pack (genericReplicate d True) :: BitVector) (fromIntegral d))
-                                     (constantAnn (BitS.pack (genericReplicate d False)) (fromIntegral d))
-                               nv = bvconcat ext v
-                           in return (Nothing,Just (DirectValue nv),Nothing,[],[])
-      IDBitcast (TDPtr tp) (TDPtr tp') arg -> let PointerValue ptr = argToExpr (TDPtr tp') arg values
-                                                  nptr = memCast mem tp ptr
-                                              in return (Nothing,Just (PointerValue nptr),Nothing,[],[])
-      IDICmp pred tp lhs rhs -> let lhs' = argToExpr tp lhs values
-                                    rhs' = argToExpr tp rhs values
-                                    apply (ConstValue lhs) (ConstValue rhs) = let lhs' = BitS.toBits lhs :: Integer
-                                                                                  rhs' = BitS.toBits rhs :: Integer
-                                                                                  op = case pred of
-                                                                                    IntEQ -> (==)
-                                                                                    IntNE -> (/=)
-                                                                                    IntUGT -> (>)
-                                                                                    IntUGE -> (>=)
-                                                                                    IntULT -> (<)
-                                                                                    IntULE -> (<=)
-                                                                                    IntSGT -> (>)
-                                                                                    IntSGE -> (>=)
-                                                                                    IntSLT -> (<)
-                                                                                    IntSLE -> (<=)
-                                                                              in return (Nothing,Just (ConstCondition (op lhs' rhs')),Nothing,[],[])
-                                    apply lhs rhs = let lhs' = valValue lhs
-                                                        rhs' = valValue rhs
-                                                        op = case pred of
-                                                          IntEQ -> (.==.)
-                                                          IntNE -> \x y -> not' $ x .==. y
-                                                          IntUGT -> BVUGT
-                                                          IntUGE -> BVUGE
-                                                          IntULT -> BVULT
-                                                          IntULE -> BVULE
-                                                          IntSGT -> BVSGT
-                                                          IntSGE -> BVSGE
-                                                          IntSLT -> BVSLT
-                                                          IntSLE -> BVSLE
-                                                    in return (Nothing,Just (ConditionValue (op lhs' rhs')),Nothing,[],[])
-                                in apply lhs' rhs'
-      IDPhi _ _ -> return (Nothing,Nothing,Nothing,[],[])
-      IDCall _ (AFP fn) args -> do
-        (mem',ret,watch) <- calls fn act mem [ (argToExpr tp arg values,tp) | (arg,tp) <- args ]
-        return (Just mem',ret,Nothing,[],watch)
-      IDSelect tp cond ifT ifF -> let res = case argToExpr (TDInt False 1) cond values of
-                                        ConstCondition c -> if c 
-                                                            then argToExpr tp ifT values
-                                                            else argToExpr tp ifF values
-                                        cond' -> DirectValue $ ite 
-                                                 (valCond cond') 
-                                                 (valValue $ argToExpr tp ifT values) 
-                                                 (valValue $ argToExpr tp ifF values)
-                                  in return (Nothing,Just res,Nothing,[],[])
-      IDTrunc tp_from tp_to arg -> return (Nothing,Just (case argToExpr tp_from arg values of
-                                                            ConstValue bv -> ConstValue (BitS.fromNBits (bitWidth tp_to) (BitS.toBits bv :: Integer))
-                                                            expr -> DirectValue (bvextract (bitWidth tp_to - 1) 0 (valValue expr))),Nothing,[],[])
-      _ -> error $ "Unsupported instruction: "++show instr
-    where
-      argToExpr :: TypeDesc -> ArgDesc -> Map String (Val m) -> Val m
-      argToExpr _ (AV var) mp = case Map.lookup var mp of
-                                  Just val -> val
-                                  Nothing -> error $ "Failed to find variable "++show var
-      argToExpr tp (AI i) _ = if bitWidth tp == 1
-                              then ConstCondition (i /= 0)
-                              else ConstValue $ BitS.fromNBits (bitWidth tp) i
-      argToExpr tp AE mp = ConstValue $ BitS.fromNBits (bitWidth tp) (0::Integer)
-      argToExpr tp arg _ = error $ "argToExpr unimplemented for "++show arg
-
-      ncond :: MemoryModel m => Val m -> SMTExpr Bool
-      ncond (ConstValue v) = case BitS.unpack v of
-                                  [x] -> constant x 
-      ncond (DirectValue v) = v .==. (constantAnn (BitS.pack [False]) 1)
-   -}
 
 data LabelOrigin = ArgumentOrigin
                  | GlobalOrigin
@@ -691,44 +552,6 @@ mkBlockSigs lbl_mp blks
                                              in mp2
                            ICall rtp res cc fn args -> foldl (\mp'' arg -> addExpr blk arg mp'') mp' args
                            _ -> mp'
-                           {-
-                           IPhi cases -> foldl (\mp'' (e,from) -> addOutput from 
-                          IDRet tp arg -> addArg blk arg tp mp'
-                          IDBrCond arg (AL ifT) (AL ifF) -> addArg blk arg (TDInt False 1) $
-                                                           addJump blk ifT $ addJump blk ifF mp'
-                          IDBrUncond (AL to) -> addJump blk to mp'
-                          IDSwitch tp ((what,AL def):cases) 
-                            -> addArg blk what tp $ addJump blk def $ foldl (\cmp (_,AL to) -> addJump blk to cmp) mp' cases
-                          IDBinOp _ tp lhs rhs -> addArg blk lhs tp $ addArg blk rhs tp mp'
-                          IDLoad tp arg -> addArg blk arg tp mp'
-                          IDStore tp arg trg -> addArg blk arg tp $ addArg blk trg (TDPtr tp) mp'
-                          IDGetElementPtr _ tp (arg:_) -> addArg blk arg tp mp'
-                          IDTrunc _ tp arg -> addArg blk arg tp mp'
-                          IDZExt _ tp arg -> addArg blk arg tp mp'
-                          IDSExt _ tp arg -> addArg blk arg tp mp'
-                          IDFPtoUI _ tp arg -> addArg blk arg tp mp'
-                          IDFPtoSI _ tp arg -> addArg blk arg tp mp'
-                          IDUItoFP _ tp arg -> addArg blk arg tp mp'
-                          IDSItoFP _ tp arg -> addArg blk arg tp mp'
-                          IDFPTrunc _ tp arg -> addArg blk arg tp mp'
-                          IDFPExt _ tp arg -> addArg blk arg tp mp'
-                          IDPtrToInt _ tp arg -> addArg blk arg tp mp'
-                          IDIntToPtr _ tp arg -> addArg blk arg tp mp'
-                          IDBitcast _ tp arg -> addArg blk arg tp mp'
-                          IDICmp _ tp lhs rhs -> addArg blk lhs tp $ addArg blk rhs tp mp'
-                          IDFCmp _ tp lhs rhs -> addArg blk lhs tp $ addArg blk rhs tp mp'
-                          IDPhi tp args -> let vec = foldr (\(val,AL from) lst -> case val of
-                                                              AE -> lst
-                                                              AV var -> (from,Left (lbl_mp!var,var)):lst
-                                                              AI i -> (from,Right (BitS.fromNBits (bitWidth tp) i)):lst
-                                                          ) [] args
-                                               mp1 = foldl (\mp'' (blk',lbl') -> addOutput blk' lbl' tp mp'') mp' [ x | (from,Left x) <- vec ]
-                                               mp2 = addInput blk lbl (vec,tp) mp1
-                                          in mp2
-                          IDCall rtp (AFP fn) args
-                            -> addCall blk fn (fmap snd args) rtp $ foldl (\cmp (arg,tp) -> addArg blk arg tp cmp) mp' args
-                          IDSelect tp expr lhs rhs -> addArg blk expr (TDInt False 1) $ addArg blk lhs tp $ addArg blk rhs tp mp'
-                          _ -> mp' -}
                        ) (Map.insertWith (\n o -> o) blk emptyBlockSig mp) instrs
             ) (Map.singleton "" (emptyBlockSig { blockJumps = Set.singleton $ fst $ head blks })) blks
       where
@@ -748,16 +571,6 @@ mkBlockSigs lbl_mp blks
           EDUndef -> id
           EDNull -> id
           e' -> error $ "Implement addExpr for "++show e'
-        {-
-        addArg blk arg tp = case arg of
-                              AV var -> let blk_from = case Map.lookup var lbl_mp of
-                                                         Nothing -> ""
-                                                         Just b -> b
-                                        in if blk_from==blk
-                                           then id
-                                           else addOutput blk_from var tp . addInput blk var ([(blk_from,Left (blk_from,var))],tp)
-                              _ -> id
-        -}
         addPhi blk lbl args = Map.alter (\c -> case c of
                                             Nothing -> Just (emptyBlockSig { blockInputsPhi = Map.singleton lbl args })
                                             Just blksig -> Just $ blksig { blockInputsPhi = Map.insert lbl args (blockInputsPhi blksig) }) blk
@@ -767,9 +580,6 @@ mkBlockSigs lbl_mp blks
         addOutput blk lbl tp = Map.alter (\c -> case c of
                                              Nothing -> Just (emptyBlockSig { blockOutputs = Map.singleton lbl tp })
                                              Just blksig -> Just $ blksig { blockOutputs = Map.insert lbl tp (blockOutputs blksig) }) blk
-        {-addCall blk fn argtps rtp = Map.alter (\c -> case c of
-                                                       Nothing -> Just (emptyBlockSig { blockCalls = Map.singleton fn (argtps,rtp) })
-                                                       Just blksig -> Just $ blksig { blockCalls = Map.insert fn (argtps,rtp) (blockCalls blksig) }) blk-}
         addJump blk to = Map.alter (\c -> case c of
                                             Nothing -> Just (emptyBlockSig { blockJumps = Set.singleton to })
                                             Just blksig -> Just $ blksig { blockJumps = Set.insert to (blockJumps blksig) }) blk .
