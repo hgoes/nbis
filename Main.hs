@@ -122,7 +122,7 @@ translateProgram (program,globs) entry_point limit = do
                              tpsBlocks = allTypesBlks blocks
                          in tps++tpsArgs++tpsBlocks) [] program
       (args,rtp,blks) = program!entry_point
-  liftIO $ print globs
+  --liftIO $ print globs
   (arg_vals,globals,mem_in) <- prepareEnvironment alltps args globs
   (mem_out,ret,watches,guards) <- translateFunction alltps program entry_point args rtp blks globals limit (constant True) mem_in (zip arg_vals (fmap snd args))
   return (mem_in,mem_out,watches,guards)
@@ -191,7 +191,10 @@ translateFunction allTps program fname argTps tp blocks globals limit act mem_in
               Just x -> x
             trgs = [ (trg,lvl',lvl_trg) 
                    | trg <- Map.keys $ rblockJumps nblk,
-                     let (_,lvl_trg,_) = info!trg,let lvl' = if lvl_cur < lvl_trg then lvl else lvl+1,lvl' < limit ]
+                     let (_,lvl_trg,_) = case Map.lookup trg info of
+                           Nothing -> error $ "Internal error: failed to find block "++show trg++" in map "++show info
+                           Just r -> r,
+                     let lvl' = if lvl_cur < lvl_trg then lvl else lvl+1,lvl' < limit ]
         bfs tps info preds (Map.insert (name,lvl) nblk done) (watch++watch') (guard++guard') (foldl insert' rest trgs)
     
     insert' [] it = [it]
@@ -208,15 +211,21 @@ trans :: (MemoryModel m)
          -> (String,Integer) 
          -> SMT (RealizedBlock m,[Watchpoint],[Guard])
 trans tps acts calls fname globals blocks (name,lvl) = do
-    let (instrs,ord,sig) = blocks!name
-        froms = [ (rblockActivation realized,rblockMemoryOut realized,(rblockJumps realized)!name)
+    let (instrs,ord,sig) = case Map.lookup name blocks of
+          Nothing -> error $ "Internal error: "++name++" not found in blocks "++show blocks
+          Just r -> r
+        froms = [ (rblockActivation realized,rblockMemoryOut realized,realized_cond)
                 | from <- Set.toList (blockOrigins sig), 
-                  let (_,ord_from,sig_from) = blocks!from,
+                  let (_,ord_from,sig_from) = case Map.lookup from blocks of
+                        Nothing -> error $ "Internal error: Can't find origin block "++from++" for "++name
+                        Just r -> r,
                   let lvl_from = if ord_from < ord
                                  then lvl
                                  else lvl-1,
                   lvl_from >= 0, 
-                  realized <- maybeToList (Map.lookup (from,lvl_from) acts) ]
+                  realized <- maybeToList (Map.lookup (from,lvl_from) acts),
+                  realized_cond <- maybeToList (Map.lookup name (rblockJumps realized))
+                ]
     act <- var
     assert $ act .==. or' [ and' [act',cond] | (act',_,cond) <- froms ]
     mem <- case froms of
@@ -226,7 +235,9 @@ trans tps acts calls fname globals blocks (name,lvl) = do
                return mem
              conds -> memSwitch [ (mem,and' [act',cond])  | (act',mem,cond) <- conds ]
     let inps_simple = Map.fromList $ mapMaybe (\(iname,(from,expr,tp)) -> do
-                                                  let (_,ord_from,_) = blocks!from
+                                                  let (_,ord_from,_) = case Map.lookup from blocks of
+                                                        Nothing -> error $ "Internal error: Can't find block "++from++" for "++show expr++" in "++show blocks
+                                                        Just r -> r
                                                       lvl_from = if ord_from < ord
                                                                  then lvl
                                                                  else lvl-1
@@ -242,18 +253,21 @@ trans tps acts calls fname globals blocks (name,lvl) = do
         inp0 = Map.union inps_simple inp_global
     inps_phi <- mapM (\(iname,(from,tp)) -> do
                          let no_undef = Prelude.filter (\(blk,expr) -> exprDesc expr /= EDUndef) from
-                             choices = mapMaybe (\(blk,arg) -> let (_,ord_from,_) = blocks!blk
+                             choices = mapMaybe (\(blk,arg) -> let (_,ord_from,_) = case Map.lookup blk blocks of
+                                                                     Nothing -> error $ "Internal error: Can't find block "++blk++" for phi input in "++show blocks
+                                                                     Just r -> r
                                                                    lvl_from = if ord_from < ord
                                                                               then lvl
                                                                               else lvl-1
-                                                               in if lvl_from < 0
-                                                                  then Nothing
-                                                                  else (case Map.lookup (blk,lvl_from) acts of
-                                                                           Nothing -> Nothing
-                                                                           Just realized_from -> case arg of
-                                                                             Expr { exprDesc = EDUndef } -> Nothing
-                                                                             _ -> Just (argToExpr arg inp0 mem,
-                                                                                        and' [rblockActivation realized_from,(rblockJumps realized_from)!name]))
+                                                               in (do
+                                                                      if lvl_from < 0 then Nothing else return ()
+                                                                      realized_from <- Map.lookup (blk,lvl_from) acts
+                                                                      case arg of
+                                                                        Expr { exprDesc = EDUndef } -> Nothing
+                                                                        _ -> return ()
+                                                                      realized_cond <- Map.lookup name (rblockJumps realized_from)
+                                                                      return (argToExpr arg inp0 mem,
+                                                                              and' [rblockActivation realized_from,realized_cond]))
                                                 ) from
                          res <- valSwitch mem tp choices
                          return (iname,res)
