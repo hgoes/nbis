@@ -11,7 +11,7 @@ import Language.SMTLib2.Internals
 import Data.Typeable
 import Control.Monad.Trans
 import System.Environment (getArgs)
-import Data.List (genericLength,genericReplicate,genericSplitAt,zip4,zipWith4,zipWith5)
+import Data.List as List (genericLength,genericReplicate,genericSplitAt,zip4,zipWith4,zipWith5,null,lookup)
 import Data.Map as Map hiding (foldl,foldr,(!),mapMaybe)
 import Data.Set as Set hiding (foldl,foldr)
 import qualified Data.Bitstream as BitS
@@ -31,6 +31,7 @@ import Foreign.Ptr
 import Foreign.Storable
 import qualified Foreign.Marshal.Alloc as Alloc
 import Text.Show
+import Data.Monoid
 
 type Watchpoint = (String,SMTExpr Bool,[(TypeDesc,SMTExpr BitVector)])
 
@@ -55,6 +56,8 @@ instance Show (Val m) where
   show (PointerValue _) = "<pointer>"
   show (ConditionValue c _) = show c
   show (ConstCondition c) = show c
+
+type RealizationQueue = [(String,String,Integer,Integer)]
 
 valEq :: MemoryModel m => m -> Val m -> Val m -> SMTExpr Bool
 valEq mem (ConstValue x) (ConstValue y) = if x==y then constant True else constant False
@@ -110,180 +113,264 @@ newValue _ tp = do
 data RealizedBlock m = RealizedBlock { rblockActivation :: SMTExpr Bool
                                      , rblockMemoryOut  :: m
                                      , rblockOutput     :: Map String (Val m)
-                                     , rblockJumps      :: Map String (SMTExpr Bool)
+                                     , rblockJumps      :: Map StateId (SMTExpr Bool)
                                      , rblockReturns    :: Maybe (Maybe (Val m))
                                      }
 
+data RealizationState m = RealizationState { alreadyRealized :: Map StateId (RealizedBlock m)
+                                           , realizationQueue :: [QueuedState m]
+                                           , currentInvocationLevels :: Map String Integer
+                                           }
+
+data StateId = StateId { stateFunction :: String
+                       , stateBlock :: String
+                       , stateSubblock :: Integer
+                       , stateInvocationLevel :: Integer
+                       , stateRecursionLevel :: Integer
+                       } deriving (Eq,Ord)
+
+instance Show StateId where
+  show st = stateFunction st ++ "->" 
+            ++ stateBlock st ++ "."
+            ++ show (stateSubblock st)
+            ++(case stateInvocationLevel st of
+                  0 -> ""
+                  n -> "[i"++show n++"]")
+            ++(case stateRecursionLevel st of
+                  0 -> ""
+                  n -> "[r"++show n++"]")
+
+data QueuedState m = QueuedState { qstateId :: StateId
+                                 , qstateArguments :: Map String (Val m)
+                                 , qstateStack :: [(StateId,String)]
+                                 }
+
+localPredecessor :: String -> Integer -> StateId -> Maybe StateId
+localPredecessor blk sub st = let nlvl = if blk <= stateBlock st
+                                         then stateRecursionLevel st
+                                         else stateRecursionLevel st - 1
+                              in if nlvl >= 0
+                                 then Just $ st { stateBlock = blk
+                                                , stateSubblock = sub
+                                                , stateRecursionLevel = nlvl
+                                                }
+                                 else Nothing
+
+globalSuccessor :: String -> String -> Integer -> StateId -> RealizationState m -> (StateId,RealizationState m)
+globalSuccessor f blk sub st real 
+  = if f == stateFunction st
+    then (st { stateBlock = blk
+             , stateSubblock = sub
+             , stateRecursionLevel = if blk > stateBlock st || (blk == stateBlock st && sub > stateSubblock st)
+                                     then stateRecursionLevel st
+                                     else stateRecursionLevel st + 1
+             },real)
+    else (let (lvl,nm) = case Map.lookup f (currentInvocationLevels real) of
+                Nothing -> (0,Map.insert f 0 (currentInvocationLevels real))
+                Just r -> (r,Map.insert f (r+1) (currentInvocationLevels real))
+          in (StateId { stateFunction = f
+                      , stateBlock = blk
+                      , stateSubblock = sub
+                      , stateRecursionLevel = 0
+                      , stateInvocationLevel = lvl },real { currentInvocationLevels = nm }))
+
+queueState :: QueuedState m -> RealizationState m -> RealizationState m
+queueState ins st = st { realizationQueue = queue' (realizationQueue st) }
+  where
+    queue' [] = [ins]
+    queue' (q@(x:xs)) 
+      = case mconcat [compare (stateRecursionLevel $ qstateId ins) (stateRecursionLevel $ qstateId x)
+                     ,compare (stateInvocationLevel $ qstateId ins) (stateInvocationLevel $ qstateId x)
+                     ,compare (stateFunction $ qstateId ins) (stateFunction $ qstateId x)
+                     ,compare (stateBlock $ qstateId ins) (stateBlock $ qstateId x)
+                     ,compare (stateSubblock $ qstateId ins) (stateSubblock $ qstateId x)
+                     ] of
+          EQ -> q --error "Internal error: Queuing an already queued state"
+          LT -> ins:q
+          GT -> x:queue' xs
+
+newInvocation :: String -> RealizationState m -> (Integer,RealizationState m)
+newInvocation fname st 
+  = let lvl = Map.findWithDefault 0 fname (currentInvocationLevels st)
+    in (lvl,st { currentInvocationLevels = Map.insert fname (lvl+1) (currentInvocationLevels st) })
+
+getCurrentLevel :: String -> RealizationState m -> Integer
+getCurrentLevel fname st = Map.findWithDefault 0 fname (currentInvocationLevels st)
+
+realizationDone :: RealizationState m -> Bool
+realizationDone st = List.null (realizationQueue st)
+
+popState :: RealizationState m -> (QueuedState m,RealizationState m)
+popState st = (head (realizationQueue st),st { realizationQueue = tail (realizationQueue st) })
+
+stepRealization :: MemoryModel m => [TypeDesc]
+                   -> m
+                   -> Map String (Pointer m)
+                   -> Map String ([(String,TypeDesc)],TypeDesc,[(String,[(Integer,[Instruction])])])
+                   -> Map String (Map String (Map Integer BlockSig))
+                   -> Map String TypeDesc
+                   -> RealizationState m -> SMT ([Watchpoint],[Guard],RealizationState m)
+stepRealization tps init_mem globals prog sigs preds st
+  = let (qst,nxt) = popState st
+        sig_fun = case Map.lookup (stateFunction $ qstateId qst) sigs of
+          Nothing -> error $ "Internal error: Can't find signature for function "++stateFunction (qstateId qst)
+          Just r -> r
+        sig = case (Map.lookup (stateBlock $ qstateId qst) sig_fun >>= Map.lookup (stateSubblock $ qstateId qst)) of
+          Nothing -> error $ "Internal error: No signature found for block "++stateBlock (qstateId qst)++"."++show (stateSubblock $ qstateId qst)++" of "++stateFunction (qstateId qst)
+          Just r -> r
+        fun_blks = case Map.lookup (stateFunction $ qstateId qst) prog of
+          Nothing -> error $ "Internal error: Function "++stateFunction (qstateId qst)++" not found in program"
+          Just (_,_,r) -> r
+        instrs = case List.lookup (stateBlock $ qstateId qst) fun_blks of
+          Nothing -> error $ "Internal error: Block "++stateBlock (qstateId qst)++" of function "++stateFunction (qstateId qst)++" not found in program"
+          Just sub_blks -> case List.lookup (stateSubblock $ qstateId qst) sub_blks of
+            Nothing -> error $ "Internal error: Block "++stateBlock (qstateId qst)++" of function "++stateFunction (qstateId qst)++" not found in program"
+            Just r -> r
+        (_,_,((start_blk,_):_)) = prog!(stateFunction (qstateId qst))
+        froms = [ (rblockActivation realized,rblockMemoryOut realized,realized_cond)
+                | from <- (catMaybes $ fmap (\(blk,sblk) 
+                                             -> localPredecessor blk sblk (qstateId qst)) $ 
+                           Set.toList (blockOrigins sig))
+                          ++ (if stateBlock (qstateId qst) == start_blk && stateRecursionLevel (qstateId qst) == 0
+                              then case qstateStack qst of
+                                [] -> []
+                                (prev,_):_ -> [prev]
+                              else []),
+                  let sig_from = case (Map.lookup (stateBlock from) sig_fun >>= Map.lookup (stateSubblock from)) of
+                        Nothing -> error $ "Internal error: Can't find origin block "++stateBlock from++"."++show (stateSubblock from)++" for "++stateBlock (qstateId qst)
+                        Just r -> r,
+                  realized <- maybeToList $ Map.lookup from (alreadyRealized st),
+                  realized_cond <- maybeToList $ Map.lookup (qstateId qst) (rblockJumps realized)
+                ]
+    in do
+      act <- var
+      case froms of
+        [] -> assert act
+        _ -> assert $ act .==. or' [ and' [act',cond] | (act',_,cond) <- froms ]
+      mem <- case froms of
+        [] -> return init_mem
+        _ -> memSwitch [ (mem,and' [act',cond])  | (act',mem,cond) <- froms ]
+      let inps_simple = Map.fromList $ mapMaybe (\(iname,(from_blk,from_sub,expr,tp)) -> do
+                                                    from <- localPredecessor from_blk from_sub (qstateId qst)
+                                                    inp_block <- case Map.lookup from (alreadyRealized nxt) of
+                                                      Nothing -> Map.lookup (from { stateRecursionLevel = 0 }) (alreadyRealized nxt)
+                                                      Just blk -> return blk
+                                                    return $ (iname,argToExpr expr (rblockOutput inp_block) mem)
+                                              ) (Map.toList $ blockInputsSimple sig)
+          inp_global = fmap PointerValue globals
+          inp0 = Map.union inps_simple inp_global
+      trace (show inps_simple) (return ())
+      trace (show $ length froms) (return ())
+      inps_phi <- mapM (\(iname,(from,tp)) 
+                        -> do
+                          let choices = mapMaybe (\(blk,subblk,arg) 
+                                                  -> do
+                                                    case arg of
+                                                      Expr { exprDesc = EDUndef } -> Nothing
+                                                      _ -> return ()
+                                                    from_st <- localPredecessor blk subblk (qstateId qst)
+                                                    realized_from <- Map.lookup from_st (alreadyRealized nxt)
+                                                    realized_cond <- Map.lookup (qstateId qst)
+                                                                     (rblockJumps realized_from)
+                                                    return (argToExpr arg inp0 mem,
+                                                            and' [rblockActivation realized_from,realized_cond])
+                                                 ) from
+                          res <- valSwitch mem tp choices
+                          return (iname,res)
+                       ) (Map.toList $ blockInputsPhi sig)
+      let inps = Map.union inp0 (Map.fromList inps_phi)
+      (mem',values',res,watch,guards) <- realizeBlock (stateFunction $ qstateId qst) (stateBlock $ qstateId qst) (stateSubblock $ qstateId qst) instrs act mem False inps preds [] []
+      (jumps,succ,ret,nxt') <- case res of
+        Return r -> case qstateStack qst of
+          [] -> return (Map.empty,[],Just r,nxt)
+          (st,res):stack -> let nst = st { stateSubblock = (stateSubblock st) + 1 }
+                            in return (Map.singleton nst (constant True),
+                                       [ QueuedState { qstateId = nst
+                                                     , qstateArguments = case r of
+                                                       Nothing -> Map.empty
+                                                       Just r' -> Map.singleton res r'
+                                                     , qstateStack = stack } ],Nothing,nxt)
+        Jump jmps -> let (nxt',jmps') = mapAccumL (\cnxt ((fn,blk,sub),act) -> let (st,cnxt') = globalSuccessor fn blk sub (qstateId qst) cnxt
+                                                                               in (cnxt',(st,act))) nxt jmps
+                     in do
+                       jmps'' <- translateJumps jmps'
+                       return (jmps'',[ QueuedState { qstateId = st
+                                                    , qstateArguments = Map.empty 
+                                                    , qstateStack = qstateStack qst }
+                                      | (st,_) <- jmps' ],Nothing,nxt')
+        Call fn args ret -> let (arg_tps,_,_) = prog!fn
+                                rargs = Map.fromList (zipWith (\arg (name,_) -> (name,arg)) args arg_tps)
+                                (lvl,nxt') = newInvocation fn nxt
+                                (_,_,(start_blk,_):_) = prog!fn
+                                nst = StateId { stateFunction = fn
+                                              , stateBlock = start_blk
+                                              , stateSubblock = 0
+                                              , stateInvocationLevel = lvl
+                                              , stateRecursionLevel = 0
+                                              }
+                            in return (Map.singleton nst (constant True),
+                                       [ QueuedState { qstateId = nst
+                                                     , qstateArguments = rargs
+                                                     , qstateStack = (qstateId qst,ret):(qstateStack qst) } ],
+                                       Nothing,nxt')
+      let nxt'' = foldl (\cnxt st -> queueState st cnxt) nxt' succ
+      trace ("Realized state "++stateFunction (qstateId qst)++"->"++stateBlock (qstateId qst)++"."++show (stateSubblock (qstateId qst))) (return ())
+      return (watch,guards,
+              nxt'' { alreadyRealized = Map.insert (qstateId qst) 
+                                        (RealizedBlock { rblockActivation = act
+                                                       , rblockMemoryOut = case mem' of
+                                                         Nothing -> mem
+                                                         Just nmem -> nmem
+                                                       , rblockOutput = values'
+                                                       , rblockJumps = jumps
+                                                       , rblockReturns = ret
+                                                       }) (alreadyRealized nxt'')
+                   })
+
+
 translateProgram :: (MemoryModel mem) 
-                    => ProgDesc -> String -> Integer -> SMT (mem,mem,[Watchpoint],[Guard])
+                    => ProgDesc -> String -> Integer -> SMT (mem,[Watchpoint],[Guard])
 translateProgram (program,globs) entry_point limit = do
-  let alltps = foldl (\tps (args,rtp,blocks) 
-                      -> let tpsArgs = allTypesArgs args
-                             tpsBlocks = allTypesBlks blocks
-                         in tps++tpsArgs++tpsBlocks) [] program
+  let alltps_funs = foldl (\tps (args,rtp,blocks) 
+                           -> let tpsArgs = allTypesArgs args
+                                  tpsBlocks = allTypesBlks blocks
+                              in tps++tpsArgs++tpsBlocks) [] program
+      alltps_globs = foldl (\tps (TDPtr tp,_,_) -> tp:tps) [] globs
+      alltps = alltps_funs++alltps_globs
       (args,rtp,blks) = program!entry_point
+      preds = predictMallocUse $ concat [ instrs | (fname,(_,_,blks)) <- Map.toList program, (blk,subs) <- blks, (sub,instrs) <- subs ]
   --liftIO $ print globs
   (arg_vals,globals,mem_in) <- prepareEnvironment alltps args globs
-  (mem_out,ret,watches,guards) <- translateFunction alltps program entry_point args rtp blks globals limit (constant True) mem_in (zip arg_vals (fmap snd args))
-  return (mem_in,mem_out,watches,guards)
+  let (_,_,(start_blk,_):_) = program!entry_point
+      startq = QueuedState { qstateId = StateId { stateFunction = entry_point
+                                                , stateBlock = start_blk
+                                                , stateSubblock = 0
+                                                , stateInvocationLevel = 0
+                                                , stateRecursionLevel = 0
+                                                }
+                           , qstateArguments = Map.fromList $ zipWith (\(name,_) arg -> (name,arg)) args arg_vals
+                           , qstateStack = []
+                           }
+      start = RealizationState { alreadyRealized = Map.empty
+                               , realizationQueue = [ startq ]
+                               , currentInvocationLevels = Map.singleton entry_point 1
+                               }
+      sigs = fmap (\(args,rtp,body) -> let blkmp = mkVarBlockMap (fmap fst args) [ name | (name,_) <- Map.toList globs ] body
+                                       in mkBlockSigs blkmp body
+                  ) program
+  liftIO $ putStrLn $ unlines $ concat [ [fn]++concat [ ["  "++blk]++
+                                                        concat [ fmap ("    "++) $ showBlockSig (show sub) sig 
+                                                               | (sub,sig) <- Map.toList subs ]
+                                                      | (blk,subs) <- Map.toList sig ]
+                                       | (fn,sig) <- Map.toList sigs ]
+  (w,g,_) <- foldlM (\(watch,guard,cur) _ -> if realizationDone cur 
+                                             then return (watch,guard,cur)
+                                             else (do
+                                                      (watch',guard',ncur) <- stepRealization alltps mem_in globals program sigs preds cur
+                                                      return (watch'++watch,guard'++guard,ncur))) ([],[],start) [0..limit]
+  return (mem_in,w,g)
 
-translateFunction :: (MemoryModel m)
-                     => [TypeDesc]
-                     -> Map String ([(String,TypeDesc)],TypeDesc,[(String,[Instruction])])
-                     -> String
-                     -> [(String,TypeDesc)] -> TypeDesc
-                     -> [(String,[Instruction])]
-                     -> Map String (Pointer m)
-                     -> Integer
-                     -> SMTExpr Bool
-                     -> m
-                     -> [(Val m,TypeDesc)]
-                     -> SMT (m,Maybe (Val m),[Watchpoint],[Guard])
-translateFunction allTps program fname argTps tp blocks globals limit act mem_in args
-  = do
-    --liftIO $ putStr $ unlines $ concat [ (fname++" :: "++show args++" -> "++show rtype):concat [ ("  "++blkname++":"):[ "    "++show instr | instr <- instrs ]  | (blkname,instrs) <- blks ] | (fname,(args,rtype,blks)) <- Map.toList program ]
-    let blockMp = mkVarBlockMap (fmap fst argTps) (Map.keys globals) blocks
-        blockSigs = mkBlockSigs blockMp blocks
-        ordMp = Map.fromList (zipWith (\(name,instrs) n -> (name,(instrs,n))) (("",[]):blocks) [0..])
-        infoMp = Map.intersectionWith (\(instrs,n) sig -> (instrs,n,sig)) ordMp blockSigs
-        inps = zipWith (\(name,_) (arg,_) -> (name,arg)) argTps args
-        predictions = predictMallocUse blocks
-    --liftIO $ mapM_ (\(name,sig) -> putStr (unlines (showBlockSig name sig))) (Map.toList blockSigs)
-    --comment $ show $ prettyFunction fname tp argTps blocks
-    --liftIO $ print predictions
-    bfs allTps infoMp predictions
-      (Map.singleton ("",0) (RealizedBlock { rblockActivation = act
-                                           , rblockMemoryOut = mem_in
-                                           , rblockOutput = Map.fromList inps
-                                           , rblockJumps = Map.singleton (fst $ head blocks) (constant True)
-                                           , rblockReturns = Nothing 
-                                           }))
-      [] [] [(fst $ head blocks,0,1)]
-  where
-    bfs _ _ _ done watch guard [] = do
-      rmem <- memSwitch [ (mem,act) | RealizedBlock { rblockReturns = Just _ 
-                                                    , rblockMemoryOut = mem 
-                                                    , rblockActivation = act } <- Map.elems done ]
-      ret <- case tp of
-        TDVoid -> return Nothing
-        _ -> do
-          ret' <- valSwitch rmem tp [ (val,act) | RealizedBlock { rblockReturns = Just (Just val)
-                                                                , rblockActivation = act
-                                                                } <- Map.elems done ]
-          return $ Just ret'
-      return (rmem,ret,watch,guard)
-    bfs tps info preds done watch guard (nxt@(name,lvl,_):rest)
-      | Map.member (name,lvl) done = bfs tps info preds done watch guard rest
-      | otherwise = do
-        --liftIO $ putStrLn $ " Block "++fname++" -> "++name++" ("++show lvl++")"
-        comment $ " Block "++fname++" -> "++name++" ("++show lvl++")"
-        (nblk,watch',guard') <- trans tps done 
-                                (\f name -> case intrinsics f of
-                                    Nothing -> case Map.lookup f program of
-                                      Nothing -> error $ "Function "++show f++" not found"
-                                      Just (args,rtp,blocks) -> case blocks of
-                                        [] -> error $ "Function "++f++" has no implementation"
-                                        _ -> translateFunction allTps program f args rtp blocks globals (limit-lvl-1)
-                                    Just intr -> intr (Map.lookup name preds)
-                                ) fname globals info (name,lvl)
-        let (_,lvl_cur,_) = case Map.lookup name info of
-              Nothing -> error $ "Internal error: Failed to find block signature for "++name
-              Just x -> x
-            trgs = [ (trg,lvl',lvl_trg) 
-                   | trg <- Map.keys $ rblockJumps nblk,
-                     let (_,lvl_trg,_) = case Map.lookup trg info of
-                           Nothing -> error $ "Internal error: failed to find block "++show trg++" in map "++show info
-                           Just r -> r,
-                     let lvl' = if lvl_cur < lvl_trg then lvl else lvl+1,lvl' < limit ]
-        bfs tps info preds (Map.insert (name,lvl) nblk done) (watch++watch') (guard++guard') (foldl insert' rest trgs)
-    
-    insert' [] it = [it]
-    insert' all@((cname,clvl,cord):rest) (name,lvl,ord)
-      | clvl > lvl || (clvl==lvl && cord > ord) = (name,lvl,ord):all
-      | otherwise = (cname,clvl,cord):(insert' rest (name,lvl,ord))
-                         
-trans :: (MemoryModel m) 
-         => [TypeDesc] -> Map (String,Integer) (RealizedBlock m) 
-         -> (String -> String -> SMTExpr Bool -> m -> [(Val m,TypeDesc)] -> SMT (m,Maybe (Val m),[Watchpoint],[Guard]))
-         -> String
-         -> Map String (Pointer m)
-         -> Map String ([Instruction],Integer,BlockSig)
-         -> (String,Integer) 
-         -> SMT (RealizedBlock m,[Watchpoint],[Guard])
-trans tps acts calls fname globals blocks (name,lvl) = do
-    let (instrs,ord,sig) = case Map.lookup name blocks of
-          Nothing -> error $ "Internal error: "++name++" not found in blocks "++show blocks
-          Just r -> r
-        froms = [ (rblockActivation realized,rblockMemoryOut realized,realized_cond)
-                | from <- Set.toList (blockOrigins sig), 
-                  let (_,ord_from,sig_from) = case Map.lookup from blocks of
-                        Nothing -> error $ "Internal error: Can't find origin block "++from++" for "++name
-                        Just r -> r,
-                  let lvl_from = if ord_from < ord
-                                 then lvl
-                                 else lvl-1,
-                  lvl_from >= 0, 
-                  realized <- maybeToList (Map.lookup (from,lvl_from) acts),
-                  realized_cond <- maybeToList (Map.lookup name (rblockJumps realized))
-                ]
-    act <- var
-    assert $ act .==. or' [ and' [act',cond] | (act',_,cond) <- froms ]
-    mem <- case froms of
-             [] -> do
-               mem <- memNew tps
-               assert $ memInit mem
-               return mem
-             conds -> memSwitch [ (mem,and' [act',cond])  | (act',mem,cond) <- conds ]
-    let inps_simple = Map.fromList $ mapMaybe (\(iname,(from,expr,tp)) -> do
-                                                  let (_,ord_from,_) = case Map.lookup from blocks of
-                                                        Nothing -> error $ "Internal error: Can't find block "++from++" for "++show expr++" in "++show blocks
-                                                        Just r -> r
-                                                      lvl_from = if ord_from < ord
-                                                                 then lvl
-                                                                 else lvl-1
-                                                  if lvl_from < 0
-                                                    then Nothing
-                                                    else return ()
-                                                  inp_block <- case Map.lookup (from,lvl_from) acts of
-                                                    Nothing -> Map.lookup (from,0) acts
-                                                    Just blk -> return blk
-                                                  return $ (iname,argToExpr expr (rblockOutput inp_block) mem)
-                                              ) (Map.toList $ blockInputsSimple sig)
-        inp_global = fmap PointerValue globals
-        inp0 = Map.union inps_simple inp_global
-    inps_phi <- mapM (\(iname,(from,tp)) -> do
-                         let no_undef = Prelude.filter (\(blk,expr) -> exprDesc expr /= EDUndef) from
-                             choices = mapMaybe (\(blk,arg) -> let (_,ord_from,_) = case Map.lookup blk blocks of
-                                                                     Nothing -> error $ "Internal error: Can't find block "++blk++" for phi input in "++show blocks
-                                                                     Just r -> r
-                                                                   lvl_from = if ord_from < ord
-                                                                              then lvl
-                                                                              else lvl-1
-                                                               in (do
-                                                                      if lvl_from < 0 then Nothing else return ()
-                                                                      realized_from <- Map.lookup (blk,lvl_from) acts
-                                                                      case arg of
-                                                                        Expr { exprDesc = EDUndef } -> Nothing
-                                                                        _ -> return ()
-                                                                      realized_cond <- Map.lookup name (rblockJumps realized_from)
-                                                                      return (argToExpr arg inp0 mem,
-                                                                              and' [rblockActivation realized_from,realized_cond]))
-                                                ) from
-                         res <- valSwitch mem tp choices
-                         return (iname,res)
-                     ) (Map.toList $ blockInputsPhi sig)
-    (nmem,outps,ret',jumps,watch,guard) <- realizeBlock fname instrs act mem False (Map.union inp0 (Map.fromList inps_phi)) calls [] []
-    jumps' <- translateJumps jumps
-    return $ (RealizedBlock { rblockActivation = act
-                            , rblockMemoryOut = case nmem of
-                              Nothing -> mem
-                              Just nmem' -> nmem'
-                            , rblockOutput = outps
-                            , rblockJumps = jumps'
-                            , rblockReturns = ret'
-                            },watch,guard)
-
-translateJumps :: [(String,Maybe (SMTExpr Bool))] -> SMT (Map String (SMTExpr Bool))
+translateJumps :: Ord a => [(a,Maybe (SMTExpr Bool))] -> SMT (Map a (SMTExpr Bool))
 translateJumps = translateJumps' []
   where
     translateJumps' [] [(from,Nothing)] = return $ Map.singleton from (constant True)
@@ -305,27 +392,27 @@ translateJumps = translateJumps' []
 showBlockSig :: String -> BlockSig -> [String]
 showBlockSig name sig 
   = name:(if Map.null (blockInputsSimple sig) then []
-          else "  inputs":[ "    " ++ iname ++ " : "++show tp++" ~> "++ show expr | (iname,(ifrom,expr,tp)) <- Map.toList (blockInputsSimple sig) ]) ++
+          else "  inputs":[ "    " ++ iname ++ "("++ifrom++"."++show inum++") : "++show tp++" ~> "++ show expr | (iname,(ifrom,inum,expr,tp)) <- Map.toList (blockInputsSimple sig) ]) ++
     (if Map.null (blockInputsPhi sig) then [] 
      else "  phis":(concat [ ("    "++iname++" : "++show itp): 
                              [ "    "++(fmap (const ' ') iname)++" | "++ 
-                               from ++ " ~> "++show inf
-                             | (from,inf) <- ifrom
+                               from ++ "." ++ show from_sub ++ " ~> "++show inf
+                             | (from,from_sub,inf) <- ifrom
                              ] | (iname,(ifrom,itp)) <- Map.toList (blockInputsPhi sig) ])) ++
     (if Set.null (blockGlobals sig) then [] else "  globals":[ "    "++name | name <- Set.toList (blockGlobals sig) ]) ++
     (if Map.null (blockOutputs sig) then [] else "  outputs":[ "    "++oname++" : "++show otp | (oname,otp) <- Map.toList (blockOutputs sig) ]) ++
     (if Map.null (blockCalls sig) then [] else  "  calls":[ "    "++cname++" : "++concat [ show atp++" -> " | atp <- args ]++show tp | (cname,(args,tp)) <- Map.toList (blockCalls sig) ]) ++
-    (if Set.null (blockJumps sig) then [] else "  jumps":[ "    "++trg | trg <- Set.toList (blockJumps sig) ]) ++
-    (if Set.null (blockOrigins sig) then [] else "  origins":[ "    "++src | src <- Set.toList (blockOrigins sig) ])
+    (if Set.null (blockJumps sig) then [] else "  jumps":[ "    "++trg++"("++show tnum++")" | (trg,tnum) <- Set.toList (blockJumps sig) ]) ++
+    (if Set.null (blockOrigins sig) then [] else "  origins":[ "    "++src++"("++show snum++")" | (src,snum) <- Set.toList (blockOrigins sig) ])
 
 data BlockSig = BlockSig
-    { blockInputsPhi    :: Map String ([(String,Expr)],TypeDesc)
-    , blockInputsSimple :: Map String (String,Expr,TypeDesc)
+    { blockInputsPhi    :: Map String ([(String,Integer,Expr)],TypeDesc)
+    , blockInputsSimple :: Map String (String,Integer,Expr,TypeDesc)
     , blockOutputs      :: Map String TypeDesc
     , blockGlobals      :: Set String
     , blockCalls        :: Map String ([TypeDesc],TypeDesc)
-    , blockJumps        :: Set String
-    , blockOrigins      :: Set String
+    , blockJumps        :: Set (String,Integer)
+    , blockOrigins      :: Set (String,Integer)
     } deriving Show
 
 emptyBlockSig :: BlockSig
@@ -337,6 +424,33 @@ emptyBlockSig = BlockSig { blockInputsSimple = Map.empty
                          , blockJumps = Set.empty
                          , blockOrigins = Set.empty }
 
+realizeBlock :: MemoryModel mem => String -> String -> Integer -> [Instruction]
+                -> SMTExpr Bool
+                -> mem
+                -> Bool
+                -> Map String (Val mem)
+                -> Map String TypeDesc
+                -> [Watchpoint]
+                -> [Guard]
+                -> SMT (Maybe mem,Map String (Val mem),
+                        BlockFinalization mem,
+                        [Watchpoint],[Guard])
+realizeBlock fname blk subblk (instr:instrs) act mem changed values pred watch guard = do
+  res <- realizeInstruction instr fname blk subblk pred act mem values
+  let values' = case valueAssigned res of
+        Nothing -> values
+        Just (lbl,res) -> Map.insert lbl res values
+      (mem',changed') = case memoryUpdated res of
+        Nothing -> (mem,changed)
+        Just n -> (n,True)
+      watch' = watch ++ watchpointsCreated res
+      guard' = guard ++ guardsCreated res
+  case finalization res of
+    Just fin -> return (if changed' then Just mem' else Nothing,values',fin,watch',guard')
+    Nothing -> realizeBlock fname blk subblk instrs act mem' changed' values' pred watch' guard'
+realizeBlock fname blks subblk [] _ _ _ _ _ _ _ = error $ "Internal error: Block "++blks++" of "++fname++" terminates prematurely"
+      
+{-
 realizeBlock :: MemoryModel mem => String -> [Instruction] 
                 -> SMTExpr Bool
                 -> mem
@@ -361,7 +475,7 @@ realizeBlock fname (instr:instrs) act mem changed values calls watch guard
         Just ret' -> return (if changed then Just mem' else Nothing,values',ret,jumps,watch++watch',guard++guard')
         Nothing -> case jumps of
           _:_ -> return (if changed then Just mem' else Nothing,values',ret,jumps,watch++watch',guard++guard')
-          [] -> realizeBlock fname instrs act mem' changed' values' calls (watch ++ watch') (guard++guard')
+          [] -> realizeBlock fname instrs act mem' changed' values' calls (watch ++ watch') (guard++guard')-}
 
 argToExpr :: MemoryModel mem => Expr -> Map String (Val mem) -> mem -> Val mem
 argToExpr e values mem = {-trace ("argToExpr: "++show e++" "++show (Map.toList values)) $-} case exprDesc e of
@@ -469,140 +583,194 @@ argToExpr e values mem = {-trace ("argToExpr: "++show e++" "++show (Map.toList v
                         in apply lhs' rhs'
   _ -> error $ "Implement argToExpr for "++show e
 
-realizeInstruction :: MemoryModel mem => String -> Instruction
+data BlockFinalization mem = Jump [((String,String,Integer),Maybe (SMTExpr Bool))]
+                           | Return (Maybe (Val mem))
+                           | Call String [Val mem] String
+
+data InstructionResult mem = InstrResult { valueAssigned :: Maybe (String,Val mem)
+                                         , memoryUpdated :: Maybe mem
+                                         , finalization :: Maybe (BlockFinalization mem)
+                                         , watchpointsCreated :: [Watchpoint]
+                                         , guardsCreated :: [Guard]
+                                         }
+
+emptyInstructionResult :: InstructionResult mem
+emptyInstructionResult = InstrResult Nothing Nothing Nothing [] []
+
+realizeInstruction :: MemoryModel mem => Instruction
+                      -> String
+                      -> String
+                      -> Integer
+                      -> Map String TypeDesc
                       -> SMTExpr Bool
                       -> mem 
-                      -> Map String (Val mem) 
-                      -> (String -> String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[Guard]))
-                      -> SMT (Maybe mem,Maybe (String,Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint],[Guard])
-realizeInstruction fname instr act mem values calls
+                      -> Map String (Val mem)
+                      -> SMT (InstructionResult mem)
+realizeInstruction instr fname blk subblk pred act mem values
   = {-trace ("Realizing "++show instr++"..") $-} case instr of
-    IRet e -> return (Nothing,Nothing,Just (Just (argToExpr e values mem)),[],[],[])
-    IRetVoid -> return (Nothing,Nothing,Just Nothing,[],[],[])
-    IBr to -> return (Nothing,Nothing,Nothing,[(to,Nothing)],[],[])
+    IRet e -> return $ emptyInstructionResult { finalization = Just $ Return (Just (argToExpr e values mem)) }
+    IRetVoid -> return $ emptyInstructionResult { finalization = Just $ Return Nothing }
+    IBr to -> return $ emptyInstructionResult { finalization = Just $ Jump [((fname,to,0),Nothing)] }
     IBrCond cond ifT ifF -> case argToExpr cond values mem of
-      ConstCondition cond' -> return (Nothing,Nothing,Nothing,[(if cond' then ifT else ifF,Nothing)],[],[])
-      cond' -> return (Nothing,Nothing,Nothing,[(ifT,Just $ valCond cond'),(ifF,Nothing)],[],[])
+      ConstCondition cond' -> return $ emptyInstructionResult { finalization = Just $ Jump [((fname,if cond' then ifT else ifF,0),Nothing)] }
+      cond' -> return $ emptyInstructionResult { finalization = Just $ Jump [((fname,ifT,0),Just $ valCond cond'),((fname,ifF,0),Nothing)] }
     ISwitch val def args -> case argToExpr val values mem of
       ConstValue v -> case [ to | (cmp_v,to) <- args, let ConstValue v' = argToExpr cmp_v values mem, v' == v ] of
-        [] -> return (Nothing,Nothing,Nothing,[(def,Nothing)],[],[])
-        [to] -> return (Nothing,Nothing,Nothing,[(to,Nothing)],[],[])
-      v -> return (Nothing,Nothing,Nothing,[ (to,Just $ valEq mem v (argToExpr cmp_v values mem))
-                                           | (cmp_v,to) <- args
-                                           ] ++ [ (def,Nothing) ],[],[])
-    IAssign trg expr -> return (Nothing,Just (trg,argToExpr expr values mem),Nothing,[],[],[])
+        [] -> return $ emptyInstructionResult { finalization = Just $ Jump [((fname,def,0),Nothing)] }
+        [to] -> return $ emptyInstructionResult { finalization = Just $ Jump [((fname,to,0),Nothing)] }
+      v -> return $ emptyInstructionResult { finalization = Just $ Jump $ [ ((fname,to,0),Just $ valEq mem v (argToExpr cmp_v values mem))
+                                                                          | (cmp_v,to) <- args
+                                                                          ] ++ [ ((fname,def,0),Nothing) ] }
+    IAssign trg expr -> return $ emptyInstructionResult { valueAssigned = Just (trg,argToExpr expr values mem) }
     IAlloca trg tp size align -> do
       (ptr,mem') <- memAlloc tp (case argToExpr size values mem of
                                     ConstValue bv -> Left $ BitS.toBits bv
                                     DirectValue bv -> Right bv) Nothing mem
-      return (Just mem',Just (trg,PointerValue ptr),Nothing,[],[],[])
+      return $ emptyInstructionResult { memoryUpdated = Just mem'
+                                      , valueAssigned = Just (trg,PointerValue ptr) }
     IStore val to align -> let PointerValue ptr = argToExpr to values mem
                            in case exprType val of
                              TDPtr tp -> case argToExpr val values mem of
                                PointerValue ptr2 -> let (mem',guards) = memStorePtr tp ptr ptr2 mem
-                                                    in return (Just mem',Nothing,Nothing,[],[],guards)
+                                                    in return $ emptyInstructionResult { memoryUpdated = Just mem'
+                                                                                       , guardsCreated = [ (err,and' [act,cond]) | (err,cond) <- guards ] }
                              tp -> let (mem',guards) = memStore tp ptr (valValue $ argToExpr val values mem) mem
-                                   in return (Just mem',Nothing,Nothing,[],[],guards)
-    IPhi _ _ -> return (Nothing,Nothing,Nothing,[],[],[])
+                                   in return $ emptyInstructionResult { memoryUpdated = Just mem' 
+                                                                      , guardsCreated = [ (err,and' [act,cond]) | (err,cond) <- guards ] }
+    IPhi _ _ -> return emptyInstructionResult
     ICall rtp trg _ f args -> case exprDesc f of
-                                   EDNamed fn -> do
-                                     (mem',ret,watch,guards) <- calls fn trg act mem [ (argToExpr arg values mem,exprType arg) | arg <- args ]
-                                     return (Just mem',case ret of
-                                                Nothing -> Nothing
-                                                Just ret' -> Just (trg,ret'),Nothing,[],watch,guards)
+                                   EDNamed fn -> case intrinsics fn of
+                                     Just intr -> do
+                                       res <- intr trg (Map.lookup trg pred) act mem 
+                                              [ (argToExpr arg values mem,exprType arg) | arg <- args ]
+                                       return $ res { finalization = Just $ Jump [((fname,blk,subblk+1),Nothing)] }
+                                     Nothing -> return $ emptyInstructionResult { finalization = Just $ Call fn [ argToExpr arg values mem | arg <- args ] trg }
     ILoad trg arg align -> let PointerValue ptr = argToExpr arg values mem
                            in case exprType arg of
                              TDPtr (TDPtr tp) -> let (res,guards) = memLoadPtr tp ptr mem
-                                                 in return (Nothing,Just (trg,PointerValue res),Nothing,[],[],guards)
+                                                 in return $ emptyInstructionResult { valueAssigned = Just (trg,PointerValue res)
+                                                                                    , guardsCreated = [ (err,and' [act,cond]) | (err,cond) <- guards ] }
                              TDPtr tp -> let (res,guards) = memLoad tp ptr mem
-                                         in return (Nothing,Just (trg,DirectValue res),Nothing,[],[],guards)
+                                         in return $ emptyInstructionResult { valueAssigned = Just (trg,DirectValue res)
+                                                                            , guardsCreated = [ (err,and' [act,cond]) | (err,cond) <- guards ] }
     _ -> error $ "Implement realizeInstruction for "++show instr
 
 data LabelOrigin = ArgumentOrigin
                  | GlobalOrigin
-                 | BlockOrigin String
+                 | BlockOrigin String Integer
                  deriving (Eq,Ord,Show)
 
-mkVarBlockMap :: [String] -> [String] -> [(String,[Instruction])] -> Map String LabelOrigin
+mkVarBlockMap :: [String] -> [String] -> [(String,[(Integer,[Instruction])])] -> Map String LabelOrigin
 mkVarBlockMap args globs
-  = foldl (\mp (blk,instrs) 
-           -> let blk' = BlockOrigin blk
-              in foldl (\mp' instr
-                        -> case instr of
-                          IAssign lbl _ -> Map.insert lbl blk' mp'
-                          IAlloca lbl _ __ _ -> Map.insert lbl blk' mp'
-                          ILoad lbl _ _ -> Map.insert lbl blk' mp'
-                          ICall _ lbl _ _ _ -> Map.insert lbl blk' mp'
-                          IVAArg lbl _ _ -> Map.insert lbl blk' mp'
-                          IPhi lbl _ -> Map.insert lbl blk' mp'
-                          _ -> mp'
-                       ) mp instrs
+  = foldl (\mp (blk,subblks)
+            -> foldl (\mp' (n,instrs)
+                       -> let blk' = BlockOrigin blk n
+                          in foldl (\mp'' instr
+                                    -> case instr of
+                                      IAssign lbl _ -> Map.insert lbl blk' mp''
+                                      IAlloca lbl _ __ _ -> Map.insert lbl blk' mp''
+                                      ILoad lbl _ _ -> Map.insert lbl blk' mp''
+                                      ICall _ lbl _ _ _ -> Map.insert lbl blk' mp''
+                                      IVAArg lbl _ _ -> Map.insert lbl blk' mp''
+                                      IPhi lbl _ -> Map.insert lbl blk' mp''
+                                      _ -> mp''
+                                   ) mp' instrs
+                     ) mp subblks
           ) (Map.fromList $ [(arg,ArgumentOrigin) | arg <- args] ++ [(arg,GlobalOrigin) | arg <- globs])
 
-mkBlockSigs :: Map String LabelOrigin -> [(String,[Instruction])] -> Map String BlockSig
+mkBlockSigs :: Map String LabelOrigin -> [(String,[(Integer,[Instruction])])] -> Map String (Map Integer BlockSig)
 mkBlockSigs lbl_mp blks
-    = Map.adjust (\sig -> sig { blockOrigins = Set.singleton "" }) (fst $ head blks) $
-      foldl (\mp (blk,instrs)
-               -> foldl (\mp' instr
-                        -> case instr of
-                           IRet e -> addExpr blk e mp'
-                           IBr to -> addJump blk to mp'
-                           IBrCond cond ifT ifF -> addExpr blk cond $
-                                                   addJump blk ifT $
-                                                   addJump blk ifF mp'
-                           ISwitch val def cases -> addExpr blk val $
-                                                    addJump blk def $
-                                                    foldl (\mp'' (expr,to) -> addExpr blk expr $
-                                                                              addJump blk to mp'') mp' cases
-                           IIndirectBr e trgs -> addExpr blk e $
-                                                 foldl (\mp'' trg -> addJump blk trg mp'') mp' trgs
-                           IResume e -> addExpr blk e mp'
-                           IAssign _ e -> addExpr blk e mp'
-                           ILoad _ ptr _ -> addExpr blk ptr mp'
-                           IStore e ptr _ -> addExpr blk e $
-                                             addExpr blk ptr mp'
-                           IPhi trg cases -> let (mp1,vec) = mapAccumL (\cmp (val,from) -> (addExpr blk val cmp,(from,val))) mp' cases
-                                                 mp2 = addPhi blk trg (vec,exprType $ fst $ head cases) mp1
-                                             in mp2
-                           ICall rtp res cc fn args -> foldl (\mp'' arg -> addExpr blk arg mp'') mp' args
-                           _ -> mp'
-                       ) (Map.insertWith (\n o -> o) blk emptyBlockSig mp) instrs
-            ) (Map.singleton "" (emptyBlockSig { blockJumps = Set.singleton $ fst $ head blks })) blks
+    = {-Map.adjust (Map.adjust (\sig -> sig { blockOrigins = Set.singleton ("",0) }) 0) (fst $ head blks) $-}
+      foldl (\mp (blk,subblks)
+              -> foldl (\mp' (n,instrs)
+                         -> foldl (\mp'' instr
+                                    -> case instr of
+                                     IRet e -> addExpr blk n e mp''
+                                     IBr to -> addJump blk n to 0 mp''
+                                     IBrCond cond ifT ifF -> addExpr blk n cond $
+                                                             addJump blk n ifT 0 $
+                                                             addJump blk n ifF 0 mp''
+                                     ISwitch val def cases -> addExpr blk n val $
+                                                              addJump blk n def 0 $
+                                                              foldl (\mp''' (expr,to) -> addExpr blk n expr $
+                                                                                         addJump blk n to 0 mp''') mp'' cases
+                                     IIndirectBr e trgs -> addExpr blk n e $
+                                                           foldl (\mp''' trg -> addJump blk n trg 0 mp''') mp'' trgs
+                                     IResume e -> addExpr blk n e mp''
+                                     IAssign _ e -> addExpr blk n e mp''
+                                     ILoad _ ptr _ -> addExpr blk n ptr mp''
+                                     IStore e ptr _ -> addExpr blk n e $
+                                                       addExpr blk n ptr mp''
+                                     IPhi trg cases -> let (mp1,vec) = mapAccumL (\cmp (val,from) -> let Just subs = List.lookup from blks
+                                                                                                         (sub,_) = last subs
+                                                                                                     in (addExpr blk n val cmp,(from,sub,val))) mp'' cases
+                                                           mp2 = addPhi blk n trg (vec,exprType $ fst $ head cases) mp1
+                                                       in mp2
+                                     ICall rtp res cc fn args -> foldl (\mp''' arg -> addExpr blk n arg mp''') (addJump blk n blk (n+1) mp'') args
+                                     _ -> mp''
+                                  ) (Map.adjust (Map.insertWith (\_ o -> o) n emptyBlockSig) blk mp') instrs
+                       ) (Map.insertWith (\_ o -> o) blk (Map.singleton 0 emptyBlockSig) mp) subblks
+            ) Map.empty {-(Map.singleton "" (Map.singleton 0 $ emptyBlockSig { blockJumps = Set.singleton (fst $ head blks,0) }))-} blks
       where
-        addExpr :: String -> Expr -> Map String BlockSig -> Map String BlockSig
-        addExpr blk e = case exprDesc e of
+        addExpr :: String -> Integer -> Expr -> Map String (Map Integer BlockSig) -> Map String (Map Integer BlockSig)
+        addExpr blk n e = case exprDesc e of
           EDNamed name -> case Map.lookup name lbl_mp of
             Nothing -> error $ "Can't find "++name++" in label mapping"
-            Just (BlockOrigin blk_from) -> if blk_from==blk
-                                           then id
-                                           else addOutput blk_from name (exprType e) . addInput blk name (blk_from,e,exprType e)
-            Just GlobalOrigin -> addGlobal blk name
-          EDUnOp _ arg -> addExpr blk arg
-          EDICmp _ lhs rhs -> addExpr blk lhs . addExpr blk rhs
-          EDBinOp _ lhs rhs -> addExpr blk lhs . addExpr blk rhs
-          EDGetElementPtr expr args -> addExpr blk expr . (\mp -> foldr (addExpr blk) mp args)
+            Just (BlockOrigin blk_from n_from) -> if blk_from==blk && n_from == n
+                                                  then id
+                                                  else addOutput blk_from n_from name (exprType e) . addInput blk n name (blk_from,n_from,e,exprType e)
+            Just GlobalOrigin -> addGlobal blk n name
+          EDUnOp _ arg -> addExpr blk n arg
+          EDICmp _ lhs rhs -> addExpr blk n lhs . addExpr blk n rhs
+          EDBinOp _ lhs rhs -> addExpr blk n lhs . addExpr blk n rhs
+          EDGetElementPtr expr args -> addExpr blk n expr . (\mp -> foldr (addExpr blk n) mp args)
           EDInt _ -> id
           EDUndef -> id
           EDNull -> id
           e' -> error $ "Implement addExpr for "++show e'
-        addPhi blk lbl args = Map.alter (\c -> case c of
-                                            Nothing -> Just (emptyBlockSig { blockInputsPhi = Map.singleton lbl args })
-                                            Just blksig -> Just $ blksig { blockInputsPhi = Map.insert lbl args (blockInputsPhi blksig) }) blk
-        addInput blk lbl args = Map.alter (\c -> case c of
-                                                   Nothing -> Just (emptyBlockSig { blockInputsSimple = Map.singleton lbl args })
-                                                   Just blksig -> Just $ blksig { blockInputsSimple = Map.insert lbl args (blockInputsSimple blksig) }) blk
-        addOutput blk lbl tp = Map.alter (\c -> case c of
-                                             Nothing -> Just (emptyBlockSig { blockOutputs = Map.singleton lbl tp })
-                                             Just blksig -> Just $ blksig { blockOutputs = Map.insert lbl tp (blockOutputs blksig) }) blk
-        addJump blk to = Map.alter (\c -> case c of
-                                            Nothing -> Just (emptyBlockSig { blockJumps = Set.singleton to })
-                                            Just blksig -> Just $ blksig { blockJumps = Set.insert to (blockJumps blksig) }) blk .
-                         Map.alter (\c -> case c of
-                                       Nothing -> Just (emptyBlockSig { blockOrigins = Set.singleton blk })
-                                       Just blksig -> Just $ blksig { blockOrigins = Set.insert blk (blockOrigins blksig) }) to
-        addGlobal blk lbl = Map.alter (\c -> case c of
-                                          Nothing -> Just (emptyBlockSig { blockGlobals = Set.singleton lbl })
-                                          Just blksig -> Just $ blksig { blockGlobals = Set.insert lbl (blockGlobals blksig) }) blk
+        addPhi blk n lbl args = Map.alter (\c -> case c of
+                                              Nothing -> Just (Map.singleton n $ emptyBlockSig { blockInputsPhi = Map.singleton lbl args })
+                                              Just bank -> Just $ Map.alter (\c' -> case c' of
+                                                                                Nothing -> Just $ emptyBlockSig { blockInputsPhi = Map.singleton lbl args }
+                                                                                Just blksig -> Just $ blksig { blockInputsPhi = Map.insert lbl args (blockInputsPhi blksig) }
+                                                                            ) n bank
+                                          ) blk
+        addInput blk n lbl args = Map.alter (\c -> case c of
+                                                Nothing -> Just (Map.singleton n $ emptyBlockSig { blockInputsSimple = Map.singleton lbl args })
+                                                Just bank -> Just $ Map.alter (\c' -> case c' of
+                                                                                  Nothing -> Just $ emptyBlockSig { blockInputsSimple = Map.singleton lbl args }
+                                                                                  Just blksig -> Just $ blksig { blockInputsSimple = Map.insert lbl args (blockInputsSimple blksig) }
+                                                                              ) n bank
+                                            ) blk
+        addOutput blk n lbl tp = Map.alter (\c -> case c of
+                                               Nothing -> Just (Map.singleton n $ emptyBlockSig { blockOutputs = Map.singleton lbl tp })
+                                               Just bank -> Just $ Map.alter (\c' -> case c' of
+                                                                                 Nothing -> Just $ emptyBlockSig { blockOutputs = Map.singleton lbl tp }
+                                                                                 Just blksig -> Just $ blksig { blockOutputs = Map.insert lbl tp (blockOutputs blksig) }
+                                                                             ) n bank
+                                           ) blk
+        addJump :: String -> Integer -> String -> Integer -> Map String (Map Integer BlockSig) -> Map String (Map Integer BlockSig)
+        addJump blk n to ton = Map.alter (\c -> case c of
+                                             Nothing -> Just (Map.singleton n $ emptyBlockSig { blockJumps = Set.singleton (to,ton) })
+                                             Just bank -> Just $ Map.alter (\c' -> case c' of
+                                                                               Nothing -> Just $ emptyBlockSig { blockJumps = Set.singleton (to,ton) }
+                                                                               Just blksig -> Just $ blksig { blockJumps = Set.insert (to,ton) (blockJumps blksig) }
+                                                                           ) n bank
+                                         ) blk .
+                               Map.alter (\c -> case c of
+                                             Nothing -> Just (Map.singleton ton $ emptyBlockSig { blockOrigins = Set.singleton (blk,n) })
+                                             Just bank -> Just $ Map.alter (\c' -> case c' of
+                                                                               Nothing -> Just $ emptyBlockSig { blockOrigins = Set.singleton (blk,n) }
+                                                                               Just blksig -> Just $ blksig { blockOrigins = Set.insert (blk,n) (blockOrigins blksig) }
+                                                                           ) ton bank
+                                         ) to
+        addGlobal blk n lbl = Map.alter (\c -> case c of
+                                            Nothing -> Just (Map.singleton n $ emptyBlockSig { blockGlobals = Set.singleton lbl })
+                                            Just bank -> Just $ Map.alter (\c' -> case c' of
+                                                                              Nothing -> Just $ emptyBlockSig { blockGlobals = Set.singleton lbl }
+                                                                              Just blksig -> Just $ blksig { blockGlobals = Set.insert lbl (blockGlobals blksig) }
+                                                                          ) n bank
+                                        ) blk
 
 allTypesArgs :: [(String,TypeDesc)] -> [TypeDesc]
 allTypesArgs = allTypes' []
@@ -612,52 +780,54 @@ allTypesArgs = allTypes' []
         TDPtr tp' -> allTypes' (tp':tps) vals
         _ -> allTypes' tps vals
 
-allTypesBlks :: [(String,[Instruction])] -> [TypeDesc]
+allTypesBlks :: [(String,[(Integer,[Instruction])])] -> [TypeDesc]
 allTypesBlks = allTypes' [] []
     where
       allTypes' [] tps [] = tps
-      allTypes' [] tps ((_,instrs):blks) = allTypes' instrs tps blks
+      allTypes' [] tps ((_,subblks):blks) = allTypes' (concat $ fmap snd subblks) tps blks
       allTypes' (i:is) tps blks = case i of
                                         ILoad lbl e _ -> case exprType e of
                                           TDPtr tp -> allTypes' is (tp:tps) blks
+                                        IStore w to _ -> allTypes' is ((exprType w):tps) blks
                                         IAlloca lbl tp _ _ -> allTypes' is (tp:tps) blks
                                         
                                         _ -> allTypes' is tps blks
 
-intr_memcpy,intr_memset,intr_restrict,intr_watch,intr_malloc :: MemoryModel mem => Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[Guard])
-intr_memcpy _ _ mem [(PointerValue to,_),(PointerValue from,_),(ConstValue len,_),_,_]
-  = return (memCopy (BitS.toBits len) to from mem,Nothing,[],[])
+intr_memcpy,intr_memset,intr_restrict,intr_watch,intr_malloc :: MemoryModel mem => String -> Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (InstructionResult mem)
+intr_memcpy _ _ _ mem [(PointerValue to,_),(PointerValue from,_),(ConstValue len,_),_,_]
+  = return $ emptyInstructionResult { memoryUpdated = Just $ memCopy (BitS.toBits len) to from mem }
 
-intr_memset _ _ mem [(PointerValue dest,_),(val,_),(ConstValue len,_),_,_]
-  = return (memSet (BitS.toBits len) (valValue val) dest mem,Nothing,[],[])
+intr_memset _ _ _ mem [(PointerValue dest,_),(val,_),(ConstValue len,_),_,_]
+  = return $ emptyInstructionResult { memoryUpdated = Just $ memSet (BitS.toBits len) (valValue val) dest mem }
 
-intr_restrict _ act mem [(val,_)] = do
+intr_restrict _ _ act mem [(val,_)] = do
   comment " Restriction:"
   case val of
     ConditionValue val _ -> assert $ act .=>. val
     _ -> assert $ act .=>. (not' $ valValue val .==. constantAnn (BitS.fromNBits (32::Int) (0::Integer)) 32)
-  return (mem,Nothing,[],[])
-intr_assert _ act mem [(val,_)] = do
-  return (mem,Nothing,[],[(Custom,case val of
-                              ConditionValue val _ -> and' [act,not' val]
-                              _ -> and' [act,valValue val .==. constantAnn (BitS.fromNBits (32::Int) (0::Integer)) 32])])
+  return emptyInstructionResult
+intr_assert _ _ act mem [(val,_)] = do
+  return $ emptyInstructionResult { guardsCreated = [(Custom,case val of
+                                                         ConditionValue val _ -> and' [act,not' val]
+                                                         _ -> and' [act,valValue val .==. constantAnn (BitS.fromNBits (32::Int) (0::Integer)) 32])] }
 
 
-intr_watch _ act mem ((ConstValue num,_):exprs)
-  = return (mem,Nothing,[(show (BitS.toBits num :: Integer),act,[ (tp,valValue val) | (val,tp) <- exprs ])],[])
+intr_watch _ _ act mem ((ConstValue num,_):exprs)
+  = return $ emptyInstructionResult { watchpointsCreated = [(show (BitS.toBits num :: Integer),act,[ (tp,valValue val) | (val,tp) <- exprs ])] }
 
-intr_malloc (Just tp) act mem [(size,sztp)] = do
+intr_malloc trg (Just tp) act mem [(size,sztp)] = do
   (ptr,mem') <- memAlloc tp (case size of
                                 ConstValue bv -> Left $ BitS.toBits bv
                                 DirectValue bv -> Right bv) Nothing mem
-  return (mem',Just (PointerValue ptr),[],[])
+  return $ emptyInstructionResult { memoryUpdated = Just mem'
+                                  , valueAssigned = Just (trg,PointerValue ptr) }
 
-intr_nondet :: MemoryModel mem => Integer -> Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[Guard])
-intr_nondet width _ _ mem [] = do
+intr_nondet :: MemoryModel mem => Integer -> String -> Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (InstructionResult mem)
+intr_nondet width trg _ _ mem [] = do
   v <- varAnn (fromIntegral width)
-  return (mem,Just (DirectValue v),[],[])
+  return $ emptyInstructionResult { valueAssigned = Just (trg,DirectValue v) }
 
-intrinsics :: MemoryModel mem => String -> Maybe (Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[Guard]))
+intrinsics :: MemoryModel mem => String -> Maybe (String -> Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (InstructionResult mem))
 intrinsics "llvm.memcpy.p0i8.p0i8.i64" = Just intr_memcpy
 intrinsics "llvm.memcpy.p0i8.p0i8.i32" = Just intr_memcpy
 intrinsics "llvm.memset.p0i8.i32" = Just intr_memset
@@ -722,7 +892,7 @@ getConstant val = do
                                    )
                  getConstant' tp v)
 
-type ProgDesc = (Map String ([(String,TypeDesc)],TypeDesc,[(String,[Instruction])]),Map String (TypeDesc,MemContent,Bool))
+type ProgDesc = (Map String ([(String,TypeDesc)],TypeDesc,[(String,[(Integer,[Instruction])])]),Map String (TypeDesc,MemContent,Bool))
 
 getProgram :: String -> IO ProgDesc
 getProgram file = do
@@ -740,9 +910,19 @@ getProgram file = do
                   tp <- liftIO $ FFI.typeOf fun >>= FFI.getElementType >>= FFI.getReturnType >>= typeDesc2
                   blks <- liftIO $ getBasicBlocks fun >>= mapM (\(name,blk) -> do
                                                                    instrs <- getInstructions blk >>= mapM (\(name,instr) -> getInstruction instr)
-                                                                   return (name,instrs))
+                                                                   return (name,mkSubBlocks 0 [] instrs))
                   return (name,(pars,tp,blks))) funs
   return (Map.fromList res,glob)
+  where
+    mkSubBlocks :: Integer -> [Instruction] -> [Instruction] -> [(Integer,[Instruction])]
+    mkSubBlocks n cur (i:is) = case i of
+      ICall _ _ _ _ _ -> (n,cur++[i]):mkSubBlocks (n+1) [] is
+      IRetVoid -> [(n,cur++[i])]
+      IRet _ -> [(n,cur++[i])]
+      IBr _ -> [(n,cur++[i])]
+      IBrCond _ _ _ -> [(n,cur++[i])]
+      ISwitch _ _ _ -> [(n,cur++[i])]
+      _ -> mkSubBlocks n (cur++[i]) is
 
 mergePrograms :: ProgDesc -> ProgDesc -> ProgDesc
 mergePrograms (p1,g1) (p2,g2) = (Map.unionWithKey (\name (args1,tp1,blks1) (args2,tp2,blks2)
@@ -837,7 +1017,7 @@ main = do
     perform :: (MemoryModel mem)
                => ProgDesc -> String -> Integer -> Bool -> Bool -> SMT mem
     perform program entry depth check_user check_mem = do
-      (mem_in,mem_out,watches,guards) <- translateProgram program entry depth
+      (mem_in,watches,guards) <- translateProgram program entry depth
       guard_vars <- mapM (\(descr,expr) -> if (case descr of
                                                   Custom -> check_user
                                                   NullDeref -> check_mem
@@ -883,7 +1063,7 @@ main = do
       --liftIO $ putStrLn dump_in
       --liftIO $ putStrLn dump_out
       return mem_in
-
+    
 prepareEnvironment :: (MemoryModel mem)
                       => [TypeDesc] -> [(String,TypeDesc)] -> Map String (TypeDesc,MemContent,Bool) -> SMT ([Val mem],Map String (Pointer mem),mem)
 prepareEnvironment alltp args globals = do
@@ -905,21 +1085,20 @@ prepareEnvironment alltp args globals = do
       (ptr,mem') <- memAlloc tp (Left 1) (Just cont) mem
       createGlobals mem' rest (Map.insert name ptr mp)
 
-predictMallocUse :: [(String,[Instruction])] -> Map String TypeDesc
-predictMallocUse = predict' Map.empty Set.empty []
+predictMallocUse :: [Instruction] -> Map String TypeDesc
+predictMallocUse = predict' Map.empty Set.empty
   where
-    predict' mp act [] [] = Map.union mp (Map.fromList [ (entr,TDInt False 8) | entr <- Set.toList act ])
-    predict' mp act [] ((name,instrs):blks) = predict' mp act instrs blks
-    predict' mp act (instr:instrs) blks = case instr of
-      ICall _ name _ (Expr { exprDesc = EDNamed "malloc" }) _ -> predict' mp (Set.insert name act) instrs blks
+    predict' mp act [] = Map.union mp (Map.fromList [ (entr,TDInt False 8) | entr <- Set.toList act ])
+    predict' mp act (instr:instrs) = case instr of
+      ICall _ name _ (Expr { exprDesc = EDNamed "malloc" }) _ -> predict' mp (Set.insert name act) instrs
       IAssign _ (Expr { exprDesc = EDGetElementPtr (Expr { exprDesc = EDNamed name })  _ }) -> if Set.member name act
-                                                                                               then predict' (Map.insert name (TDInt False 8) mp) (Set.delete name act) instrs blks
-                                                                                               else predict' mp act instrs blks
+                                                                                               then predict' (Map.insert name (TDInt False 8) mp) (Set.delete name act) instrs
+                                                                                               else predict' mp act instrs
       IAssign _ (Expr { exprDesc = EDUnOp UOBitcast (Expr { exprDesc = EDNamed name })
                       , exprType = TDPtr tp }) -> if Set.member name act
-                                                  then predict' (Map.insert name tp mp) (Set.delete name act) instrs blks
-                                                  else predict' mp act instrs blks
+                                                  then predict' (Map.insert name tp mp) (Set.delete name act) instrs
+                                                  else predict' mp act instrs
       ILoad _ (Expr { exprDesc = EDNamed name }) _ -> if Set.member name act
-                                                      then predict' (Map.insert name (TDInt False 8) mp) (Set.delete name act) instrs blks
-                                                      else predict' mp act instrs blks
-      _ -> predict' mp act instrs blks
+                                                      then predict' (Map.insert name (TDInt False 8) mp) (Set.delete name act) instrs
+                                                      else predict' mp act instrs
+      _ -> predict' mp act instrs
