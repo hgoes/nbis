@@ -484,33 +484,6 @@ realizeBlock fname blk subblk (instr:instrs) act mem changed values pred watch g
     Just fin -> return (if changed' then Just mem' else Nothing,values',fin,watch',guard')
     Nothing -> realizeBlock fname blk subblk instrs act mem' changed' values' pred watch' guard'
 realizeBlock fname blks subblk [] _ _ _ _ _ _ _ = error $ "Internal error: Block "++blks++" of "++fname++" terminates prematurely"
-      
-{-
-realizeBlock :: MemoryModel mem => String -> [Instruction] 
-                -> SMTExpr Bool
-                -> mem
-                -> Bool
-                -> Map String (Val mem) 
-                -> (String -> String -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (mem,Maybe (Val mem),[Watchpoint],[Guard]))
-                -> [Watchpoint]
-                -> [Guard]
-                -> SMT (Maybe mem,Map String (Val mem),Maybe (Maybe (Val mem)),[(String,Maybe (SMTExpr Bool))],[Watchpoint],[Guard])
-realizeBlock fname (instr:instrs) act mem changed values calls watch guard
-    = do
-      --liftIO $ print instr
-      --liftIO $ putStrLn $ "Values: "++show values
-      (nmem,nvalue,ret,jumps,watch',guard') <- realizeInstruction fname instr act mem values calls
-      let values' = case nvalue of
-            Nothing -> values
-            Just (lbl,res) -> Map.insert lbl res values
-          (mem',changed') = case nmem of
-            Nothing -> (mem,changed)
-            Just n -> (n,True)
-      case ret of
-        Just ret' -> return (if changed then Just mem' else Nothing,values',ret,jumps,watch++watch',guard++guard')
-        Nothing -> case jumps of
-          _:_ -> return (if changed then Just mem' else Nothing,values',ret,jumps,watch++watch',guard++guard')
-          [] -> realizeBlock fname instrs act mem' changed' values' calls (watch ++ watch') (guard++guard')-}
 
 argToExpr :: MemoryModel mem => Expr -> Map String (Val mem) -> mem -> Val mem
 argToExpr e values mem = {-trace ("argToExpr: "++show e++" "++show (Map.toList values)) $-} case exprDesc e of
