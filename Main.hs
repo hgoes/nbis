@@ -576,7 +576,7 @@ argToExpr e values mem = {-trace ("argToExpr: "++show e++" "++show (Map.toList v
     UOTrunc -> let w = bitWidth (exprType e) 
                in case argToExpr arg values mem of
                  ConstValue bv -> ConstValue (BitS.fromNBits w (BitS.toBits bv :: Integer))
-                 ConditionValue v w -> ConditionValue v w
+                 ConditionValue v _ -> ConditionValue v w
                  expr -> DirectValue (bvextract (w - 1) 0 (valValue expr))
     UOBitcast -> let PointerValue ptr = argToExpr arg values mem
                      TDPtr tp = exprType e
