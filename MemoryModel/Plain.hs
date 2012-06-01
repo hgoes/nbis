@@ -303,7 +303,9 @@ instance MemoryModel PlainMemory where
                                                       Nothing -> Nothing,cond)) ptr
   memSwitch choices = do 
     mem <- mkSwitch choices
-    plainDup (PlainMem mem)
+    case choices of
+      [_] -> return (PlainMem mem)
+      _ -> plainDup (PlainMem mem)
     where
       mkSwitch [(PlainMem mem,_)] = return mem
       mkSwitch ((PlainMem mem,cond):rest) = do
