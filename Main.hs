@@ -145,23 +145,24 @@ data QueuedState m = QueuedState { qstateId :: StateId
                                  , qstateStack :: [(StateId,String)]
                                  }
 
-localPredecessor :: String -> Integer -> StateId -> Maybe StateId
-localPredecessor blk sub st = let nlvl = if blk <= stateBlock st
-                                         then stateRecursionLevel st
-                                         else stateRecursionLevel st - 1
-                              in if nlvl >= 0
-                                 then Just $ st { stateBlock = blk
-                                                , stateSubblock = sub
-                                                , stateRecursionLevel = nlvl
-                                                }
-                                 else Nothing
+localPredecessor :: Map String (Map String Integer) -> String -> Integer -> StateId -> Maybe StateId
+localPredecessor order blk sub st
+  = let nlvl = if (order!(stateFunction st)!blk) <= (order!(stateFunction st)!(stateBlock st))
+               then stateRecursionLevel st
+               else stateRecursionLevel st - 1
+    in if nlvl >= 0
+       then Just $ st { stateBlock = blk
+                      , stateSubblock = sub
+                      , stateRecursionLevel = nlvl
+                      }
+       else Nothing
 
-globalSuccessor :: String -> String -> Integer -> StateId -> RealizationState m -> (StateId,RealizationState m)
-globalSuccessor f blk sub st real 
+globalSuccessor :: Map String (Map String Integer) -> String -> String -> Integer -> StateId -> RealizationState m -> (StateId,RealizationState m)
+globalSuccessor order f blk sub st real 
   = if f == stateFunction st
     then (st { stateBlock = blk
              , stateSubblock = sub
-             , stateRecursionLevel = if blk > stateBlock st || (blk == stateBlock st && sub > stateSubblock st)
+             , stateRecursionLevel = if (order!f!blk) > (order!f!(stateBlock st)) || (blk == stateBlock st && sub > stateSubblock st)
                                      then stateRecursionLevel st
                                      else stateRecursionLevel st + 1
              },real)
@@ -174,15 +175,19 @@ globalSuccessor f blk sub st real
                       , stateRecursionLevel = 0
                       , stateInvocationLevel = lvl },real { currentInvocationLevels = nm }))
 
-queueState :: QueuedState m -> RealizationState m -> RealizationState m
-queueState ins st = st { realizationQueue = queue' (realizationQueue st) }
+queueState :: Map String (Map String Integer) -> QueuedState m -> RealizationState m -> RealizationState m
+queueState order ins st = if Map.member (qstateId ins) (alreadyRealized st) 
+                          then st
+                          else st { realizationQueue = queue' (realizationQueue st) }
   where
+    fun_in = stateFunction $ qstateId ins
+    blk_in = stateBlock $ qstateId ins
     queue' [] = [ins]
     queue' (q@(x:xs)) 
       = case mconcat [compare (stateRecursionLevel $ qstateId ins) (stateRecursionLevel $ qstateId x)
                      ,compare (stateInvocationLevel $ qstateId ins) (stateInvocationLevel $ qstateId x)
                      ,compare (stateFunction $ qstateId ins) (stateFunction $ qstateId x)
-                     ,compare (stateBlock $ qstateId ins) (stateBlock $ qstateId x)
+                     ,compare (order!fun_in!blk_in) (order!(stateFunction (qstateId x))!(stateBlock $ qstateId x))
                      ,compare (stateSubblock $ qstateId ins) (stateSubblock $ qstateId x)
                      ] of
           EQ -> q --error "Internal error: Queuing an already queued state"
@@ -209,8 +214,9 @@ stepRealization :: MemoryModel m => [TypeDesc]
                    -> Map String ([(String,TypeDesc)],TypeDesc,[(String,[(Integer,[Instruction])])])
                    -> Map String (Map String (Map Integer BlockSig))
                    -> Map String TypeDesc
+                   -> Map String (Map String Integer)
                    -> RealizationState m -> SMT ([Watchpoint],[Guard],RealizationState m)
-stepRealization tps init_mem globals prog sigs preds st
+stepRealization tps init_mem globals prog sigs preds order st
   = let (qst,nxt) = popState st
         sig_fun = case Map.lookup (stateFunction $ qstateId qst) sigs of
           Nothing -> error $ "Internal error: Can't find signature for function "++stateFunction (qstateId qst)
@@ -229,7 +235,7 @@ stepRealization tps init_mem globals prog sigs preds st
         (_,_,((start_blk,_):_)) = prog!(stateFunction (qstateId qst))
         froms = [ (rblockActivation realized,rblockMemoryOut realized,realized_cond)
                 | from <- (catMaybes $ fmap (\(blk,sblk) 
-                                             -> localPredecessor blk sblk (qstateId qst)) $ 
+                                             -> localPredecessor order blk sblk (qstateId qst)) $ 
                            Set.toList (blockOrigins sig))
                           ++ (if stateBlock (qstateId qst) == start_blk && stateRecursionLevel (qstateId qst) == 0
                               then case qstateStack qst of
@@ -251,7 +257,7 @@ stepRealization tps init_mem globals prog sigs preds st
         [] -> return init_mem
         _ -> memSwitch [ (mem,and' [act',cond])  | (act',mem,cond) <- froms ]
       let inps_simple = Map.fromList $ mapMaybe (\(iname,(from_blk,from_sub,expr,tp)) -> do
-                                                    from <- localPredecessor from_blk from_sub (qstateId qst)
+                                                    from <- localPredecessor order from_blk from_sub (qstateId qst)
                                                     inp_block <- case Map.lookup from (alreadyRealized nxt) of
                                                       Nothing -> Map.lookup (from { stateRecursionLevel = 0 }) (alreadyRealized nxt)
                                                       Just blk -> return blk
@@ -259,8 +265,6 @@ stepRealization tps init_mem globals prog sigs preds st
                                               ) (Map.toList $ blockInputsSimple sig)
           inp_global = fmap PointerValue globals
           inp0 = Map.union inps_simple inp_global
-      trace (show inps_simple) (return ())
-      trace (show $ length froms) (return ())
       inps_phi <- mapM (\(iname,(from,tp)) 
                         -> do
                           let choices = mapMaybe (\(blk,subblk,arg) 
@@ -268,7 +272,7 @@ stepRealization tps init_mem globals prog sigs preds st
                                                     case arg of
                                                       Expr { exprDesc = EDUndef } -> Nothing
                                                       _ -> return ()
-                                                    from_st <- localPredecessor blk subblk (qstateId qst)
+                                                    from_st <- localPredecessor order blk subblk (qstateId qst)
                                                     realized_from <- Map.lookup from_st (alreadyRealized nxt)
                                                     realized_cond <- Map.lookup (qstateId qst)
                                                                      (rblockJumps realized_from)
@@ -279,6 +283,7 @@ stepRealization tps init_mem globals prog sigs preds st
                           return (iname,res)
                        ) (Map.toList $ blockInputsPhi sig)
       let inps = Map.union inp0 (Map.fromList inps_phi)
+      comment $ "Block "++show (qstateId qst)
       (mem',values',res,watch,guards) <- realizeBlock (stateFunction $ qstateId qst) (stateBlock $ qstateId qst) (stateSubblock $ qstateId qst) instrs act mem False inps preds [] []
       (jumps,succ,ret,nxt') <- case res of
         Return r -> case qstateStack qst of
@@ -290,7 +295,7 @@ stepRealization tps init_mem globals prog sigs preds st
                                                        Nothing -> Map.empty
                                                        Just r' -> Map.singleton res r'
                                                      , qstateStack = stack } ],Nothing,nxt)
-        Jump jmps -> let (nxt',jmps') = mapAccumL (\cnxt ((fn,blk,sub),act) -> let (st,cnxt') = globalSuccessor fn blk sub (qstateId qst) cnxt
+        Jump jmps -> let (nxt',jmps') = mapAccumL (\cnxt ((fn,blk,sub),act) -> let (st,cnxt') = globalSuccessor order fn blk sub (qstateId qst) cnxt
                                                                                in (cnxt',(st,act))) nxt jmps
                      in do
                        jmps'' <- translateJumps jmps'
@@ -313,8 +318,8 @@ stepRealization tps init_mem globals prog sigs preds st
                                                      , qstateArguments = rargs
                                                      , qstateStack = (qstateId qst,ret):(qstateStack qst) } ],
                                        Nothing,nxt')
-      let nxt'' = foldl (\cnxt st -> queueState st cnxt) nxt' succ
-      trace ("Realized state "++stateFunction (qstateId qst)++"->"++stateBlock (qstateId qst)++"."++show (stateSubblock (qstateId qst))) (return ())
+      let nxt'' = foldl (\cnxt st -> queueState order st cnxt) nxt' succ
+      --trace ("Realized state "++show (qstateId qst)) (return ())
       return (watch,guards,
               nxt'' { alreadyRealized = Map.insert (qstateId qst) 
                                         (RealizedBlock { rblockActivation = act
@@ -329,8 +334,8 @@ stepRealization tps init_mem globals prog sigs preds st
 
 
 translateProgram :: (MemoryModel mem) 
-                    => ProgDesc -> String -> Integer -> SMT (mem,[Watchpoint],[Guard])
-translateProgram (program,globs) entry_point limit = do
+                    => ProgDesc -> String -> (ErrorDesc -> Bool) -> (ErrorDesc -> [(String,[(TypeDesc,BitVector)])] -> SMT a) -> SMT (mem,Maybe a)
+translateProgram (program,globs) entry_point check_err f = do
   let alltps_funs = foldl (\tps (args,rtp,blocks) 
                            -> let tpsArgs = allTypesArgs args
                                   tpsBlocks = allTypesBlks blocks
@@ -339,6 +344,7 @@ translateProgram (program,globs) entry_point limit = do
       alltps = alltps_funs++alltps_globs
       (args,rtp,blks) = program!entry_point
       preds = predictMallocUse $ concat [ instrs | (fname,(_,_,blks)) <- Map.toList program, (blk,subs) <- blks, (sub,instrs) <- subs ]
+      order = orderMap (program,globs)
   --liftIO $ print globs
   (arg_vals,globals,mem_in) <- prepareEnvironment alltps args globs
   let (_,_,(start_blk,_):_) = program!entry_point
@@ -358,17 +364,46 @@ translateProgram (program,globs) entry_point limit = do
       sigs = fmap (\(args,rtp,body) -> let blkmp = mkVarBlockMap (fmap fst args) [ name | (name,_) <- Map.toList globs ] body
                                        in mkBlockSigs blkmp body
                   ) program
-  liftIO $ putStrLn $ unlines $ concat [ [fn]++concat [ ["  "++blk]++
+  {-liftIO $ putStrLn $ unlines $ concat [ [fn]++concat [ ["  "++blk]++
                                                         concat [ fmap ("    "++) $ showBlockSig (show sub) sig 
                                                                | (sub,sig) <- Map.toList subs ]
                                                       | (blk,subs) <- Map.toList sig ]
-                                       | (fn,sig) <- Map.toList sigs ]
-  (w,g,_) <- foldlM (\(watch,guard,cur) _ -> if realizationDone cur 
-                                             then return (watch,guard,cur)
-                                             else (do
-                                                      (watch',guard',ncur) <- stepRealization alltps mem_in globals program sigs preds cur
-                                                      return (watch'++watch,guard'++guard,ncur))) ([],[],start) [0..limit]
-  return (mem_in,w,g)
+                                       | (fn,sig) <- Map.toList sigs ]-}
+  verify alltps mem_in globals program sigs preds order [] start
+  where
+    verify alltps mem_in globals program sigs preds order watch cur 
+      = if realizationDone cur
+        then return (mem_in,Nothing)
+        else (do
+                 (watch',guard',ncur) <- stepRealization alltps mem_in globals program sigs preds order cur
+                 let nwatch = watch++watch'
+                     check [] = verify alltps mem_in globals program sigs preds order nwatch ncur
+                     check ((err,cond):errs) 
+                       = if check_err err
+                         then (do
+                                  liftIO $ putStrLn $ "Checking for error "++show err
+                                  r <- stack $ do
+                                    assert cond
+                                    active <- checkSat
+                                    if active
+                                      then (do
+                                               wres <- mapM (\(name,cond',args) -> do
+                                                                wactive <- getValue cond'
+                                                                if wactive
+                                                                  then (do
+                                                                           args' <- mapM (\(tp,arg) -> do
+                                                                                             r <- getValue' (fromIntegral $ bitWidth tp) arg
+                                                                                             return (tp,r)) args
+                                                                           return $ Just (name,args'))
+                                                                  else return Nothing) nwatch
+                                               res <- f err (catMaybes wres)
+                                               return $ Just res)
+                                      else return Nothing
+                                  case r of
+                                    Nothing -> check errs
+                                    Just res -> return (mem_in,Just res))
+                         else check errs
+                 check guard')
 
 translateJumps :: Ord a => [(a,Maybe (SMTExpr Bool))] -> SMT (Map a (SMTExpr Bool))
 translateJumps = translateJumps' []
@@ -894,6 +929,9 @@ getConstant val = do
 
 type ProgDesc = (Map String ([(String,TypeDesc)],TypeDesc,[(String,[(Integer,[Instruction])])]),Map String (TypeDesc,MemContent,Bool))
 
+orderMap :: ProgDesc -> Map String (Map String Integer)
+orderMap (prog,_) = fmap (\(_,_,blks) -> Map.fromList [ (name,n) | ((name,_),n) <- zip blks [0..] ]) prog
+
 getProgram :: String -> IO ProgDesc
 getProgram file = do
   m <- readBitcodeFromFile file
@@ -1017,51 +1055,21 @@ main = do
     perform :: (MemoryModel mem)
                => ProgDesc -> String -> Integer -> Bool -> Bool -> SMT mem
     perform program entry depth check_user check_mem = do
-      (mem_in,watches,guards) <- translateProgram program entry depth
-      guard_vars <- mapM (\(descr,expr) -> if (case descr of
-                                                  Custom -> check_user
-                                                  NullDeref -> check_mem
-                                                  Overrun -> check_mem
-                                                  FreeAccess -> check_mem)
-                                           then (do
-                                                    expr' <- var
-                                                    assert $ expr' .==. expr
-                                                    return $ Just (case descr of
-                                                                      Custom -> "User error"
-                                                                      NullDeref -> "Null dereference"
-                                                                      Overrun -> "Memory overrun"
-                                                                      FreeAccess -> "Accessing free'd memory",expr'))
-                                           else return Nothing
-                         ) guards
-      let all_checks = [ x | Just x <- guard_vars ]
-      assert $ or' $ fmap snd all_checks
-      liftIO $ putStrLn "Done translating program"
-      res <- checkSat
-      if res
-        then (do
-                 liftIO $ putStrLn "Error(s) found:"
-                 mapM_ (\(descr,cond) -> do
-                           isOn <- getValue cond
-                           if isOn
-                             then liftIO $ putStrLn descr
-                             else return ()
-                       ) all_checks
-                 liftIO $ putStrLn "Watchpoints:"
-                 mapM_ (\(name,act,vals) -> do
-                           ract <- getValue act
-                           if ract
-                             then (do
-                                      rvals <- mapM (\(tp,val) -> getValue' (fromIntegral $ bitWidth tp) val) vals
-                                      liftIO $ putStrLn $ "Watchpoint "++name++":"
-                                        ++concat (fmap (\rval -> " "++show (BitS.toBits rval :: Integer)) rvals))
-                             else return ()
-                       ) watches
-             )
-        else liftIO $ putStrLn "No error found"
-      --dump_in <- memDump mem_in
-      --dump_out <- memDump mem_out
-      --liftIO $ putStrLn dump_in
-      --liftIO $ putStrLn dump_out
+      (mem_in,res) <- translateProgram program entry (\err -> case err of
+                                                         Custom -> check_user
+                                                         NullDeref -> check_mem
+                                                         Overrun -> check_mem
+                                                         FreeAccess -> check_mem)
+                      (\err watch -> return $ "Error found: "++(case err of
+                                                  Custom -> "User error"
+                                                  NullDeref -> "Null dereference"
+                                                  Overrun -> "Memory overrun"
+                                                  FreeAccess -> "Accessing free'd memory")
+                                     ++ "\nWatchpoints:\n"
+                                     ++ unlines (fmap (\(name,args) -> "  "++name++":"++concat (fmap (\(tp,rval) -> " "++show (BitS.toBits rval :: Integer)) args)) watch))
+      case res of
+        Just err -> liftIO $ putStrLn err
+        Nothing -> liftIO $ putStrLn "No error found."
       return mem_in
     
 prepareEnvironment :: (MemoryModel mem)
