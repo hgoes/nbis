@@ -364,11 +364,11 @@ translateProgram (program,globs) entry_point check_err f = do
       sigs = fmap (\(args,rtp,body) -> let blkmp = mkVarBlockMap (fmap fst args) [ name | (name,_) <- Map.toList globs ] body
                                        in mkBlockSigs blkmp body
                   ) program
-  {-liftIO $ putStrLn $ unlines $ concat [ [fn]++concat [ ["  "++blk]++
-                                                        concat [ fmap ("    "++) $ showBlockSig (show sub) sig 
-                                                               | (sub,sig) <- Map.toList subs ]
-                                                      | (blk,subs) <- Map.toList sig ]
-                                       | (fn,sig) <- Map.toList sigs ]-}
+  comment $ unlines $ concat [ [fn]++concat [ ["  "++blk]++
+                                              concat [ fmap ("    "++) $ showBlockSig (show sub) sig 
+                                                     | (sub,sig) <- Map.toList subs ]
+                                            | (blk,subs) <- Map.toList sig ]
+                             | (fn,sig) <- Map.toList sigs ]
   verify alltps mem_in globals program sigs preds order [] start
   where
     verify alltps mem_in globals program sigs preds order watch cur 
