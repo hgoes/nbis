@@ -147,25 +147,25 @@ plainModifyPtr (PlainPtrArray arr) (i:is) dyn f = (res,PlainPtrArray new)
 plainModifyPtr (PlainPtrCell alts) [] dyn f = let (res,nalts) = f alts
                                               in (res,PlainPtrCell nalts)
 
-translateIdx :: TypeDesc -> [Either Integer (SMTExpr BitVector)] -> ([Integer],[SMTExpr BitVector])
-translateIdx (TDStruct tps _) ((Left idx):rest) = let (rst,rdyn) = translateIdx (genericIndex tps idx) rest
-                                                  in (idx:rst,rdyn)
-translateIdx (TDArray len tp) (idx:rest) = let (rst,rdyn) = translateIdx tp rest
+translateIdx :: TypeDesc -> [Either Integer (SMTExpr BitVector)] -> (TypeDesc,[Integer],[SMTExpr BitVector])
+translateIdx (TDStruct tps _) ((Left idx):rest) = let (tp,rst,rdyn) = translateIdx (genericIndex tps idx) rest
+                                                  in (tp,idx:rst,rdyn)
+translateIdx (TDArray len tp) (idx:rest) = let (tp',rst,rdyn) = translateIdx tp rest
                                                nidx = case idx of
                                                  Left st -> constantAnn (BitS.fromNBits 64 st) 64
                                                  Right bv -> bv
-                                           in (rst,nidx:rdyn)
-translateIdx (TDVector len tp)  (idx:rest) = let (rst,rdyn) = translateIdx tp rest
+                                           in (tp',rst,nidx:rdyn)
+translateIdx (TDVector len tp)  (idx:rest) = let (tp',rst,rdyn) = translateIdx tp rest
                                                  nidx = case idx of
                                                    Left st -> constantAnn (BitS.fromNBits 64 st) 64
                                                    Right bv -> bv
-                                             in (rst,nidx:rdyn)
-translateIdx (TDPtr tp) (idx:rest) = let (rst,rdyn) = translateIdx tp rest
+                                             in (tp',rst,nidx:rdyn)
+translateIdx (TDPtr tp) (idx:rest) = let (tp',rst,rdyn) = translateIdx tp rest
                                          nidx = case idx of
                                            Left st -> constantAnn (BitS.fromNBits 64 st) 64
                                            Right bv -> bv
-                                     in (rst,nidx:rdyn)
-translateIdx _ [] = ([],[])
+                                     in (tp',rst,nidx:rdyn)
+translateIdx tp [] = (tp,[],[])
 translateIdx tp idx = error $ "Implement translateIdx for "++show tp++" "++show idx
 
 expandIdx :: [Either Integer (SMTExpr BitVector)] -> [Either Integer (SMTExpr BitVector)]
@@ -200,16 +200,16 @@ plainAssign (TDStruct tps _) (PlainStruct conts) (MemArray cells) path
   = mapM_ (\(tp,cont,cell) -> plainAssign tp cont cell path) (Prelude.zip3 tps conts cells)
 plainAssign (TDArray len tp) cont (MemArray cells) path
   = mapM_ (\(i,cell) -> plainAssign tp cont cell (i:path)) (zip [0..] cells)
-plainAssign (TDArray len tp) cont (MemArray cells) path
+plainAssign (TDVector len tp) cont (MemArray cells) path
   = mapM_ (\(i,cell) -> plainAssign tp cont cell (i:path)) (zip [0..] cells)
 plainAssign (TDPtr tp) cont mem path = return ()
 plainAssign tp (PlainSingle el _) (MemCell bv) path
   = assert $ (resolve' el (Prelude.reverse path)) .==. bv
   where
     resolve' :: PlainIdx p => SMTExpr p -> [Integer] -> SMTExpr BitVector
-    resolve' el (i:is) = case plainWithIdx el bv (\nel -> (resolve' nel is,Nothing)) of
+    resolve' el (i:is) = case plainWithIdx el (constantAnn (BitS.fromNBits 64 i) 64) (\nel -> (resolve' nel is,Nothing)) of
       Just (res,_) -> res
-    resolve' el [] = case plainWithCell el (\bv -> (bv,Nothing)) of
+    resolve' el [] = case plainWithCell el (\bv' -> (bv',Nothing)) of
       Just (res,_) -> res
 
 plainSwitch :: SMTExpr Bool -> TypeDesc -> PlainCont -> PlainCont -> Integer -> SMT PlainCont
@@ -342,10 +342,10 @@ instance MemoryModel PlainMemory where
                                          then TDPtr (ptrType ptr')
                                          else ptrType ptr'
                                    paths = allSuccIdx rtp off
-                                   banks = fmap (\path -> let (stat,dyn) = translateIdx rtp path
+                                   banks = fmap (\path -> let (tp,stat,dyn) = translateIdx rtp path
                                                               (res,_,errs) = plainModify cont stat dyn (\x -> (x,Nothing))
-                                                          in (res,errs)) paths
-                               in case typedLoad (bitWidth tp) [(ptrType ptr')] banks of
+                                                          in (tp,res,errs)) paths
+                               in case typedLoad (bitWidth tp) banks of
                                  [(res,errs)] -> (res,errs,cond)
                                  bvs -> (bvconcats [ bv | (bv,_) <- bvs ],concat [ errs | (_,errs) <- bvs ],cond)
                              | (Just ptr',cond) <- ptr ]
@@ -368,7 +368,7 @@ instance MemoryModel PlainMemory where
                    rtp = if indir
                          then TDPtr (ptrType ptr')
                          else ptrType ptr'
-                   (stat,dyn) = translateIdx (ptrType ptr') off
+                   (rtp',stat,dyn) = translateIdx rtp off
                    (ptr_cont,_) = plainModifyPtr cont stat dyn (\ocont -> (ocont,ocont))
              ],[])
   memStore tp ptr cont (PlainMem mem) = (PlainMem mem',errs)
@@ -387,7 +387,7 @@ instance MemoryModel PlainMemory where
                       _ -> error "invalid memory indirection in store"
               rtp = if indir then TDPtr (ptrType ptr)
                     else ptrType ptr
-              (stat,dyn) = translateIdx rtp off
+              (_,stat,dyn) = translateIdx rtp off
               (_,ncont,errs') = plainModify pcont stat dyn (\ocont -> ((),Just $ if Prelude.null ptrs && Prelude.null prev
                                                                                  then cont
                                                                                  else ite (and' (cond:prev)) cont ocont
@@ -405,7 +405,7 @@ instance MemoryModel PlainMemory where
                                                               _ -> error "invalid memory indirection in store"
                                                       rtp = if indir then TDPtr (ptrType ptr)
                                                             else ptrType ptr
-                                                      (stat,dyn) = translateIdx rtp off
+                                                      (_,stat,dyn) = translateIdx rtp off
                                                       (_,ncont) = plainModifyPtr cont stat dyn 
                                                                   (\ocont -> ((),[ (n,and' $ cond:c:prev) | (n,c) <- src ]))
                                                   in (indir,PlainPtrs ncont)
@@ -470,14 +470,11 @@ instance MemoryModel PlainMemory where
   memPtrSwitch _ ptrs = return $ concat [ [ (ptr',and' [cond',cond]) | (ptr',cond') <- ptr ] | (ptr,cond) <- ptrs ]
       
 
-typedLoad :: Integer -> [TypeDesc] -> [(SMTExpr BitVector,[(ErrorDesc,SMTExpr Bool)])] -> [(SMTExpr BitVector,[(ErrorDesc,SMTExpr Bool)])]
-typedLoad 0 _ _ = []
-typedLoad l ((TDStruct tps _):rest) banks = typedLoad l (tps++rest) banks
-typedLoad l ((TDArray len tp):rest) banks = typedLoad l ((genericReplicate len tp)++rest) banks
-typedLoad l ((TDVector len tp):rest) banks = typedLoad l ((genericReplicate len tp)++rest) banks
-typedLoad l (tp:tps) (bank@(bv,errs):banks) = case compare l (bitWidth tp) of
-  EQ -> [bank]
-  GT -> bank : typedLoad (l - (bitWidth tp)) tps banks
+typedLoad :: Integer -> [(TypeDesc,SMTExpr BitVector,[(ErrorDesc,SMTExpr Bool)])] -> [(SMTExpr BitVector,[(ErrorDesc,SMTExpr Bool)])]
+typedLoad 0 _ = []
+typedLoad l ((tp,bv,errs):banks) = case compare l (bitWidth tp) of
+  EQ -> [(bv,errs)]
+  GT -> (bv,errs) : typedLoad (l - (bitWidth tp)) banks
   LT -> [(bvextract ((bitWidth tp)-1) ((bitWidth tp)-l) bv,errs)]
   
 plainOffset :: PlainPointer -> [Either Integer (SMTExpr BitVector)] -> PlainPointer
