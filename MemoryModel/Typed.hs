@@ -9,7 +9,6 @@ import Data.Word
 import Data.Typeable
 import Data.List (genericReplicate,mapAccumL,nub)
 import Data.Map as Map hiding (foldl)
-import qualified Data.Bitstream as BitS
 import Data.Bits
 
 type PtrT = Word64
@@ -159,11 +158,10 @@ renderMemObject' bvs (TDArray n tp) = let (rest,res) = mapAccumL renderMemObject
                                       in (rest,"array {":(fmap ("  "++) $ concat res)++["}"])
 renderMemObject' bvs (TDVector n tp) = let (rest,res) = mapAccumL renderMemObject' bvs (genericReplicate n tp)
                                        in (rest,"vector {":(fmap ("  "++) $ concat res)++["}"])
-renderMemObject' (bv:bvs) (TDInt s bits) = let r = BitS.toBits bv :: Integer
-                                               rr = if s && testBit r (fromIntegral (bits-1))
-                                                    then (complement r) - 1
-                                                    else r
-                                           in (bvs,[show r++" : "++(if s then "i" else "u")++show bits])
+renderMemObject' (BitVector bv:bvs) (TDInt s bits) = let rr = if s && testBit bv (fromIntegral (bits-1))
+                                                              then (complement bv) - 1
+                                                              else bv
+                                                     in (bvs,[show rr++" : "++(if s then "i" else "u")++show bits])
 
 typedLoad :: Integer -> Integer -> [TypeDesc] -> [SMTExpr BitVector] -> SMTExpr BitVector
 typedLoad offset len tps banks = case typedLoad' offset len tps banks of

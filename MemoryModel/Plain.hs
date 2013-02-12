@@ -8,7 +8,6 @@ import Language.SMTLib2.Internals
 import Data.Map as Map hiding (foldl,(!))
 import Data.Typeable
 import Data.Maybe
-import Data.Bitstream as BitS (fromNBits,toBits)
 import Data.Traversable
 import Prelude hiding (mapM,sequence)
 import Data.List (genericReplicate,genericIndex,genericDrop,intersperse,genericLength)
@@ -20,7 +19,7 @@ import Data.Bits
              Just r -> r
 
 newBV :: Integer -> Integer -> SMTExpr BitVector
-newBV sz val = constantAnn (BitS.fromNBits sz val) (fromIntegral sz)
+newBV sz val = constantAnn (BitVector val) (fromIntegral sz)
 
 data PlainMemory = PlainMem (Map TypeDesc (Map Int (Bool,PlainCont)))
                  deriving Typeable
@@ -91,11 +90,11 @@ allSuccIdx :: TypeDesc -> [Either Integer (SMTExpr BitVector)] -> [[Either Integ
 allSuccIdx tp [] = fmap (fmap Left) (allIdx tp)
 allSuccIdx (TDStruct tps _) ((Left i):is) = concat $ zipWith (\n tp -> fmap ((Left n):) (allSuccIdx tp is)) [i..] (genericDrop i tps)
 allSuccIdx (TDArray l tp) ((Left i):is) = concat $ fmap (\n -> fmap ((Left n):) (allSuccIdx tp is)) [i..(l-1)]
-allSuccIdx (TDArray l tp) ((Right i):is) = concat $ fmap (\n -> fmap ((Right $ if n==0 then i else bvadd i (constantAnn (BitS.fromNBits 64 (n::Integer)) 64)):) (allSuccIdx tp is)) [0..]
+allSuccIdx (TDArray l tp) ((Right i):is) = concat $ fmap (\n -> fmap ((Right $ if n==0 then i else bvadd i (constantAnn (BitVector n) 64)):) (allSuccIdx tp is)) [0..]
 allSuccIdx (TDVector l tp) ((Left i):is) = concat $ fmap (\n -> fmap ((Left n):) (allSuccIdx tp is)) [i..(l-1)]
-allSuccIdx (TDArray l tp) ((Right i):is) = concat $ fmap (\n -> fmap ((Right $ if n==0 then i else bvadd i (constantAnn (BitS.fromNBits 64 (n::Integer)) 64)):) (allSuccIdx tp is)) [0..]
+allSuccIdx (TDArray l tp) ((Right i):is) = concat $ fmap (\n -> fmap ((Right $ if n==0 then i else bvadd i (constantAnn (BitVector n) 64)):) (allSuccIdx tp is)) [0..]
 allSuccIdx (TDPtr tp) ((Left i):is) = concat $ fmap (\n -> fmap ((Left n):) (allSuccIdx tp is)) [i..]
-allSuccIdx (TDPtr tp) ((Right i):is) = concat $ fmap (\n -> fmap ((Right $ if n==0 then i else bvadd i (constantAnn (BitS.fromNBits 64 (n::Integer)) 64)):) (allSuccIdx tp is)) [0..]
+allSuccIdx (TDPtr tp) ((Right i):is) = concat $ fmap (\n -> fmap ((Right $ if n==0 then i else bvadd i (constantAnn (BitVector n) 64)):) (allSuccIdx tp is)) [0..]
 allSuccIdx tp idx = error $ "Indexing type "++show tp++" with "++show idx
 
 plainResolve :: PlainCont -> [Integer] -> [SMTExpr BitVector] -> SMTExpr BitVector
@@ -152,17 +151,17 @@ translateIdx (TDStruct tps _) ((Left idx):rest) = let (tp,rst,rdyn) = translateI
                                                   in (tp,idx:rst,rdyn)
 translateIdx (TDArray len tp) (idx:rest) = let (tp',rst,rdyn) = translateIdx tp rest
                                                nidx = case idx of
-                                                 Left st -> constantAnn (BitS.fromNBits 64 st) 64
+                                                 Left st -> constantAnn (BitVector st) 64
                                                  Right bv -> bv
                                            in (tp',rst,nidx:rdyn)
 translateIdx (TDVector len tp)  (idx:rest) = let (tp',rst,rdyn) = translateIdx tp rest
                                                  nidx = case idx of
-                                                   Left st -> constantAnn (BitS.fromNBits 64 st) 64
+                                                   Left st -> constantAnn (BitVector st) 64
                                                    Right bv -> bv
                                              in (tp',rst,nidx:rdyn)
 translateIdx (TDPtr tp) (idx:rest) = let (tp',rst,rdyn) = translateIdx tp rest
                                          nidx = case idx of
-                                           Left st -> constantAnn (BitS.fromNBits 64 st) 64
+                                           Left st -> constantAnn (BitVector st) 64
                                            Right bv -> bv
                                      in (tp',rst,nidx:rdyn)
 translateIdx tp [] = (tp,[],[])
@@ -171,10 +170,10 @@ translateIdx tp idx = error $ "Implement translateIdx for "++show tp++" "++show 
 expandIdx :: [Either Integer (SMTExpr BitVector)] -> [Either Integer (SMTExpr BitVector)]
 expandIdx = fmap (\v -> case v of
                      Left i -> Left i
-                     Right bv -> let BitstreamLen w = extractAnnotation bv
-                                 in if w < 64
-                                    then Right $ bvconcat (constantAnn (BitS.fromNBits (64-w) (0::Integer) :: BitVector) (fromIntegral $ 64-w)) bv
-                                    else Right bv)
+                     Right bv -> let w = extractAnnotation bv
+                                in if w < 64
+                                   then Right $ bvconcat (constantAnn (BitVector 0) (fromIntegral $ 64-w)) bv
+                                   else Right bv)
 
 contentToCell :: MemContent -> [Integer] -> SMTExpr BitVector
 contentToCell (MemArray arr) (i:is) = contentToCell (genericIndex arr i) is
@@ -207,7 +206,7 @@ plainAssign tp (PlainSingle el _) (MemCell bv) path
   = assert $ (resolve' el (Prelude.reverse path)) .==. bv
   where
     resolve' :: PlainIdx p => SMTExpr p -> [Integer] -> SMTExpr BitVector
-    resolve' el (i:is) = case plainWithIdx el (constantAnn (BitS.fromNBits 64 i) 64) (\nel -> (resolve' nel is,Nothing)) of
+    resolve' el (i:is) = case plainWithIdx el (constantAnn (BitVector i) 64) (\nel -> (resolve' nel is,Nothing)) of
       Just (res,_) -> res
     resolve' el [] = case plainWithCell el (\bv' -> (bv',Nothing)) of
       Just (res,_) -> res
@@ -249,8 +248,8 @@ addIndirection (PlainStruct cs) = do
   return (PlainStruct cs')
 addIndirection (PlainSingle expr dims) = do
   nvar <- varAnn (64,extractAnnotation expr)
-  assert $ (select nvar (constantAnn (BitS.fromNBits 64 (0::Integer)) 64::SMTExpr BitVector)) .==. expr
-  return (PlainSingle nvar ((constantAnn (BitS.fromNBits 64 (1::Integer)) 64):dims))
+  assert $ (select nvar (constantAnn (BitVector 0) 64)) .==. expr
+  return (PlainSingle nvar ((constantAnn (BitVector 1) 64):dims))
 addIndirection (PlainPtrs cont) = return $ PlainPtrs (PlainPtrArray [cont])
 
 plainEq :: PlainCont -> PlainCont -> SMT ()
@@ -356,7 +355,7 @@ instance MemoryModel PlainMemory where
       load' ((bv,errs,cond):rest) = let (bv',errs') = load' rest
                                     in (ite cond bv bv',(fmap (\(d,err) -> (d,and' [cond,err])) errs)
                                                         ++(fmap (\(d,err) -> (d,and' [not' cond,err])) errs'))
-      load' [] = (constantAnn (BitS.fromNBits (bitWidth tp) (0::Integer)) (fromIntegral $ bitWidth tp),[])
+      load' [] = (constantAnn (BitVector 0) (fromIntegral $ bitWidth tp),[])
   memLoadPtr tp ptr (PlainMem mem)
     = (concat [ [ (cont',and' [cond,cond']) | (cont',cond') <- ptr_cont ]
              | (Just ptr',cond) <- ptr,
@@ -427,10 +426,10 @@ instance MemoryModel PlainMemory where
       dumpPlainCont (TDVector len tp) plain limits = dumpPlainCont tp plain (limits++[len])
       dumpPlainCont tp (PlainSingle cont _) [] = case plainWithCell cont (\x -> (x,Nothing)) of
         Just (r,_) -> do
-          v <- getValue' (fromIntegral $ bitWidth tp) r
-          return $ show (BitS.toBits v :: Integer)
+          BitVector v <- getValue' (fromIntegral $ bitWidth tp) r
+          return $ show v
       dumpPlainCont tp (PlainSingle cont dims) (l:ls) = do
-        res <- mapM (\i -> case plainWithIdx cont (constantAnn (BitS.fromNBits 64 i) 64) (\expr -> (dumpPlainCont tp (PlainSingle expr (tail dims)) ls,Nothing)) of
+        res <- mapM (\i -> case plainWithIdx cont (constantAnn (BitVector i) 64) (\expr -> (dumpPlainCont tp (PlainSingle expr (tail dims)) ls,Nothing)) of
                         Just (r,_) -> r) [0..(l-1)]
         return $ "[ "++concat (intersperse ", " res)++" ]"
   memCast _ to ptr = fmap (\(ptr',cond) -> case ptr' of
@@ -462,11 +461,11 @@ instance MemoryModel PlainMemory where
             Left iy -> if ix==iy
                        then Just rest
                        else Nothing
-            Right by -> let rw@(BitstreamLen w) = extractAnnotation by
-                        in Just $ (constantAnn (BitS.fromNBits w ix) rw .==. by):rest
+            Right by -> let rw = extractAnnotation by
+                        in Just $ (constantAnn (BitVector ix) rw .==. by):rest
           Right bx -> case y of
-            Left iy -> let rw@(BitstreamLen w) = extractAnnotation bx
-                        in Just $ (constantAnn (BitS.fromNBits w iy) rw .==. bx):rest
+            Left iy -> let rw = extractAnnotation bx
+                        in Just $ (constantAnn (BitVector iy) rw .==. bx):rest
             Right by -> Just $ (bx .==. by):rest
   memPtrNull _ = [(Nothing,constant True)]
   memPtrSwitch _ ptrs = return $ concat [ [ (ptr',and' [cond',cond]) | (ptr',cond') <- ptr ] | (ptr,cond) <- ptrs ]
@@ -486,8 +485,8 @@ plainOffset ptr idx = ptr { ptrOffset = plainIdxMerge (ptrOffset ptr) idx }
     plainIdxMerge idx [] = idx
     plainIdxMerge [Left x] (Left y:ys) = Left (x+y):ys
     plainIdxMerge [Right x] (Right y:ys) = Right (bvadd x y):ys
-    plainIdxMerge [Left x] (Right y:ys) = Right (bvadd (constantAnn (BitS.fromNBits 64 x) 64) y):ys
-    plainIdxMerge [Right x] (Left y:ys) = Right (bvadd x (constantAnn (BitS.fromNBits 64 y) 64)):ys
+    plainIdxMerge [Left x] (Right y:ys) = Right (bvadd (constantAnn (BitVector x) 64) y):ys
+    plainIdxMerge [Right x] (Left y:ys) = Right (bvadd x (constantAnn (BitVector y) 64)):ys
     plainIdxMerge (x:xs) ys = x:plainIdxMerge xs ys
 
 {-
@@ -596,8 +595,8 @@ renderMemObject' bvs (TDArray n tp) = let (rest,res) = mapAccumL renderMemObject
                                       in (rest,"array {":(fmap ("  "++) $ concat res)++["}"])
 renderMemObject' bvs (TDVector n tp) = let (rest,res) = mapAccumL renderMemObject' bvs (genericReplicate n tp)
                                        in (rest,"vector {":(fmap ("  "++) $ concat res)++["}"])
-renderMemObject' (bv:bvs) (TDInt s bits) = let r = BitS.toBits bv :: Integer
-                                               rr = if s && testBit r (fromIntegral (bits-1))
-                                                    then (complement r) - 1
-                                                    else r
-                                           in (bvs,[show r++" : "++(if s then "i" else "u")++show bits])
+renderMemObject' (BitVector bv:bvs) (TDInt s bits)
+  = let rr = if s && testBit bv (fromIntegral (bits-1))
+             then (complement bv) - 1
+             else bv
+    in (bvs,[show rr++" : "++(if s then "i" else "u")++show bits])

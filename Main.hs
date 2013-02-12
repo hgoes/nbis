@@ -14,7 +14,6 @@ import System.Environment (getArgs)
 import Data.List as List (genericLength,genericReplicate,genericSplitAt,zip4,zipWith4,zipWith5,null,lookup)
 import Data.Map as Map hiding (foldl,foldr,(!),mapMaybe)
 import Data.Set as Set hiding (foldl,foldr)
-import qualified Data.Bitstream as BitS
 import LLVM.Core
 import LLVM.Pretty
 import qualified LLVM.FFI.Core as FFI
@@ -42,7 +41,8 @@ type Guard = (ErrorDesc,SMTExpr Bool)
              Nothing -> error $ "Couldn't find key "++show k++" in "++show (Map.keys mp)
              Just r -> r
 
-data Val m = ConstValue { asConst :: BitVector }
+data Val m = ConstValue { asConst :: BitVector
+                        , constWidth :: Integer }
            | DirectValue { asValue :: SMTExpr BitVector }
            | PointerValue { asPointer :: Pointer m }
            | ConditionValue { asCondition :: SMTExpr Bool
@@ -51,7 +51,7 @@ data Val m = ConstValue { asConst :: BitVector }
              deriving (Typeable)
 
 instance Show (Val m) where
-  show (ConstValue c) = show c
+  show (ConstValue c _) = show c
   show (DirectValue dv) = show dv
   show (PointerValue _) = "<pointer>"
   show (ConditionValue c _) = show c
@@ -60,20 +60,23 @@ instance Show (Val m) where
 type RealizationQueue = [(String,String,Integer,Integer)]
 
 valEq :: MemoryModel m => m -> Val m -> Val m -> SMTExpr Bool
-valEq mem (ConstValue x) (ConstValue y) = if x==y then constant True else constant False
-valEq mem (ConstValue x) (DirectValue y) = y .==. constantAnn x (BitS.length x)
-valEq mem (DirectValue x) (ConstValue y) = x .==. constantAnn y (BitS.length y)
+valEq mem (ConstValue x _) (ConstValue y _) = if x==y then constant True else constant False
+valEq mem (ConstValue x w) (DirectValue y) = y .==. constantAnn x w
+valEq mem (DirectValue x) (ConstValue y w) = x .==. constantAnn y w
 valEq mem (DirectValue v1) (DirectValue v2) = v1 .==. v2
 valEq mem (PointerValue p1) (PointerValue p2) = memPtrEq mem p1 p2
 valEq mem (ConditionValue v1 _) (ConditionValue v2 _) = v1 .==. v2
-valEq mem (ConditionValue v1 w) (ConstValue v2) = if v2 == BitS.fromNBits w (1::Integer)
-                                                  then v1
-                                                  else not' v1
-valEq mem (ConstValue v1) (ConditionValue v2 w) = if v1 == BitS.fromNBits w (1::Integer)
-                                                  then v2
-                                                  else not' v2
-valEq mem (ConditionValue v1 w) (DirectValue v2) = v1 .==. (v2 .==. (constantAnn (BitS.fromNBits w (1::Integer)) (fromIntegral w)))
-valEq mem (DirectValue v2) (ConditionValue v1 w) = v1 .==. (v2 .==. (constantAnn (BitS.fromNBits w (1::Integer)) (fromIntegral w)))
+valEq mem (ConditionValue v1 w1) (ConstValue v2 w2)
+  = if v2 == 1
+    then v1
+    else not' v1
+valEq mem (ConstValue v1 _) (ConditionValue v2 _)
+  = if v1 == 1
+    then v2
+    else not' v2
+valEq mem (ConditionValue v1 w) (DirectValue v2)
+  = v1 .==. (v2 .==. (constantAnn (BitVector 1) (fromIntegral w)))
+valEq mem (DirectValue v2) (ConditionValue v1 w) = v1 .==. (v2 .==. (constantAnn (BitVector 1) (fromIntegral w)))
 valEq mem (ConstCondition x) (ConstCondition y) = constant (x == y)
 valEq mem (ConstCondition x) (ConditionValue y _) = if x then y else not' y
 valEq mem (ConditionValue x _) (ConstCondition y) = if y then x else not' x
@@ -89,18 +92,17 @@ valSwitch mem tp choices = return $ DirectValue $ mkSwitch choices
     mkSwitch ((val,cond):rest) = ite cond (valValue val) (mkSwitch rest)
 
 valCond :: Val m -> SMTExpr Bool
-valCond (ConstValue x) = case BitS.unpack x of
-  [x'] -> constant x'
-  _ -> error "A constant of bit-length > 1 is used in a condition"
-valCond (DirectValue x) = x .==. (constantAnn (BitS.pack [True]) 1)
+valCond (ConstValue x 1) = constant $ x==1
+valCond (ConstValue _  _) = error "A constant of bit-length > 1 is used in a condition"
+valCond (DirectValue x) = x .==. (constantAnn (BitVector 1) 1)
 valCond (ConditionValue x _) = x
 valCond (ConstCondition x) = constant x
 
 valValue :: Val m -> SMTExpr BitVector
-valValue (ConstValue x) = constantAnn x (BitS.length x)
+valValue (ConstValue x w) = constantAnn x w
 valValue (DirectValue x) = x
-valValue (ConditionValue x w) = ite x (constantAnn (BitS.fromNBits w (1::Integer)) (fromIntegral w)) (constantAnn (BitS.fromNBits w (0::Integer)) (fromIntegral w))
-valValue (ConstCondition x) = constantAnn (BitS.pack [x]) 1
+valValue (ConditionValue x w) = ite x (constantAnn (BitVector 1) (fromIntegral w)) (constantAnn (BitVector 0) (fromIntegral w))
+valValue (ConstCondition x) = constantAnn (BitVector $ if x then 1 else 0) 1
 
 newValue :: MemoryModel mem => mem -> TypeDesc -> SMT (Val mem)
 newValue mem (TDPtr tp) = do
@@ -500,20 +502,19 @@ argToExpr e values mem = {-trace ("argToExpr: "++show e++" "++show (Map.toList v
                  _ -> error $ "Comparing pointers using "++show pred++" unsupported (only (in-)equality allowed)"
     _ -> let lhs' = argToExpr lhs values mem
              rhs' = argToExpr rhs values mem
-             apply (ConstValue lhs) (ConstValue rhs) = let lhs' = BitS.toBits lhs :: Integer
-                                                           rhs' = BitS.toBits rhs :: Integer
-                                                           op = case pred of
-                                                             IntEQ -> (==)
-                                                             IntNE -> (/=)
-                                                             IntUGT -> (>)
-                                                             IntUGE -> (>=)
-                                                             IntULT -> (<)
-                                                             IntULE -> (<=)
-                                                             IntSGT -> (>)
-                                                             IntSGE -> (>=)
-                                                             IntSLT -> (<)
-                                                             IntSLE -> (<=)
-                                                       in ConstCondition (op lhs' rhs')
+             apply (ConstValue (BitVector lhs) _) (ConstValue (BitVector rhs) _) 
+               = let op = case pred of
+                            IntEQ -> (==)
+                            IntNE -> (/=)
+                            IntUGT -> (>)
+                            IntUGE -> (>=)
+                            IntULT -> (<)
+                            IntULE -> (<=)
+                            IntSGT -> (>)
+                            IntSGE -> (>=)
+                            IntSLT -> (<)
+                            IntSLE -> (<=)
+                 in ConstCondition (op lhs rhs)
              apply lhs rhs = let lhs' = valValue lhs
                                  rhs' = valValue rhs
                                  op = case pred of
@@ -529,26 +530,26 @@ argToExpr e values mem = {-trace ("argToExpr: "++show e++" "++show (Map.toList v
                                    IntSLE -> BVSLE
                              in ConditionValue (op lhs' rhs') 1
          in apply lhs' rhs'
-  EDInt v -> ConstValue (BitS.fromNBits (bitWidth (exprType e)) v)
+  EDInt v -> ConstValue (BitVector v) (bitWidth (exprType e))
   EDUnOp op arg -> case op of
     UOZExt -> case argToExpr arg values mem of
       ConditionValue v w -> ConditionValue v (bitWidth (exprType e))
       e' -> let v = valValue e'
                 d = (bitWidth (exprType e)) - (bitWidth (exprType arg))
-                nv = bvconcat (constantAnn (BitS.fromNBits d (0::Integer) :: BitVector) (fromIntegral d)) v
+                nv = bvconcat (constantAnn (BitVector 0) (fromIntegral d)) v
            in DirectValue nv
     UOSExt -> case argToExpr arg values mem of
       ConditionValue v w -> ConditionValue v (bitWidth (exprType e))
       e' -> let v = valValue e'
                 w = bitWidth (exprType arg)
                 d = (bitWidth (exprType e)) - w
-                nv = bvconcat (ite (bvslt v (constantAnn (BitS.fromNBits d (0::Integer)) (fromIntegral w)))
-                               (constantAnn (BitS.fromNBits d (-1::Integer) :: BitVector) (fromIntegral d))
-                               (constantAnn (BitS.fromNBits d (0::Integer) :: BitVector) (fromIntegral d))) v
+                nv = bvconcat (ite (bvslt v (constantAnn (BitVector 0) (fromIntegral w)))
+                               (constantAnn (BitVector (-1)) (fromIntegral d))
+                               (constantAnn (BitVector 0) (fromIntegral d))) v
             in DirectValue nv
     UOTrunc -> let w = bitWidth (exprType e) 
                in case argToExpr arg values mem of
-                 ConstValue bv -> ConstValue (BitS.fromNBits w (BitS.toBits bv :: Integer))
+                 ConstValue bv _ -> ConstValue bv w
                  ConditionValue v _ -> ConditionValue v w
                  expr -> DirectValue (bvextract (w - 1) 0 (valValue expr))
     UOBitcast -> let PointerValue ptr = argToExpr arg values mem
@@ -559,23 +560,22 @@ argToExpr e values mem = {-trace ("argToExpr: "++show e++" "++show (Map.toList v
     PointerValue ptr -> let ptr' = memIndex mem (exprType expr) (fmap (\arg -> case arg of
                                                                           Expr { exprDesc = EDInt i } -> Left i
                                                                           _ -> case argToExpr arg values mem of
-                                                                            ConstValue bv -> Left $ BitS.toBits bv
+                                                                            ConstValue (BitVector bv) _ -> Left bv
                                                                             DirectValue bv -> Right bv
                                                                       ) args) ptr
                         in PointerValue ptr'
   EDBinOp op lhs rhs -> let lhs' = argToExpr lhs values mem
                             rhs' = argToExpr rhs values mem
-                            apply (ConstValue lhs) (ConstValue rhs) = let lhs' = BitS.toBits lhs :: Integer
-                                                                          rhs' = BitS.toBits rhs :: Integer
-                                                                          rop = case op of
-                                                                            BOXor -> Bits.xor
-                                                                            BOAdd -> (+)
-                                                                            BOAnd -> (.&.)
-                                                                            BOSub -> (-)
-                                                                            BOShL -> \x y -> shiftL x (fromIntegral y)
-                                                                            BOOr -> (.|.)
-                                                                            BOMul -> (*)
-                                                                      in ConstValue (BitS.fromNBits (BitS.length lhs) (rop lhs' rhs'))
+                            apply (ConstValue (BitVector lhs) w) (ConstValue (BitVector rhs) _) 
+                              = let rop = case op of
+                                            BOXor -> Bits.xor
+                                            BOAdd -> (+)
+                                            BOAnd -> (.&.)
+                                            BOSub -> (-)
+                                            BOShL -> \x y -> shiftL x (fromIntegral y)
+                                            BOOr -> (.|.)
+                                            BOMul -> (*)
+                                in ConstValue (BitVector (rop lhs rhs)) w
                             apply lhs rhs = let lhs' = valValue lhs
                                                 rhs' = valValue rhs
                                                 rop = case op of 
@@ -623,7 +623,7 @@ realizeInstruction instr fname blk subblk pred act mem values
       ConstCondition cond' -> return $ emptyInstructionResult { finalization = Just $ Jump [((fname,if cond' then ifT else ifF,0),Nothing)] }
       cond' -> return $ emptyInstructionResult { finalization = Just $ Jump [((fname,ifT,0),Just $ valCond cond'),((fname,ifF,0),Nothing)] }
     ISwitch val def args -> case argToExpr val values mem of
-      ConstValue v -> case [ to | (cmp_v,to) <- args, let ConstValue v' = argToExpr cmp_v values mem, v' == v ] of
+      ConstValue v _ -> case [ to | (cmp_v,to) <- args, let ConstValue v' _ = argToExpr cmp_v values mem, v' == v ] of
         [] -> return $ emptyInstructionResult { finalization = Just $ Jump [((fname,def,0),Nothing)] }
         [to] -> return $ emptyInstructionResult { finalization = Just $ Jump [((fname,to,0),Nothing)] }
       v -> return $ emptyInstructionResult { finalization = Just $ Jump $ [ ((fname,to,0),Just $ valEq mem v (argToExpr cmp_v values mem))
@@ -632,7 +632,7 @@ realizeInstruction instr fname blk subblk pred act mem values
     IAssign trg expr -> return $ emptyInstructionResult { valueAssigned = Just (trg,argToExpr expr values mem) }
     IAlloca trg tp size align -> do
       (ptr,mem') <- memAlloc tp (case argToExpr size values mem of
-                                    ConstValue bv -> Left $ BitS.toBits bv
+                                    ConstValue (BitVector bv) _ -> Left bv
                                     DirectValue bv -> Right bv) Nothing mem
       return $ emptyInstructionResult { memoryUpdated = Just mem'
                                       , valueAssigned = Just (trg,PointerValue ptr) }
@@ -802,30 +802,30 @@ allTypesBlks = allTypes' [] []
                                         _ -> allTypes' is tps blks
 
 intr_memcpy,intr_memset,intr_restrict,intr_watch,intr_malloc :: MemoryModel mem => String -> Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (InstructionResult mem)
-intr_memcpy _ _ _ mem [(PointerValue to,_),(PointerValue from,_),(ConstValue len,_),_,_]
-  = return $ emptyInstructionResult { memoryUpdated = Just $ memCopy (BitS.toBits len) to from mem }
+intr_memcpy _ _ _ mem [(PointerValue to,_),(PointerValue from,_),(ConstValue (BitVector len) _,_),_,_]
+  = return $ emptyInstructionResult { memoryUpdated = Just $ memCopy len to from mem }
 
-intr_memset _ _ _ mem [(PointerValue dest,_),(val,_),(ConstValue len,_),_,_]
-  = return $ emptyInstructionResult { memoryUpdated = Just $ memSet (BitS.toBits len) (valValue val) dest mem }
+intr_memset _ _ _ mem [(PointerValue dest,_),(val,_),(ConstValue (BitVector len) _,_),_,_]
+  = return $ emptyInstructionResult { memoryUpdated = Just $ memSet len (valValue val) dest mem }
 
 intr_restrict _ _ act mem [(val,_)] = do
   comment " Restriction:"
   case val of
     ConditionValue val _ -> assert $ act .=>. val
-    _ -> assert $ act .=>. (not' $ valValue val .==. constantAnn (BitS.fromNBits (32::Int) (0::Integer)) 32)
+    _ -> assert $ act .=>. (not' $ valValue val .==. constantAnn (BitVector 0) 32)
   return emptyInstructionResult
 intr_assert _ _ act mem [(val,_)] = do
   return $ emptyInstructionResult { guardsCreated = [(Custom,case val of
                                                          ConditionValue val _ -> and' [act,not' val]
-                                                         _ -> and' [act,valValue val .==. constantAnn (BitS.fromNBits (32::Int) (0::Integer)) 32])] }
+                                                         _ -> and' [act,valValue val .==. constantAnn (BitVector 0) 32])] }
 
 
-intr_watch _ _ act mem ((ConstValue num,_):exprs)
-  = return $ emptyInstructionResult { watchpointsCreated = [(show (BitS.toBits num :: Integer),act,[ (tp,valValue val) | (val,tp) <- exprs ])] }
+intr_watch _ _ act mem ((ConstValue (BitVector bv) _,_):exprs)
+  = return $ emptyInstructionResult { watchpointsCreated = [(show bv,act,[ (tp,valValue val) | (val,tp) <- exprs ])] }
 
 intr_malloc trg (Just tp) act mem [(size,sztp)] = do
   (ptr,mem') <- memAlloc tp (case size of
-                                ConstValue bv -> Left $ BitS.toBits bv
+                                ConstValue (BitVector bv) _ -> Left bv
                                 DirectValue bv -> Right bv) Nothing mem
   return $ emptyInstructionResult { memoryUpdated = Just mem'
                                   , valueAssigned = Just (trg,PointerValue ptr) }
@@ -888,7 +888,7 @@ getConstant val = do
       return $ MemArray res
     getConstant' (TDInt _ w) val = do
       v <- FFI.constIntGetZExtValue val
-      return $ MemCell $ constantAnn (BitS.fromNBits w v) (fromIntegral w)
+      return $ MemCell $ constantAnn (BitVector (fromIntegral v)) (fromIntegral w)
     getConstant' (TDPtr tp) val = do
       n <- FFI.isNull val
       if n/=0
@@ -1039,7 +1039,7 @@ main = do
                                                   Overrun -> "Memory overrun"
                                                   FreeAccess -> "Accessing free'd memory")
                                      ++ "\nWatchpoints:\n"
-                                     ++ unlines (fmap (\(name,args) -> "  "++name++":"++concat (fmap (\(tp,rval) -> " "++show (BitS.toBits rval :: Integer)) args)) watch))
+                                     ++ unlines (fmap (\(name,args) -> "  "++name++":"++concat (fmap (\(tp,BitVector rval) -> " "++show rval) args)) watch))
       case res of
         Just err -> liftIO $ putStrLn err
         Nothing -> liftIO $ putStrLn "No error found."

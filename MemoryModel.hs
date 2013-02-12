@@ -3,13 +3,10 @@ module MemoryModel where
 
 import Language.SMTLib2
 import LLVM.Core (TypeDesc(..))
-import Data.Bitstream (Bitstream,Left,Right)
-import qualified Data.Bitstream as BitS
 import Data.Typeable
 import Data.Unit
 import Data.List (genericSplitAt,genericReplicate)
 
-type BitVector = Bitstream Right
 
 data MemContent = MemCell (SMTExpr BitVector)
                 | MemArray [MemContent]

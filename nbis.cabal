@@ -1,4 +1,4 @@
-Name:		furchtbar
+Name:		nbis
 Version:	0.1
 Description:	A model checker for LLVM code
 License:	GPL
@@ -8,11 +8,11 @@ Build-Type:	Simple
 Category:	Testing
 Cabal-Version:	>= 1.2
 
-Executable furchtbar
+Executable nbis
   Main-Is:		Main.hs
   Other-Modules:
     MemoryModel
     MemoryModel.Untyped
     MemoryModel.Typed
     MemoryModel.Plain
-  Build-Depends:	base,llvm-base >= 3,llvm >= 3,bitstream >= 0.2,containers,mtl,smtlib2
+  Build-Depends:	base,llvm-base >= 3,llvm >= 3,containers,mtl,smtlib2

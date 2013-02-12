@@ -8,7 +8,6 @@ import LLVM.Core (TypeDesc(..))
 import Data.Word
 import Data.Typeable
 import Data.List (genericSplitAt)
-import qualified Data.Bitstream as BitS
 import Numeric (showHex)
 
 type PtrT = Word64
@@ -94,7 +93,8 @@ instance MemoryModel UntypedMemory where
       if nxt > 0
         then (do
                  res <- mapM (\i -> getValue' 8 (select (memoryBlocks mem) (constant (fromIntegral i)))) [0..(nxt-1)]
-                 return $ unwords [ ((if r' < 16 then showChar '0' else id) . showHex r') "" | r <- res, let r' = BitS.toBits r :: Word8 ])
+                 return $ unwords [ ((if r' < 16 then showChar '0' else id) . showHex r') "" 
+                                  | BitVector r <- res, let r' = fromIntegral r :: Word8 ])
         else return "[]"
     memSwitch [(mem,_)] = return mem
     memSwitch conds = do
