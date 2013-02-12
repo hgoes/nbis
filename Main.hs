@@ -840,17 +840,17 @@ intrinsics "llvm.memcpy.p0i8.p0i8.i64" = Just intr_memcpy
 intrinsics "llvm.memcpy.p0i8.p0i8.i32" = Just intr_memcpy
 intrinsics "llvm.memset.p0i8.i32" = Just intr_memset
 intrinsics "llvm.memset.p0i8.i64" = Just intr_memset
-intrinsics "furchtbar_restrict" = Just intr_restrict
-intrinsics "furchtbar_assert" = Just intr_assert
-intrinsics "furchtbar_nondet_i64" = Just (intr_nondet 64)
-intrinsics "furchtbar_nondet_i32" = Just (intr_nondet 32)
-intrinsics "furchtbar_nondet_i16" = Just (intr_nondet 16)
-intrinsics "furchtbar_nondet_i8" = Just (intr_nondet 8)
-intrinsics "furchtbar_nondet_u64" = Just (intr_nondet 64)
-intrinsics "furchtbar_nondet_u32" = Just (intr_nondet 32)
-intrinsics "furchtbar_nondet_u16" = Just (intr_nondet 16)
-intrinsics "furchtbar_nondet_u8" = Just (intr_nondet 8)
-intrinsics "furchtbar_watch" = Just intr_watch
+intrinsics "nbis_restrict" = Just intr_restrict
+intrinsics "nbis_assert" = Just intr_assert
+intrinsics "nbis_nondet_i64" = Just (intr_nondet 64)
+intrinsics "nbis_nondet_i32" = Just (intr_nondet 32)
+intrinsics "nbis_nondet_i16" = Just (intr_nondet 16)
+intrinsics "nbis_nondet_i8" = Just (intr_nondet 8)
+intrinsics "nbis_nondet_u64" = Just (intr_nondet 64)
+intrinsics "nbis_nondet_u32" = Just (intr_nondet 32)
+intrinsics "nbis_nondet_u16" = Just (intr_nondet 16)
+intrinsics "nbis_nondet_u8" = Just (intr_nondet 8)
+intrinsics "nbis_watch" = Just intr_watch
 intrinsics "malloc" = Just intr_malloc
 intrinsics _ = Nothing
 
@@ -1000,7 +1000,7 @@ getOptions = do
 main = do
   opts <- getOptions
   when (showHelp opts) $ do
-    putStrLn $ usageInfo "USAGE:\n  furchtbar [OPTION...] FILE [FILE...]\n\nOptions:" optionDescr
+    putStrLn $ usageInfo "USAGE:\n  nbis [OPTION...] FILE [FILE...]\n\nOptions:" optionDescr
     exitSuccess
   progs <- mapM getProgram (files opts)
   let program = foldl1 mergePrograms progs
