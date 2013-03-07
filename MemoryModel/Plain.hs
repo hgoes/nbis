@@ -4,7 +4,7 @@ module MemoryModel.Plain (PlainMemory) where
 import MemoryModel
 import LLVM.Core (TypeDesc(..))
 import Language.SMTLib2
-import Language.SMTLib2.Internals
+import Language.SMTLib2.Functions
 import Data.Map as Map hiding (foldl,(!))
 import Data.Typeable
 import Data.Maybe
@@ -18,7 +18,7 @@ import Data.Bits
              Nothing -> error $ "Couldn't find key "++show k++" in "++show (Map.keys mp)
              Just r -> r
 
-newBV :: Integer -> Integer -> SMTExpr BitVector
+newBV :: Integer -> Integer -> SMTExpr (BitVector BVUntyped)
 newBV sz val = constantAnn (BitVector val) (fromIntegral sz)
 
 data PlainMemory = PlainMem (Map TypeDesc (Map Int (Bool,PlainCont)))
@@ -30,27 +30,27 @@ debugMem (PlainMem mp) = show [ (tp,Map.keys bank) | (tp,bank) <- Map.toList mp 
 
 data PlainPointer = PlainPtr { ptrType :: TypeDesc
                              , ptrLocation :: Int
-                             , ptrOffset :: [Either Integer (SMTExpr BitVector)]
+                             , ptrOffset :: [Either Integer (SMTExpr (BitVector BVUntyped))]
                              } deriving (Typeable,Show)
 
 data PlainCont = PlainStruct [PlainCont] 
-               | forall p. PlainIdx p => PlainSingle (SMTExpr p) [SMTExpr BitVector]
+               | forall p. PlainIdx p => PlainSingle (SMTExpr p) [SMTExpr (BitVector BVUntyped)]
                | PlainPtrs PlainPtrCont
 
 data PlainPtrCont = PlainPtrArray [PlainPtrCont]
                   | PlainPtrCell [(Maybe PlainPointer,SMTExpr Bool)]
 
 class SMTType p => PlainIdx p where
-  plainWithIdx :: SMTExpr p -> SMTExpr BitVector -> (forall q. PlainIdx q => SMTExpr q -> (a,Maybe (SMTExpr q))) -> Maybe (a,Maybe (SMTExpr p))
-  plainWithCell :: SMTExpr p -> (SMTExpr BitVector -> (a,Maybe (SMTExpr BitVector))) -> Maybe (a,Maybe (SMTExpr p))
+  plainWithIdx :: SMTExpr p -> SMTExpr (BitVector BVUntyped) -> (forall q. PlainIdx q => SMTExpr q -> (a,Maybe (SMTExpr q))) -> Maybe (a,Maybe (SMTExpr p))
+  plainWithCell :: SMTExpr p -> (SMTExpr (BitVector BVUntyped) -> (a,Maybe (SMTExpr (BitVector BVUntyped)))) -> Maybe (a,Maybe (SMTExpr p))
   plainAnn :: p -> Integer -> SMTAnnotation p
 
-instance PlainIdx BitVector where
+instance PlainIdx (BitVector BVUntyped) where
   plainWithIdx _ _ _ = Nothing
   plainWithCell expr f = Just (f expr)
   plainAnn _ w = fromIntegral w
 
-instance PlainIdx a => PlainIdx (SMTArray (SMTExpr BitVector) a) where
+instance PlainIdx a => PlainIdx (SMTArray (SMTExpr (BitVector BVUntyped)) a) where
   plainWithIdx arr idx f = let (r,nv) = f (select arr idx)
                                narr = case nv of
                                  Nothing -> Nothing
@@ -59,7 +59,7 @@ instance PlainIdx a => PlainIdx (SMTArray (SMTExpr BitVector) a) where
   plainWithCell _ _ = Nothing
   plainAnn u w = (64,plainAnn (fromUndefArray u) w)
     where
-      fromUndefArray :: SMTArray (SMTExpr BitVector) a -> a
+      fromUndefArray :: SMTArray (SMTExpr (BitVector BVUntyped)) a -> a
       fromUndefArray _ = undefined
 
 mkPlainIdx :: Integer -> Integer -> (forall p. PlainIdx p => SMTExpr p -> SMT a) -> SMT a
@@ -74,10 +74,10 @@ mkPlainIdx w n f = undefFor n (\u -> do
     enforceEq _ = id
 
     undefFor :: Integer -> (forall p. PlainIdx p => SMTExpr p -> a) -> a
-    undefFor 0 f = f (undefined::SMTExpr BitVector)
+    undefFor 0 f = f (undefined::SMTExpr (BitVector BVUntyped))
     undefFor n f = undefFor (n-1) (\u -> f (toUndefArray u))
 
-    toUndefArray :: SMTExpr a -> SMTExpr (SMTArray (SMTExpr BitVector) a)
+    toUndefArray :: SMTExpr a -> SMTExpr (SMTArray (SMTExpr (BitVector BVUntyped)) a)
     toUndefArray _ = undefined
 
 allIdx :: TypeDesc -> [[Integer]]
@@ -86,7 +86,7 @@ allIdx (TDArray l tp) = concat $ fmap (\n -> fmap (n:) (allIdx tp)) [0..(l-1)]
 allIdx (TDVector l tp) = concat $ fmap (\n -> fmap (n:) (allIdx tp)) [0..(l-1)]
 allIdx _ = [[]]
 
-allSuccIdx :: TypeDesc -> [Either Integer (SMTExpr BitVector)] -> [[Either Integer (SMTExpr BitVector)]]
+allSuccIdx :: TypeDesc -> [Either Integer (SMTExpr (BitVector BVUntyped))] -> [[Either Integer (SMTExpr (BitVector BVUntyped))]]
 allSuccIdx tp [] = fmap (fmap Left) (allIdx tp)
 allSuccIdx (TDStruct tps _) ((Left i):is) = concat $ zipWith (\n tp -> fmap ((Left n):) (allSuccIdx tp is)) [i..] (genericDrop i tps)
 allSuccIdx (TDArray l tp) ((Left i):is) = concat $ fmap (\n -> fmap ((Left n):) (allSuccIdx tp is)) [i..(l-1)]
@@ -97,7 +97,7 @@ allSuccIdx (TDPtr tp) ((Left i):is) = concat $ fmap (\n -> fmap ((Left n):) (all
 allSuccIdx (TDPtr tp) ((Right i):is) = concat $ fmap (\n -> fmap ((Right $ if n==0 then i else bvadd i (constantAnn (BitVector n) 64)):) (allSuccIdx tp is)) [0..]
 allSuccIdx tp idx = error $ "Indexing type "++show tp++" with "++show idx
 
-plainResolve :: PlainCont -> [Integer] -> [SMTExpr BitVector] -> SMTExpr BitVector
+plainResolve :: PlainCont -> [Integer] -> [SMTExpr (BitVector BVUntyped)] -> SMTExpr (BitVector BVUntyped)
 plainResolve (PlainStruct conts) (i:is) dis = plainResolve (conts `genericIndex` i) is dis
 plainResolve (PlainStruct _) [] _ = error "plainResolve: There are too few static indices"
 plainResolve (PlainSingle el _) [] [] = case plainWithCell el (\x -> (x,Nothing)) of
@@ -108,7 +108,7 @@ plainResolve (PlainSingle el dims) [] (i:is) = case plainWithIdx el i (\np -> (p
   Just (res,_) -> res
 plainResolve (PlainSingle _ _) _ _ = error "plainResolve: Too many static indices"
 
-plainModify :: PlainCont -> [Integer] -> [SMTExpr BitVector] -> (SMTExpr BitVector -> (a,Maybe (SMTExpr BitVector))) -> (a,PlainCont,[(ErrorDesc,SMTExpr Bool)])
+plainModify :: PlainCont -> [Integer] -> [SMTExpr (BitVector BVUntyped)] -> (SMTExpr (BitVector BVUntyped) -> (a,Maybe (SMTExpr (BitVector BVUntyped)))) -> (a,PlainCont,[(ErrorDesc,SMTExpr Bool)])
 plainModify (PlainStruct conts) (i:is) dis f = let (res,conts',errs) = modifyStruct i conts 
                                                in (res,PlainStruct conts',errs)
   where
@@ -123,17 +123,17 @@ plainModify (PlainSingle el dim) [] dis f = let (res,nel,err) = modify' el dis d
                                                   Just el' -> el'
                                             in (res,PlainSingle rnel dim,err)
   where
-    modify' :: PlainIdx p => SMTExpr p -> [SMTExpr BitVector] -> [SMTExpr BitVector] -> (SMTExpr BitVector -> (a,Maybe (SMTExpr BitVector))) -> (a,Maybe (SMTExpr p),[(ErrorDesc,SMTExpr Bool)])
+    modify' :: PlainIdx p => SMTExpr p -> [SMTExpr (BitVector BVUntyped)] -> [SMTExpr (BitVector BVUntyped)] -> (SMTExpr (BitVector BVUntyped) -> (a,Maybe (SMTExpr (BitVector BVUntyped)))) -> (a,Maybe (SMTExpr p),[(ErrorDesc,SMTExpr Bool)])
     modify' el [] [] f = case plainWithCell el (\bv -> f bv) of
       Just (res,val) -> (res,val,[])
       Nothing -> error "plainModify: Too few dynamic indices"
     modify' arr (i:is) (l:ls) f = case plainWithIdx arr i (\el -> let (r,new,errs) = modify' el is ls f
                                                                   in ((r,errs),new)) of
-      Just ((res,errs),val) -> (res,val,(Overrun,BVSGE i l):errs)
+      Just ((res,errs),val) -> (res,val,(Overrun,app (BVSGE::SMTBVComp BVUntyped) (i,l)):errs)
       Nothing -> error "plainModify: Too many dynamic indices"
 plainModify (PlainSingle _ _) _ _ _ = error "plainModify: Too many static indices"
 
-plainModifyPtr :: PlainPtrCont -> [Integer] -> [SMTExpr BitVector] -> ([(Maybe PlainPointer,SMTExpr Bool)] -> (a,[(Maybe PlainPointer,SMTExpr Bool)])) -> (a,PlainPtrCont)
+plainModifyPtr :: PlainPtrCont -> [Integer] -> [SMTExpr (BitVector BVUntyped)] -> ([(Maybe PlainPointer,SMTExpr Bool)] -> (a,[(Maybe PlainPointer,SMTExpr Bool)])) -> (a,PlainPtrCont)
 plainModifyPtr _ _ (_:_) _ = error "Dynamic indices not allowed for pointer arrays"
 plainModifyPtr (PlainPtrArray arr) (i:is) dyn f = (res,PlainPtrArray new)
   where
@@ -146,7 +146,7 @@ plainModifyPtr (PlainPtrArray arr) (i:is) dyn f = (res,PlainPtrArray new)
 plainModifyPtr (PlainPtrCell alts) [] dyn f = let (res,nalts) = f alts
                                               in (res,PlainPtrCell nalts)
 
-translateIdx :: TypeDesc -> [Either Integer (SMTExpr BitVector)] -> (TypeDesc,[Integer],[SMTExpr BitVector])
+translateIdx :: TypeDesc -> [Either Integer (SMTExpr (BitVector BVUntyped))] -> (TypeDesc,[Integer],[SMTExpr (BitVector BVUntyped)])
 translateIdx (TDStruct tps _) ((Left idx):rest) = let (tp,rst,rdyn) = translateIdx (genericIndex tps idx) rest
                                                   in (tp,idx:rst,rdyn)
 translateIdx (TDArray len tp) (idx:rest) = let (tp',rst,rdyn) = translateIdx tp rest
@@ -167,19 +167,19 @@ translateIdx (TDPtr tp) (idx:rest) = let (tp',rst,rdyn) = translateIdx tp rest
 translateIdx tp [] = (tp,[],[])
 translateIdx tp idx = error $ "Implement translateIdx for "++show tp++" "++show idx
 
-expandIdx :: [Either Integer (SMTExpr BitVector)] -> [Either Integer (SMTExpr BitVector)]
+expandIdx :: [Either Integer (SMTExpr (BitVector BVUntyped))] -> [Either Integer (SMTExpr (BitVector BVUntyped))]
 expandIdx = fmap (\v -> case v of
                      Left i -> Left i
                      Right bv -> let w = extractAnnotation bv
                                 in if w < 64
-                                   then Right $ bvconcat (constantAnn (BitVector 0) (fromIntegral $ 64-w)) bv
+                                   then Right $ bvconcat (newBV (64-w) 0) bv
                                    else Right bv)
 
-contentToCell :: MemContent -> [Integer] -> SMTExpr BitVector
+contentToCell :: MemContent -> [Integer] -> SMTExpr (BitVector BVUntyped)
 contentToCell (MemArray arr) (i:is) = contentToCell (genericIndex arr i) is
 contentToCell (MemCell e) [] = e
 
-plainNew :: TypeDesc -> [Either Integer (SMTExpr BitVector)] -> SMT PlainCont
+plainNew :: TypeDesc -> [Either Integer (SMTExpr (BitVector BVUntyped))] -> SMT PlainCont
 plainNew (TDStruct tps _) d = do
   subs <- mapM (\tp -> plainNew tp d) tps
   return $ PlainStruct subs
@@ -205,7 +205,7 @@ plainAssign (TDPtr tp) cont mem path = return ()
 plainAssign tp (PlainSingle el _) (MemCell bv) path
   = assert $ (resolve' el (Prelude.reverse path)) .==. bv
   where
-    resolve' :: PlainIdx p => SMTExpr p -> [Integer] -> SMTExpr BitVector
+    resolve' :: PlainIdx p => SMTExpr p -> [Integer] -> SMTExpr (BitVector BVUntyped)
     resolve' el (i:is) = case plainWithIdx el (constantAnn (BitVector i) 64) (\nel -> (resolve' nel is,Nothing)) of
       Just (res,_) -> res
     resolve' el [] = case plainWithCell el (\bv' -> (bv',Nothing)) of
@@ -224,8 +224,8 @@ plainSwitch cond tp (PlainPtrs p1) (PlainPtrs p2) 0 = switchPtr cond tp p1 p2 >>
       res <- mapM (\(x,y) -> switchPtr cond tp x y) (zip a1 a2)
       return $ PlainPtrArray res
     switchPtr cond (TDPtr tp) (PlainPtrCell c1) (PlainPtrCell c2) = return (PlainPtrCell $
-                                                                            [ (trg,and' [c,cond]) | (trg,c) <- c1 ] ++
-                                                                            [ (trg,and' [c,not' cond]) | (trg,c) <- c2 ])
+                                                                            [ (trg,c .&&. cond) | (trg,c) <- c1 ] ++
+                                                                            [ (trg,c .&&. (not' cond)) | (trg,c) <- c2 ])
 plainSwitch cond (TDArray len tp) p1 p2 d = plainSwitch cond tp p1 p2 (d+1)
 plainSwitch cond (TDVector len tp) p1 p2 d = plainSwitch cond tp p1 p2 (d+1)
 plainSwitch cond tp (PlainSingle c1 dims1) (PlainSingle c2 dims2) d = case cast c2 of
@@ -248,7 +248,7 @@ addIndirection (PlainStruct cs) = do
   return (PlainStruct cs')
 addIndirection (PlainSingle expr dims) = do
   nvar <- varAnn (64,extractAnnotation expr)
-  assert $ (select nvar (constantAnn (BitVector 0) 64)) .==. expr
+  assert $ (select nvar (newBV 64 0)) .==. expr
   return (PlainSingle nvar ((constantAnn (BitVector 1) 64):dims))
 addIndirection (PlainPtrs cont) = return $ PlainPtrs (PlainPtrArray [cont])
 
@@ -348,16 +348,16 @@ instance MemoryModel PlainMemory where
                                                           in (tp,res,errs)) paths
                                in case typedLoad (bitWidth tp) banks of
                                  [(res,errs)] -> (res,errs,cond)
-                                 bvs -> (bvconcats [ bv | (bv,_) <- bvs ],concat [ errs | (_,errs) <- bvs ],cond)
+                                 bvs -> (foldl1 bvconcat [ bv | (bv,_) <- bvs ],concat [ errs | (_,errs) <- bvs ],cond)
                              | (Just ptr',cond) <- ptr ]
       errs_null = [ (NullDeref,cond) | (Nothing,cond) <- ptr ]
       load' [(bv,errs,cond)] = (bv,errs)
       load' ((bv,errs,cond):rest) = let (bv',errs') = load' rest
-                                    in (ite cond bv bv',(fmap (\(d,err) -> (d,and' [cond,err])) errs)
-                                                        ++(fmap (\(d,err) -> (d,and' [not' cond,err])) errs'))
+                                    in (ite cond bv bv',(fmap (\(d,err) -> (d,cond .&&. err)) errs)
+                                                        ++(fmap (\(d,err) -> (d,(not' cond) .&&. err)) errs'))
       load' [] = (constantAnn (BitVector 0) (fromIntegral $ bitWidth tp),[])
   memLoadPtr tp ptr (PlainMem mem)
-    = (concat [ [ (cont',and' [cond,cond']) | (cont',cond') <- ptr_cont ]
+    = (concat [ [ (cont',cond .&&. cond') | (cont',cond') <- ptr_cont ]
              | (Just ptr',cond) <- ptr,
                let (indir,PlainPtrs cont) = mem!(ptrType ptr')!(ptrLocation ptr')  
                    off = if indir 
@@ -377,7 +377,7 @@ instance MemoryModel PlainMemory where
       (mem',errs) = store' ptr mem [] []
       
       store' [] mem errs _ = (mem,errs)
-      store' ((Nothing,cond):ptrs) mem errs prev = store' ptrs mem ((NullDeref,and' $ cond:prev):errs) ((not' cond):prev)
+      store' ((Nothing,cond):ptrs) mem errs prev = store' ptrs mem ((NullDeref,app and' $ cond:prev):errs) ((not' cond):prev)
       store' ((Just ptr,cond):ptrs) mem errs prev
         = let bank = mem!(ptrType ptr)
               (indir,pcont) = bank!(ptrLocation ptr)
@@ -391,7 +391,7 @@ instance MemoryModel PlainMemory where
               (_,stat,dyn) = translateIdx rtp off
               (_,ncont,errs') = plainModify pcont stat dyn (\ocont -> ((),Just $ if Prelude.null ptrs && Prelude.null prev
                                                                                  then cont
-                                                                                 else ite (and' (cond:prev)) cont ocont
+                                                                                 else ite (app and' (cond:prev)) cont ocont
                                                                       ))
           in store' ptrs (Map.insert (ptrType ptr) (Map.insert (ptrLocation ptr) (indir,ncont) bank) mem) (errs'++errs) ((not' cond):prev)
   memStorePtr tp trg src (PlainMem mem) = (PlainMem $ store' trg mem [],[])
@@ -408,7 +408,7 @@ instance MemoryModel PlainMemory where
                                                             else ptrType ptr
                                                       (_,stat,dyn) = translateIdx rtp off
                                                       (_,ncont) = plainModifyPtr cont stat dyn 
-                                                                  (\ocont -> ((),[ (n,and' $ cond:c:prev) | (n,c) <- src ]))
+                                                                  (\ocont -> ((),[ (n,app and' $ cond:c:prev) | (n,c) <- src ]))
                                                   in (indir,PlainPtrs ncont)
                                               ) (ptrLocation ptr)) (ptrType ptr) mem) ((not' cond):prev)
   memDump (PlainMem mem) = mapM (\(tp,bank) -> do
@@ -437,21 +437,21 @@ instance MemoryModel PlainMemory where
                                             then error $ "Can't yet cast pointers from "++show (ptrType ptr'')++" to "++show to
                                             else (Just ptr'',cond)
                               Nothing -> (Nothing,cond)) ptr
-  memPtrEq _ ptr1 ptr2 = or' [ and' $ [c1,c2]++extra 
-                             | (ptr1',c1) <- ptr1,
-                               (ptr2',c2) <- ptr2,
-                               extra <- case ptr1' of
-                                  Nothing -> case ptr2' of
-                                    Nothing -> [[]]
-                                    Just _ -> []
-                                  Just ptr1'' -> case ptr2' of
-                                    Nothing -> []
-                                    Just ptr2'' -> if ptrType ptr1'' == ptrType ptr2'' && ptrLocation ptr1'' == ptrLocation ptr2''
-                                                   then (case offEq (ptrOffset ptr1'') (ptrOffset ptr2'') of
-                                                            Nothing -> []
-                                                            Just res -> [res])
-                                                   else []
-                             ]
+  memPtrEq _ ptr1 ptr2 = app or' [ app and' $ [c1,c2]++extra 
+                                 | (ptr1',c1) <- ptr1,
+                                   (ptr2',c2) <- ptr2,
+                                   extra <- case ptr1' of
+                                     Nothing -> case ptr2' of
+                                       Nothing -> [[]]
+                                       Just _ -> []
+                                     Just ptr1'' -> case ptr2' of
+                                       Nothing -> []
+                                       Just ptr2'' -> if ptrType ptr1'' == ptrType ptr2'' && ptrLocation ptr1'' == ptrLocation ptr2''
+                                                      then (case offEq (ptrOffset ptr1'') (ptrOffset ptr2'') of
+                                                               Nothing -> []
+                                                               Just res -> [res])
+                                                      else []
+                                 ]
     where
       offEq [] [] = Just []
       offEq (x:xs) (y:ys) = case offEq xs ys of
@@ -468,17 +468,17 @@ instance MemoryModel PlainMemory where
                         in Just $ (constantAnn (BitVector iy) rw .==. bx):rest
             Right by -> Just $ (bx .==. by):rest
   memPtrNull _ = [(Nothing,constant True)]
-  memPtrSwitch _ ptrs = return $ concat [ [ (ptr',and' [cond',cond]) | (ptr',cond') <- ptr ] | (ptr,cond) <- ptrs ]
+  memPtrSwitch _ ptrs = return $ concat [ [ (ptr',cond' .&&. cond) | (ptr',cond') <- ptr ] | (ptr,cond) <- ptrs ]
       
 
-typedLoad :: Integer -> [(TypeDesc,SMTExpr BitVector,[(ErrorDesc,SMTExpr Bool)])] -> [(SMTExpr BitVector,[(ErrorDesc,SMTExpr Bool)])]
+typedLoad :: Integer -> [(TypeDesc,SMTExpr (BitVector BVUntyped),[(ErrorDesc,SMTExpr Bool)])] -> [(SMTExpr (BitVector BVUntyped),[(ErrorDesc,SMTExpr Bool)])]
 typedLoad 0 _ = []
 typedLoad l ((tp,bv,errs):banks) = case compare l (bitWidth tp) of
   EQ -> [(bv,errs)]
   GT -> (bv,errs) : typedLoad (l - (bitWidth tp)) banks
-  LT -> [(bvextract ((bitWidth tp)-1) ((bitWidth tp)-l) bv,errs)]
+  LT -> [(bvextract' ((bitWidth tp)-l) l bv,errs)]
   
-plainOffset :: PlainPointer -> [Either Integer (SMTExpr BitVector)] -> PlainPointer
+plainOffset :: PlainPointer -> [Either Integer (SMTExpr (BitVector BVUntyped))] -> PlainPointer
 plainOffset ptr idx = ptr { ptrOffset = plainIdxMerge (ptrOffset ptr) idx }
   where
     plainIdxMerge [] idx = idx
@@ -585,10 +585,10 @@ typedStore offset len eoff (tp:tps) expr (arr:arrs)
     where
       tlen = bitWidth tp-}
 
-renderMemObject :: TypeDesc -> [BitVector] -> [String]
+renderMemObject :: TypeDesc -> [BitVector BVUntyped] -> [String]
 renderMemObject tp bvs = snd $ renderMemObject' bvs tp
 
-renderMemObject' :: [BitVector] -> TypeDesc -> ([BitVector],[String])
+renderMemObject' :: [BitVector BVUntyped] -> TypeDesc -> ([BitVector BVUntyped],[String])
 renderMemObject' bvs (TDStruct tps _) = let (rest,res) = mapAccumL renderMemObject' bvs tps
                                         in (rest,"struct {":(fmap ("  "++) $ concat res)++["}"])
 renderMemObject' bvs (TDArray n tp) = let (rest,res) = mapAccumL renderMemObject' bvs (genericReplicate n tp)

@@ -8,12 +8,13 @@ import LLVM.Core (TypeDesc(..))
 import Data.Word
 import Data.Typeable
 import Data.List (genericSplitAt)
+--import qualified Data.Bitstream as BitS
 import Numeric (showHex)
 
-type PtrT = Word64
+type PtrT = BV64
 
 data UntypedMemory = UntypedMemory
-    { memoryBlocks :: SMTExpr (SMTArray (SMTExpr PtrT) BitVector)
+    { memoryBlocks :: SMTExpr (SMTArray (SMTExpr PtrT) (BitVector BVUntyped))
     , memoryNextFree :: SMTExpr PtrT
     } deriving (Eq,Typeable)
 
@@ -42,17 +43,17 @@ instance Args UntypedPointer where
 instance MemoryModel UntypedMemory where
     type Pointer UntypedMemory = UntypedPointer
     memNew tps = argVarsAnn tps
-    memInit mem = (memoryNextFree mem) .==. (constant 0)
+    memInit mem = (memoryNextFree mem) .==. 0
     -- TODO: Constant init
     memAlloc tp _ cont mem = let w = typeWidth' tp
-                             in return (UntypedPointer $ memoryNextFree mem,mem { memoryNextFree = (memoryNextFree mem) + (constant $ fromIntegral w) })
+                             in return (UntypedPointer $ memoryNextFree mem,mem { memoryNextFree = (memoryNextFree mem) + (fromInteger w) })
     memLoad tp (UntypedPointer ptr) mem = let w = typeWidth' tp
                                           in (if w==1
                                               then select (memoryBlocks mem) ptr
-                                              else bvconcats [ select (memoryBlocks mem) (if i==0
-                                                                                          then ptr
-                                                                                          else ptr + (constant $ fromIntegral i))
-                                                             | i <- [0..(w-1)] ],[])
+                                              else foldl1 bvconcat [ select (memoryBlocks mem) (if i==0
+                                                                                                then ptr
+                                                                                                else ptr + (fromInteger i))
+                                                                   | i <- [0..(w-1)] ],[])
     memStore tp (UntypedPointer ptr) val mem
       = let w = typeWidth' tp
         in (mem { memoryBlocks = if w==1
@@ -60,39 +61,38 @@ instance MemoryModel UntypedMemory where
                                  else letAnn (fromIntegral w) val 
                                       $ \val' -> foldl (\cmem (blk,off) -> store cmem (if off==0
                                                                                        then ptr
-                                                                                       else ptr + (constant $ fromIntegral off)) blk)
+                                                                                       else ptr + (fromInteger off)) blk)
                                                  (memoryBlocks mem) 
-                                                 [ (bvextract ((i+1)*8 - 1) (i*8) val',w-i-1) | i <- [0..(w-1)] ] },[])
+                                                 [ (bvextract' (i*8) 8 val',w-i-1) | i <- [0..(w-1)] ] },[])
     memCast _ tp ptr = ptr
-    memIndex _ tp idx (UntypedPointer ptr) = UntypedPointer $ case fromIntegral $ getOffset typeWidth' tp (fmap (\(Left i) -> i) idx) of
+    memIndex _ tp idx (UntypedPointer ptr) = UntypedPointer $ case getOffset typeWidth' tp (fmap (\(Left i) -> i) idx) of
       0 -> ptr
-      off' ->  ptr + (constant off')
-    memEq mem1 mem2 = and' [ memoryBlocks mem1 .==. memoryBlocks mem2
-                           , memoryNextFree mem1 .==. memoryNextFree mem2 ]
+      off' ->  ptr + (fromInteger off')
+    memEq mem1 mem2 = (memoryBlocks mem1 .==. memoryBlocks mem2) .&&. (memoryNextFree mem1 .==. memoryNextFree mem2)
     memPtrEq _ (UntypedPointer p1) (UntypedPointer p2) = p1 .==. p2
     memCopy len (UntypedPointer p1) (UntypedPointer p2) mem
-      = mem { memoryBlocks = foldl (\cmem i -> store cmem (if i==0 
+      = mem { memoryBlocks = foldl (\cmem i -> store cmem (if i==0
                                                            then p1
-                                                           else p1 + constant i) 
+                                                           else p1 + fromInteger i) 
                                                (select (memoryBlocks mem) (if i==0
                                                                            then p2
-                                                                           else p2 + constant i))
-                                   ) (memoryBlocks mem) [0..(fromIntegral $ len-1)]
+                                                                           else p2 + fromInteger i))
+                                   ) (memoryBlocks mem) [0..(len-1)]
             }
     memSet len val (UntypedPointer p) mem = mem { memoryBlocks = foldl (\cmem i -> store cmem (if i==0
                                                                                                then p
-                                                                                               else p + constant i) val)
-                                                                 (memoryBlocks mem) [0..(fromIntegral $ len - 1)]
+                                                                                               else p + fromInteger i) val)
+                                                                 (memoryBlocks mem) [0..(len - 1)]
                                                 }
     memPtrSwitch _ choices = return $ UntypedPointer (mkSwitch choices)
       where
         mkSwitch [(UntypedPointer ptr,_)] = ptr
         mkSwitch ((UntypedPointer ptr,cond):rest) = ite cond ptr (mkSwitch rest)
     memDump mem = do
-      nxt <- getValue (memoryNextFree mem)
+      BitVector nxt <- getValue (memoryNextFree mem)
       if nxt > 0
         then (do
-                 res <- mapM (\i -> getValue' 8 (select (memoryBlocks mem) (constant (fromIntegral i)))) [0..(nxt-1)]
+                 res <- mapM (\i -> getValue' 8 (select (memoryBlocks mem) (fromInteger i))) [0..(nxt-1)]
                  return $ unwords [ ((if r' < 16 then showChar '0' else id) . showHex r') "" 
                                   | BitVector r <- res, let r' = fromIntegral r :: Word8 ])
         else return "[]"

@@ -7,7 +7,6 @@ import MemoryModel.UntypedBlocks
 import MemoryModel.Typed
 import MemoryModel.Plain
 import Language.SMTLib2
-import Language.SMTLib2.Internals
 import Data.Typeable
 import Control.Monad.Trans
 import System.Environment (getArgs)
@@ -32,7 +31,7 @@ import qualified Foreign.Marshal.Alloc as Alloc
 import Text.Show
 import Data.Monoid
 
-type Watchpoint = (String,SMTExpr Bool,[(TypeDesc,SMTExpr BitVector)])
+type Watchpoint = (String,SMTExpr Bool,[(TypeDesc,SMTExpr (BitVector BVUntyped))])
 
 type Guard = (ErrorDesc,SMTExpr Bool)
 
@@ -41,9 +40,9 @@ type Guard = (ErrorDesc,SMTExpr Bool)
              Nothing -> error $ "Couldn't find key "++show k++" in "++show (Map.keys mp)
              Just r -> r
 
-data Val m = ConstValue { asConst :: BitVector
+data Val m = ConstValue { asConst :: Integer
                         , constWidth :: Integer }
-           | DirectValue { asValue :: SMTExpr BitVector }
+           | DirectValue { asValue :: SMTExpr (BitVector BVUntyped) }
            | PointerValue { asPointer :: Pointer m }
            | ConditionValue { asCondition :: SMTExpr Bool
                             , conditionWidth :: Integer }
@@ -61,8 +60,8 @@ type RealizationQueue = [(String,String,Integer,Integer)]
 
 valEq :: MemoryModel m => m -> Val m -> Val m -> SMTExpr Bool
 valEq mem (ConstValue x _) (ConstValue y _) = if x==y then constant True else constant False
-valEq mem (ConstValue x w) (DirectValue y) = y .==. constantAnn x w
-valEq mem (DirectValue x) (ConstValue y w) = x .==. constantAnn y w
+valEq mem (ConstValue x w) (DirectValue y) = y .==. constantAnn (BitVector x) w
+valEq mem (DirectValue x) (ConstValue y w) = x .==. constantAnn (BitVector y) w
 valEq mem (DirectValue v1) (DirectValue v2) = v1 .==. v2
 valEq mem (PointerValue p1) (PointerValue p2) = memPtrEq mem p1 p2
 valEq mem (ConditionValue v1 _) (ConditionValue v2 _) = v1 .==. v2
@@ -98,8 +97,8 @@ valCond (DirectValue x) = x .==. (constantAnn (BitVector 1) 1)
 valCond (ConditionValue x _) = x
 valCond (ConstCondition x) = constant x
 
-valValue :: Val m -> SMTExpr BitVector
-valValue (ConstValue x w) = constantAnn x w
+valValue :: Val m -> SMTExpr (BitVector BVUntyped)
+valValue (ConstValue x w) = constantAnn (BitVector x) w
 valValue (DirectValue x) = x
 valValue (ConditionValue x w) = ite x (constantAnn (BitVector 1) (fromIntegral w)) (constantAnn (BitVector 0) (fromIntegral w))
 valValue (ConstCondition x) = constantAnn (BitVector $ if x then 1 else 0) 1
@@ -254,10 +253,10 @@ stepRealization tps init_mem globals prog sigs preds order st
       act <- var
       case froms of
         [] -> assert act
-        _ -> assert $ act .==. or' [ and' [act',cond] | (act',_,cond) <- froms ]
+        _ -> assert $ act .==. app or' [ act' .&&. cond | (act',_,cond) <- froms ]
       mem <- case froms of
         [] -> return init_mem
-        _ -> memSwitch [ (mem,and' [act',cond])  | (act',mem,cond) <- froms ]
+        _ -> memSwitch [ (mem,act' .&&. cond)  | (act',mem,cond) <- froms ]
       let inps_simple = Map.fromList $ mapMaybe (\(iname,(from_blk,from_sub,expr,tp)) -> do
                                                     from <- localPredecessor order from_blk from_sub (qstateId qst)
                                                     inp_block <- case Map.lookup from (alreadyRealized nxt) of
@@ -279,7 +278,7 @@ stepRealization tps init_mem globals prog sigs preds order st
                                                     realized_cond <- Map.lookup (qstateId qst)
                                                                      (rblockJumps realized_from)
                                                     return (argToExpr arg inp0 mem,
-                                                            and' [rblockActivation realized_from,realized_cond])
+                                                            app and' [rblockActivation realized_from,realized_cond])
                                                  ) from
                           res <- valSwitch mem tp choices
                           return (iname,res)
@@ -336,7 +335,7 @@ stepRealization tps init_mem globals prog sigs preds order st
 
 
 translateProgram :: (MemoryModel mem) 
-                    => ProgDesc -> String -> (ErrorDesc -> Bool) -> (ErrorDesc -> [(String,[(TypeDesc,BitVector)])] -> SMT a) -> SMT (mem,Maybe a)
+                    => ProgDesc -> String -> (ErrorDesc -> Bool) -> (ErrorDesc -> [(String,[(TypeDesc,BitVector BVUntyped)])] -> SMT a) -> SMT (mem,Maybe a)
 translateProgram (program,globs) entry_point check_err f = do
   let alltps_funs = foldl (\tps (args,rtp,blocks) 
                            -> let tpsArgs = allTypesArgs args
@@ -416,13 +415,13 @@ translateJumps = translateJumps' []
       (npre,rcond) <- case cond of
         Nothing -> return (pre,case pre of
                               [] -> constant True
-                              _ -> and' $ fmap not' pre)
+                              _ -> app and' $ fmap not' pre)
         Just cond' -> do
           v <- var
           assert $ v .==. cond'
           return (v:pre,case pre of
                      [] -> v
-                     _ -> and' (v:(fmap not' pre)))
+                     _ -> app and' (v:(fmap not' pre)))
       mp <- translateJumps' npre rest
       return $ Map.insert from rcond mp
         
@@ -502,7 +501,7 @@ argToExpr e values mem = {-trace ("argToExpr: "++show e++" "++show (Map.toList v
                  _ -> error $ "Comparing pointers using "++show pred++" unsupported (only (in-)equality allowed)"
     _ -> let lhs' = argToExpr lhs values mem
              rhs' = argToExpr rhs values mem
-             apply (ConstValue (BitVector lhs) _) (ConstValue (BitVector rhs) _) 
+             apply (ConstValue lhs _) (ConstValue rhs _) 
                = let op = case pred of
                             IntEQ -> (==)
                             IntNE -> (/=)
@@ -520,38 +519,38 @@ argToExpr e values mem = {-trace ("argToExpr: "++show e++" "++show (Map.toList v
                                  op = case pred of
                                    IntEQ -> (.==.)
                                    IntNE -> \x y -> not' $ x .==. y
-                                   IntUGT -> BVUGT
-                                   IntUGE -> BVUGE
-                                   IntULT -> BVULT
-                                   IntULE -> BVULE
-                                   IntSGT -> BVSGT
-                                   IntSGE -> BVSGE
-                                   IntSLT -> BVSLT
-                                   IntSLE -> BVSLE
+                                   IntUGT -> bvugt
+                                   IntUGE -> bvuge
+                                   IntULT -> bvult
+                                   IntULE -> bvule
+                                   IntSGT -> bvsgt
+                                   IntSGE -> bvsge
+                                   IntSLT -> bvslt
+                                   IntSLE -> bvsle
                              in ConditionValue (op lhs' rhs') 1
          in apply lhs' rhs'
-  EDInt v -> ConstValue (BitVector v) (bitWidth (exprType e))
+  EDInt v -> ConstValue v (bitWidth (exprType e))
   EDUnOp op arg -> case op of
     UOZExt -> case argToExpr arg values mem of
       ConditionValue v w -> ConditionValue v (bitWidth (exprType e))
       e' -> let v = valValue e'
                 d = (bitWidth (exprType e)) - (bitWidth (exprType arg))
-                nv = bvconcat (constantAnn (BitVector 0) (fromIntegral d)) v
+                nv = bvconcat (constantAnn (BitVector 0) (fromIntegral d)::SMTExpr (BitVector BVUntyped)) v
            in DirectValue nv
     UOSExt -> case argToExpr arg values mem of
       ConditionValue v w -> ConditionValue v (bitWidth (exprType e))
       e' -> let v = valValue e'
                 w = bitWidth (exprType arg)
                 d = (bitWidth (exprType e)) - w
-                nv = bvconcat (ite (bvslt v (constantAnn (BitVector 0) (fromIntegral w)))
-                               (constantAnn (BitVector (-1)) (fromIntegral d))
+                nv = bvconcat (ite (bvslt v (constantAnn (BitVector 0) (fromIntegral w)::SMTExpr (BitVector BVUntyped)))
+                               (constantAnn (BitVector (-1)) (fromIntegral d)::SMTExpr (BitVector BVUntyped))
                                (constantAnn (BitVector 0) (fromIntegral d))) v
             in DirectValue nv
     UOTrunc -> let w = bitWidth (exprType e) 
                in case argToExpr arg values mem of
                  ConstValue bv _ -> ConstValue bv w
                  ConditionValue v _ -> ConditionValue v w
-                 expr -> DirectValue (bvextract (w - 1) 0 (valValue expr))
+                 expr -> DirectValue (bvextract' 0 w (valValue expr))
     UOBitcast -> let PointerValue ptr = argToExpr arg values mem
                      TDPtr tp = exprType e
                  in PointerValue $ memCast mem tp ptr
@@ -560,13 +559,13 @@ argToExpr e values mem = {-trace ("argToExpr: "++show e++" "++show (Map.toList v
     PointerValue ptr -> let ptr' = memIndex mem (exprType expr) (fmap (\arg -> case arg of
                                                                           Expr { exprDesc = EDInt i } -> Left i
                                                                           _ -> case argToExpr arg values mem of
-                                                                            ConstValue (BitVector bv) _ -> Left bv
+                                                                            ConstValue bv _ -> Left bv
                                                                             DirectValue bv -> Right bv
                                                                       ) args) ptr
                         in PointerValue ptr'
   EDBinOp op lhs rhs -> let lhs' = argToExpr lhs values mem
                             rhs' = argToExpr rhs values mem
-                            apply (ConstValue (BitVector lhs) w) (ConstValue (BitVector rhs) _) 
+                            apply (ConstValue lhs w) (ConstValue rhs _) 
                               = let rop = case op of
                                             BOXor -> Bits.xor
                                             BOAdd -> (+)
@@ -575,17 +574,17 @@ argToExpr e values mem = {-trace ("argToExpr: "++show e++" "++show (Map.toList v
                                             BOShL -> \x y -> shiftL x (fromIntegral y)
                                             BOOr -> (.|.)
                                             BOMul -> (*)
-                                in ConstValue (BitVector (rop lhs rhs)) w
+                                in ConstValue (rop lhs rhs) w
                             apply lhs rhs = let lhs' = valValue lhs
                                                 rhs' = valValue rhs
                                                 rop = case op of 
-                                                  BOXor -> BVXor
-                                                  BOAdd -> BVAdd
-                                                  BOAnd -> BVAnd
-                                                  BOSub -> BVSub
-                                                  BOShL -> BVSHL
-                                                  BOOr -> BVOr
-                                                  BOMul -> BVMul
+                                                  BOXor -> bvxor
+                                                  BOAdd -> bvadd
+                                                  BOAnd -> bvand
+                                                  BOSub -> bvsub
+                                                  BOShL -> bvshl
+                                                  BOOr -> bvor
+                                                  BOMul -> bvmul
                                                   _ -> error $ "unsupported operator: "++show op
                                             in DirectValue (rop lhs' rhs')
                         in apply lhs' rhs'
@@ -632,7 +631,7 @@ realizeInstruction instr fname blk subblk pred act mem values
     IAssign trg expr -> return $ emptyInstructionResult { valueAssigned = Just (trg,argToExpr expr values mem) }
     IAlloca trg tp size align -> do
       (ptr,mem') <- memAlloc tp (case argToExpr size values mem of
-                                    ConstValue (BitVector bv) _ -> Left bv
+                                    ConstValue bv _ -> Left bv
                                     DirectValue bv -> Right bv) Nothing mem
       return $ emptyInstructionResult { memoryUpdated = Just mem'
                                       , valueAssigned = Just (trg,PointerValue ptr) }
@@ -641,10 +640,10 @@ realizeInstruction instr fname blk subblk pred act mem values
                              TDPtr tp -> case argToExpr val values mem of
                                PointerValue ptr2 -> let (mem',guards) = memStorePtr tp ptr ptr2 mem
                                                     in return $ emptyInstructionResult { memoryUpdated = Just mem'
-                                                                                       , guardsCreated = [ (err,and' [act,cond]) | (err,cond) <- guards ] }
+                                                                                       , guardsCreated = [ (err,act .&&. cond) | (err,cond) <- guards ] }
                              tp -> let (mem',guards) = memStore tp ptr (valValue $ argToExpr val values mem) mem
                                    in return $ emptyInstructionResult { memoryUpdated = Just mem' 
-                                                                      , guardsCreated = [ (err,and' [act,cond]) | (err,cond) <- guards ] }
+                                                                      , guardsCreated = [ (err,act .&&. cond) | (err,cond) <- guards ] }
     IPhi _ _ -> return emptyInstructionResult
     ICall rtp trg _ f args -> case exprDesc f of
                                    EDNamed fn -> case intrinsics fn of
@@ -657,10 +656,10 @@ realizeInstruction instr fname blk subblk pred act mem values
                            in case exprType arg of
                              TDPtr (TDPtr tp) -> let (res,guards) = memLoadPtr tp ptr mem
                                                  in return $ emptyInstructionResult { valueAssigned = Just (trg,PointerValue res)
-                                                                                    , guardsCreated = [ (err,and' [act,cond]) | (err,cond) <- guards ] }
+                                                                                    , guardsCreated = [ (err,act .&&. cond) | (err,cond) <- guards ] }
                              TDPtr tp -> let (res,guards) = memLoad tp ptr mem
                                          in return $ emptyInstructionResult { valueAssigned = Just (trg,DirectValue res)
-                                                                            , guardsCreated = [ (err,and' [act,cond]) | (err,cond) <- guards ] }
+                                                                            , guardsCreated = [ (err,act .&&. cond) | (err,cond) <- guards ] }
     _ -> error $ "Implement realizeInstruction for "++show instr
 
 data LabelOrigin = ArgumentOrigin
@@ -802,10 +801,10 @@ allTypesBlks = allTypes' [] []
                                         _ -> allTypes' is tps blks
 
 intr_memcpy,intr_memset,intr_restrict,intr_watch,intr_malloc :: MemoryModel mem => String -> Maybe TypeDesc -> SMTExpr Bool -> mem -> [(Val mem,TypeDesc)] -> SMT (InstructionResult mem)
-intr_memcpy _ _ _ mem [(PointerValue to,_),(PointerValue from,_),(ConstValue (BitVector len) _,_),_,_]
+intr_memcpy _ _ _ mem [(PointerValue to,_),(PointerValue from,_),(ConstValue len _,_),_,_]
   = return $ emptyInstructionResult { memoryUpdated = Just $ memCopy len to from mem }
 
-intr_memset _ _ _ mem [(PointerValue dest,_),(val,_),(ConstValue (BitVector len) _,_),_,_]
+intr_memset _ _ _ mem [(PointerValue dest,_),(val,_),(ConstValue len _,_),_,_]
   = return $ emptyInstructionResult { memoryUpdated = Just $ memSet len (valValue val) dest mem }
 
 intr_restrict _ _ act mem [(val,_)] = do
@@ -816,16 +815,16 @@ intr_restrict _ _ act mem [(val,_)] = do
   return emptyInstructionResult
 intr_assert _ _ act mem [(val,_)] = do
   return $ emptyInstructionResult { guardsCreated = [(Custom,case val of
-                                                         ConditionValue val _ -> and' [act,not' val]
-                                                         _ -> and' [act,valValue val .==. constantAnn (BitVector 0) 32])] }
+                                                         ConditionValue val _ -> act .&&. (not' val)
+                                                         _ -> act .&&. (valValue val .==. constantAnn (BitVector 0) 32))] }
 
 
-intr_watch _ _ act mem ((ConstValue (BitVector bv) _,_):exprs)
+intr_watch _ _ act mem ((ConstValue bv _,_):exprs)
   = return $ emptyInstructionResult { watchpointsCreated = [(show bv,act,[ (tp,valValue val) | (val,tp) <- exprs ])] }
 
 intr_malloc trg (Just tp) act mem [(size,sztp)] = do
   (ptr,mem') <- memAlloc tp (case size of
-                                ConstValue (BitVector bv) _ -> Left bv
+                                ConstValue bv _ -> Left bv
                                 DirectValue bv -> Right bv) Nothing mem
   return $ emptyInstructionResult { memoryUpdated = Just mem'
                                   , valueAssigned = Just (trg,PointerValue ptr) }

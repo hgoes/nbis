@@ -10,10 +10,10 @@ import Data.Typeable
 import Data.List (genericSplitAt)
 import Numeric (showHex)
 
-type PtrT = Word64
+type PtrT = BV64
 
 data UntypedBlockMemory = UntypedBlockMemory
-    { memoryBlocks :: SMTExpr (SMTArray (SMTExpr PtrT,SMTExpr PtrT) BitVector)
+    { memoryBlocks :: SMTExpr (SMTArray (SMTExpr PtrT,SMTExpr PtrT) (BitVector BVUntyped))
     , memoryBlockSizes :: SMTExpr (SMTArray (SMTExpr PtrT) PtrT)
     , memoryNextFree :: SMTExpr PtrT
     } deriving (Eq,Typeable)
@@ -41,34 +41,34 @@ instance Args UntypedPointer where
 instance MemoryModel UntypedBlockMemory where
     type Pointer UntypedBlockMemory = UntypedPointer
     memNew = argVarsAnn
-    memInit mem = (memoryNextFree mem) .==. (constant 0)
+    memInit mem = (memoryNextFree mem) .==. 0
     -- TODO: constant init
     memAlloc tp _ cont mem = return (UntypedPointer { pointerBlock = (memoryNextFree mem)
                                                     , pointerOffset = 0 },
                                      mem { memoryNextFree = (memoryNextFree mem) + 1 
-                                         , memoryBlockSizes = store (memoryBlockSizes mem) (memoryNextFree mem) (constant $ fromIntegral $ typeWidth tp)
+                                         , memoryBlockSizes = store (memoryBlockSizes mem) (memoryNextFree mem) (fromInteger $ typeWidth tp)
                                          })
     memLoad tp ptr mem = let w = typeWidth tp
                          in (if w==1
                              then select (memoryBlocks mem) (pointerBlock ptr,pointerOffset ptr)
-                             else bvconcats [ select (memoryBlocks mem) (pointerBlock ptr,if i==0
-                                                                                          then pointerOffset ptr
-                                                                                          else pointerOffset ptr + (constant $ fromIntegral i))
-                                            | i <- [0..(w-1)] ],[])
+                             else foldl1 bvconcat [ select (memoryBlocks mem) (pointerBlock ptr,if i==0
+                                                                                                then pointerOffset ptr
+                                                                                                else pointerOffset ptr + (fromInteger i))
+                                                  | i <- [0..(w-1)] ],[])
     memStore tp ptr val mem = let w = typeWidth tp
                               in (mem { memoryBlocks = if w==1
                                                        then store (memoryBlocks mem) (pointerBlock ptr,pointerOffset ptr) val
                                                        else letAnn (fromIntegral w) val 
                                                             $ \val' -> foldl (\cmem (blk,off) -> store cmem (pointerBlock ptr,if off==0
                                                                                                                               then pointerOffset ptr
-                                                                                                                              else pointerOffset ptr + (constant $ fromIntegral off)) blk)
+                                                                                                                              else pointerOffset ptr + (fromInteger off)) blk)
                                                                        (memoryBlocks mem) 
-                                                                       [ (bvextract ((i+1)*8 - 1) (i*8) val',w-i-1) | i <- [0..(w-1)] ] },[])
+                                                                       [ (bvextract' (i*8) 8 val',w-i-1) | i <- [0..(w-1)] ] },[])
     memCast _ tp ptr = ptr
-    memIndex _ tp idx ptr = ptr { pointerOffset = pointerOffset ptr + (constant $ fromIntegral $ getOffset typeWidth tp (fmap (\(Left i) -> i) idx)) }
-    memEq mem1 mem2 = and' [ memoryBlocks mem1 .==. memoryBlocks mem2
-                           , memoryBlockSizes mem1 .==. memoryBlockSizes mem2
-                           , memoryNextFree mem1 .==. memoryNextFree mem2 ]
+    memIndex _ tp idx ptr = ptr { pointerOffset = pointerOffset ptr + (fromInteger $ getOffset typeWidth tp (fmap (\(Left i) -> i) idx)) }
+    memEq mem1 mem2 = app and' [memoryBlocks mem1 .==. memoryBlocks mem2
+                               , memoryBlockSizes mem1 .==. memoryBlockSizes mem2
+                               , memoryNextFree mem1 .==. memoryNextFree mem2 ]
     {-memPtrEq _ p1 p2 = and' [pointerBlock p1 .==. pointerBlock p2
                             ,pointerOffset p1 .==. pointerOffset p2]-}
     memPtrSwitch mem [(ptr,_)] = return ptr
@@ -79,25 +79,25 @@ instance MemoryModel UntypedBlockMemory where
                             }
     memSet len val ptr mem = foldl (\cmem i -> cmem { memoryBlocks = store (memoryBlocks cmem) (pointerBlock ptr,if i==0
                                                                                                                  then pointerOffset ptr
-                                                                                                                 else (pointerOffset ptr) + (constant $ fromIntegral i)) val
+                                                                                                                 else (pointerOffset ptr) + (fromInteger i)) val
                                                     }) mem [0..(len-1)]
     memCopy len ptr_to ptr_from mem = foldl (\cmem i -> cmem { memoryBlocks = store (memoryBlocks cmem) 
                                                                               (pointerBlock ptr_to,if i==0
                                                                                                    then pointerOffset ptr_to
-                                                                                                   else (pointerOffset ptr_to) + (constant $ fromIntegral i))
+                                                                                                   else (pointerOffset ptr_to) + (fromInteger i))
                                                                               (select (memoryBlocks cmem) (pointerBlock ptr_from,if i==0
                                                                                                                                  then pointerOffset ptr_from
-                                                                                                                                 else (pointerOffset ptr_from) + (constant $ fromIntegral i)))
+                                                                                                                                 else (pointerOffset ptr_from) + (fromInteger i)))
                                                              }) mem [0..(len-1)]
     memDump mem = do
-      nxt <- getValue (memoryNextFree mem)
+      BitVector nxt <- getValue (memoryNextFree mem)
       if nxt > 0
          then mapM (\i -> do
-                       blksz <- getValue' () (select (memoryBlockSizes mem) (constant $ fromIntegral i))
+                       BitVector blksz <- getValue' () (select (memoryBlockSizes mem) (fromInteger i))
                        mapM (\j -> do
                                 BitVector wrd <- getValue' 8 (select (memoryBlocks mem) 
-                                                                    (constant $ fromIntegral i,
-                                                                     constant $ fromIntegral j))
+                                                                    (fromInteger i,
+                                                                     fromInteger j))
                                 let res = fromIntegral wrd :: Word8
                                 return $ ((if res < 16 then showChar '0' else id) . showHex res) ""
                             ) [0..(blksz-1)] >>= return.unwords
