@@ -152,8 +152,8 @@ renderMemObject :: TypeDesc -> [BitVector BVUntyped] -> [String]
 renderMemObject tp bvs = snd $ renderMemObject' bvs tp
 
 renderMemObject' :: [BitVector BVUntyped] -> TypeDesc -> ([BitVector BVUntyped],[String])
-renderMemObject' bvs (TDStruct tps _) = let (rest,res) = mapAccumL renderMemObject' bvs tps
-                                        in (rest,"struct {":(fmap ("  "++) $ concat res)++["}"])
+renderMemObject' bvs (TDStruct (Right (tps,_))) = let (rest,res) = mapAccumL renderMemObject' bvs tps
+                                                  in (rest,"struct {":(fmap ("  "++) $ concat res)++["}"])
 renderMemObject' bvs (TDArray n tp) = let (rest,res) = mapAccumL renderMemObject' bvs (genericReplicate n tp)
                                       in (rest,"array {":(fmap ("  "++) $ concat res)++["}"])
 renderMemObject' bvs (TDVector n tp) = let (rest,res) = mapAccumL renderMemObject' bvs (genericReplicate n tp)
@@ -169,7 +169,7 @@ typedLoad offset len tps banks = case typedLoad' offset len tps banks of
   (_,f):rest -> foldl bvconcat f (fmap snd rest)
 
 typedLoad' :: Integer -> Integer -> [TypeDesc] -> [SMTExpr (BitVector BVUntyped)] -> [(Integer,SMTExpr (BitVector BVUntyped))]
-typedLoad' offset len ((TDStruct tps _):rest) banks = typedLoad' offset len (tps++rest) banks
+typedLoad' offset len ((TDStruct (Right (tps,_))):rest) banks = typedLoad' offset len (tps++rest) banks
 typedLoad' _ 0 _ _ = []
 typedLoad' offset len (tp:tps) (bank:banks)
   | offset >= tlen             = typedLoad' (offset - tlen) len tps banks

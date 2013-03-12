@@ -81,14 +81,14 @@ mkPlainIdx w n f = undefFor n (\u -> do
     toUndefArray _ = undefined
 
 allIdx :: TypeDesc -> [[Integer]]
-allIdx (TDStruct tps _) = concat $ zipWith (\n tp -> fmap (n:) (allIdx tp)) [0..] tps
+allIdx (TDStruct (Right (tps,_))) = concat $ zipWith (\n tp -> fmap (n:) (allIdx tp)) [0..] tps
 allIdx (TDArray l tp) = concat $ fmap (\n -> fmap (n:) (allIdx tp)) [0..(l-1)]
 allIdx (TDVector l tp) = concat $ fmap (\n -> fmap (n:) (allIdx tp)) [0..(l-1)]
 allIdx _ = [[]]
 
 allSuccIdx :: TypeDesc -> [Either Integer (SMTExpr (BitVector BVUntyped))] -> [[Either Integer (SMTExpr (BitVector BVUntyped))]]
 allSuccIdx tp [] = fmap (fmap Left) (allIdx tp)
-allSuccIdx (TDStruct tps _) ((Left i):is) = concat $ zipWith (\n tp -> fmap ((Left n):) (allSuccIdx tp is)) [i..] (genericDrop i tps)
+allSuccIdx (TDStruct (Right (tps,_))) ((Left i):is) = concat $ zipWith (\n tp -> fmap ((Left n):) (allSuccIdx tp is)) [i..] (genericDrop i tps)
 allSuccIdx (TDArray l tp) ((Left i):is) = concat $ fmap (\n -> fmap ((Left n):) (allSuccIdx tp is)) [i..(l-1)]
 allSuccIdx (TDArray l tp) ((Right i):is) = concat $ fmap (\n -> fmap ((Right $ if n==0 then i else bvadd i (constantAnn (BitVector n) 64)):) (allSuccIdx tp is)) [0..]
 allSuccIdx (TDVector l tp) ((Left i):is) = concat $ fmap (\n -> fmap ((Left n):) (allSuccIdx tp is)) [i..(l-1)]
@@ -147,7 +147,7 @@ plainModifyPtr (PlainPtrCell alts) [] dyn f = let (res,nalts) = f alts
                                               in (res,PlainPtrCell nalts)
 
 translateIdx :: TypeDesc -> [Either Integer (SMTExpr (BitVector BVUntyped))] -> (TypeDesc,[Integer],[SMTExpr (BitVector BVUntyped)])
-translateIdx (TDStruct tps _) ((Left idx):rest) = let (tp,rst,rdyn) = translateIdx (genericIndex tps idx) rest
+translateIdx (TDStruct (Right (tps,_))) ((Left idx):rest) = let (tp,rst,rdyn) = translateIdx (genericIndex tps idx) rest
                                                   in (tp,idx:rst,rdyn)
 translateIdx (TDArray len tp) (idx:rest) = let (tp',rst,rdyn) = translateIdx tp rest
                                                nidx = case idx of
@@ -180,7 +180,7 @@ contentToCell (MemArray arr) (i:is) = contentToCell (genericIndex arr i) is
 contentToCell (MemCell e) [] = e
 
 plainNew :: TypeDesc -> [Either Integer (SMTExpr (BitVector BVUntyped))] -> SMT PlainCont
-plainNew (TDStruct tps _) d = do
+plainNew (TDStruct (Right (tps,_))) d = do
   subs <- mapM (\tp -> plainNew tp d) tps
   return $ PlainStruct subs
 plainNew (TDArray len tp) d = plainNew tp (d++[Left len])
@@ -195,7 +195,7 @@ plainNew tp d = mkPlainIdx (bitWidth tp) (genericLength d) (\r -> return (PlainS
                                                                                               ) d)))
 
 plainAssign :: TypeDesc -> PlainCont -> MemContent -> [Integer] -> SMT ()
-plainAssign (TDStruct tps _) (PlainStruct conts) (MemArray cells) path
+plainAssign (TDStruct (Right (tps,_))) (PlainStruct conts) (MemArray cells) path
   = mapM_ (\(tp,cont,cell) -> plainAssign tp cont cell path) (Prelude.zip3 tps conts cells)
 plainAssign (TDArray len tp) cont (MemArray cells) path
   = mapM_ (\(i,cell) -> plainAssign tp cont cell (i:path)) (zip [0..] cells)
@@ -212,7 +212,7 @@ plainAssign tp (PlainSingle el _) (MemCell bv) path
       Just (res,_) -> res
 
 plainSwitch :: SMTExpr Bool -> TypeDesc -> PlainCont -> PlainCont -> Integer -> SMT PlainCont
-plainSwitch cond (TDStruct tps _) (PlainStruct c1) (PlainStruct c2) d = do
+plainSwitch cond (TDStruct (Right (tps,_))) (PlainStruct c1) (PlainStruct c2) d = do
   c3 <- mapM (\(tp,x,y) -> plainSwitch cond tp x y d) (Prelude.zip3 tps c1 c2)
   return $ PlainStruct c3
 plainSwitch cond tp (PlainPtrs p1) (PlainPtrs p2) 0 = switchPtr cond tp p1 p2 >>= return.PlainPtrs
@@ -419,7 +419,7 @@ instance MemoryModel PlainMemory where
                                     return $ unlines $ show tp:res
                                 ) (Map.toList mem) >>= return.unlines
     where
-      dumpPlainCont (TDStruct tps _) (PlainStruct conts) limits = do
+      dumpPlainCont (TDStruct (Right (tps,_))) (PlainStruct conts) limits = do
         res <- mapM (\(tp,cont) -> dumpPlainCont tp cont limits) (zip tps conts)
         return $ "{ " ++ concat (intersperse ", " res) ++ " }"
       dumpPlainCont (TDArray len tp) plain limits = dumpPlainCont tp plain (limits++[len])
@@ -589,8 +589,8 @@ renderMemObject :: TypeDesc -> [BitVector BVUntyped] -> [String]
 renderMemObject tp bvs = snd $ renderMemObject' bvs tp
 
 renderMemObject' :: [BitVector BVUntyped] -> TypeDesc -> ([BitVector BVUntyped],[String])
-renderMemObject' bvs (TDStruct tps _) = let (rest,res) = mapAccumL renderMemObject' bvs tps
-                                        in (rest,"struct {":(fmap ("  "++) $ concat res)++["}"])
+renderMemObject' bvs (TDStruct (Right (tps,_))) = let (rest,res) = mapAccumL renderMemObject' bvs tps
+                                                  in (rest,"struct {":(fmap ("  "++) $ concat res)++["}"])
 renderMemObject' bvs (TDArray n tp) = let (rest,res) = mapAccumL renderMemObject' bvs (genericReplicate n tp)
                                       in (rest,"array {":(fmap ("  "++) $ concat res)++["}"])
 renderMemObject' bvs (TDVector n tp) = let (rest,res) = mapAccumL renderMemObject' bvs (genericReplicate n tp)
