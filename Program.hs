@@ -9,6 +9,7 @@ import Control.Monad.Trans
 import Data.Map as Map hiding (foldl)
 import Data.Set as Set hiding (foldl)
 import qualified Foreign.Marshal.Alloc as Alloc
+import Foreign.Ptr as FFI
 import Foreign.Storable
 import Language.SMTLib2
 import Prelude as P hiding (foldl,concat)
@@ -51,6 +52,29 @@ getProgram file = do
       ISwitch _ _ _ -> [cur++[i]]
       _ -> mkSubBlocks (cur++[i]) is
 
+getConstant :: FFI.ValueRef -> IO (MemContent,Bool)
+getConstant val 
+  = mkSwitch
+    [(FFI.isAConstantInt,\cint -> do
+         v <- FFI.constIntGetZExtValue cint
+         w <- FFI.constIntGetBitWidth cint
+         return (MemCell (fromIntegral w) (fromIntegral v),True))
+    ,(FFI.isAConstantPointerNull,\pnull -> do
+         return (MemNull,True))
+    ,(FFI.isAGlobalValue,mkSwitch [(FFI.isAGlobalVariable,\glob -> do
+                                       init <- FFI.globalVariableGetInitializer glob
+                                       getConstant init
+                                   )])
+    ,(FFI.isAUndefValue,\udef -> error "undef value")
+    ] val
+  where
+    mkSwitch ((chk,act):rest) val = do
+      res <- chk val
+      if res == FFI.nullPtr
+        then mkSwitch rest val
+        else act res
+    mkSwitch [] val = error "Unknown constant type."
+{-
 getConstant :: FFI.ValueRef -> IO (MemContent,Bool)
 getConstant val = do
   tp <- FFI.typeOf val >>= typeDesc2
@@ -95,7 +119,7 @@ getConstant val = do
                                        poke ptr (fromIntegral 0)
                                        FFI.constExtractValue val ptr 1
                                    )
-                 getConstant' tp v)
+                 getConstant' tp v)-}
 
 mergePrograms :: ProgDesc -> ProgDesc -> ProgDesc
 mergePrograms (p1,g1) (p2,g2) 

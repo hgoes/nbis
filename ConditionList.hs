@@ -5,6 +5,7 @@ import Language.SMTLib2
 data ConditionList a
   = CondIf a (SMTExpr Bool) (ConditionList a)
   | CondElse a
+  deriving (Eq)
 
 instance Show a => Show (ConditionList a) where
   show (CondIf x cond rest) = "if "++show cond++" then "++show x++" else ("++show rest++")"

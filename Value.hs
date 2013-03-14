@@ -8,57 +8,54 @@ import Data.Typeable
 import LLVM.Core
 import Data.Bits as Bits
 
-data Val m = ConstValue { asConst :: Integer
-                        , constWidth :: Integer }
-           | DirectValue { asValue :: SMTExpr (BitVector BVUntyped) }
-           | PointerValue { asPointer :: Pointer m }
-           | ConditionValue { asCondition :: SMTExpr Bool
-                            , conditionWidth :: Integer }
-           | ConstCondition { asConstCondition :: Bool }
+data Val ptr = ConstValue { asConst :: Integer
+                          , constWidth :: Integer }
+             | DirectValue { asValue :: SMTExpr (BitVector BVUntyped) }
+             | PointerValue { asPointer :: ptr }
+             | ConditionValue { asCondition :: SMTExpr Bool
+                              , conditionWidth :: Integer }
+             | ConstCondition { asConstCondition :: Bool }
              deriving (Typeable)
 
-instance Show (Val m) where
+instance Show (Val ptr) where
   show (ConstValue c _) = show c
   show (DirectValue dv) = show dv
   show (PointerValue _) = "<pointer>"
   show (ConditionValue c _) = show c
   show (ConstCondition c) = show c
 
-valValue :: Val m -> SMTExpr (BitVector BVUntyped)
+valValue :: Val ptr -> SMTExpr (BitVector BVUntyped)
 valValue (ConstValue x w) = constantAnn (BitVector x) w
 valValue (DirectValue x) = x
 valValue (ConditionValue x w) = ite x (constantAnn (BitVector 1) (fromIntegral w)) (constantAnn (BitVector 0) (fromIntegral w))
 valValue (ConstCondition x) = constantAnn (BitVector $ if x then 1 else 0) 1
 
-valCond :: Val m -> SMTExpr Bool
+valCond :: Val ptr -> SMTExpr Bool
 valCond (ConstValue x 1) = constant $ x==1
 valCond (ConstValue _  _) = error "A constant of bit-length > 1 is used in a condition"
 valCond (DirectValue x) = x .==. (constantAnn (BitVector 1) 1)
 valCond (ConditionValue x _) = x
 valCond (ConstCondition x) = constant x
 
-valEq :: MemoryModel m => m -> Val m -> Val m -> (SMTExpr Bool,m)
-valEq mem (ConstValue x _) (ConstValue y _) = (if x==y then constant True else constant False,mem)
-valEq mem (ConstValue x w) (DirectValue y) = (y .==. constantAnn (BitVector x) w,mem)
-valEq mem (DirectValue x) (ConstValue y w) = (x .==. constantAnn (BitVector y) w,mem)
-valEq mem (DirectValue v1) (DirectValue v2) = (v1 .==. v2,mem)
-valEq mem (PointerValue p1) (PointerValue p2) = memPtrEq mem p1 p2
-valEq mem (ConditionValue v1 _) (ConditionValue v2 _) = (v1 .==. v2,mem)
-valEq mem (ConditionValue v1 w1) (ConstValue v2 w2)
-  = (if v2 == 1
-     then v1
-     else not' v1,mem)
-valEq mem (ConstValue v1 _) (ConditionValue v2 _)
-  = (if v1 == 1
-     then v2
-     else not' v2,mem)
-valEq mem (ConditionValue v1 w) (DirectValue v2)
-  = (v1 .==. (v2 .==. (constantAnn (BitVector 1) (fromIntegral w))),mem)
-valEq mem (DirectValue v2) (ConditionValue v1 w) 
-  = (v1 .==. (v2 .==. (constantAnn (BitVector 1) (fromIntegral w))),mem)
-valEq mem (ConstCondition x) (ConstCondition y) = (constant (x == y),mem)
-valEq mem (ConstCondition x) (ConditionValue y _) = (if x then y else not' y,mem)
-valEq mem (ConditionValue x _) (ConstCondition y) = (if y then x else not' x,mem)
+valEq :: Val ptr -> Val ptr -> SMTExpr Bool
+valEq (ConstValue x _) (ConstValue y _) = constant $ x==y
+valEq (ConstValue x w) (DirectValue y) = y .==. constantAnn (BitVector x) w
+valEq (DirectValue x) (ConstValue y w) = x .==. constantAnn (BitVector y) w
+valEq (DirectValue v1) (DirectValue v2) = v1 .==. v2
+valEq (ConditionValue v1 _) (ConditionValue v2 _) = v1 .==. v2
+valEq (ConditionValue v1 w1) (ConstValue v2 w2) = if v2 == 1
+                                                  then v1
+                                                  else not' v1
+valEq (ConstValue v1 _) (ConditionValue v2 _) = if v1 == 1
+                                                then v2
+                                                else not' v2
+valEq (ConditionValue v1 w) (DirectValue v2)
+  = v1 .==. (v2 .==. (constantAnn (BitVector 1) (fromIntegral w)))
+valEq (DirectValue v2) (ConditionValue v1 w) 
+  = v1 .==. (v2 .==. (constantAnn (BitVector 1) (fromIntegral w)))
+valEq (ConstCondition x) (ConstCondition y) = constant (x == y)
+valEq (ConstCondition x) (ConditionValue y _) = if x then y else not' y
+valEq (ConditionValue x _) (ConstCondition y) = if y then x else not' x
 
 valSwitch :: [(Val m,SMTExpr Bool)] -> Val m
 valSwitch [(val,cond)] = val

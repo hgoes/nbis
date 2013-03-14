@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable,TypeFamilies,FlexibleContexts,RankNTypes,OverloadedStrings #-}
+{-# LANGUAGE DeriveDataTypeable,TypeFamilies,FlexibleContexts,RankNTypes,OverloadedStrings,ScopedTypeVariables #-}
 module Main where
 
 import Analyzation
@@ -12,8 +12,10 @@ import MemoryModel
 {-import MemoryModel.Untyped
 import MemoryModel.UntypedBlocks
 import MemoryModel.Typed
-import MemoryModel.Plain-}
-import MemoryModel.CBMCLike
+import MemoryModel.Plain
+import MemoryModel.CBMCLike-}
+import MemoryModel.Null
+import MemoryModel.Snow
 import Language.SMTLib2
 import Data.Typeable
 import Control.Monad.Trans
@@ -37,13 +39,15 @@ import qualified Foreign.Marshal.Alloc as Alloc
 import Text.Show
 import Data.Monoid
 import qualified Data.Graph.Inductive as Gr
-import Control.Monad.State (runStateT)
+import Control.Monad.State hiding (mapM,mapM_)
+import Control.Monad.RWS (runRWST)
 
 (!) :: (Show k,Ord k) => Map k a -> k -> a
 (!) mp k = case Map.lookup k mp of
              Nothing -> error $ "Couldn't find key "++show k++" in "++show (Map.keys mp)
              Just r -> r
 
+{-
 valSwitch :: MemoryModel m => m -> TypeDesc -> [(Val m,SMTExpr Bool)] -> SMT (Val m,m)
 valSwitch mem _ [(val,_)] = return (val,mem)
 valSwitch mem (TDPtr _) choices = do
@@ -59,7 +63,7 @@ newValue mem (TDPtr tp) = let (ptr,nmem) = memPtrNew mem
                           in return (PointerValue ptr,nmem)
 newValue mem tp = do
   v <- varAnn (fromIntegral $ bitWidth tp)
-  return (DirectValue v,mem)
+  return (DirectValue v,mem) -}
 
 data NodeId = IdStart { startFunction :: String }
             | IdEnd { endFunction :: String }
@@ -71,8 +75,6 @@ data NodeId = IdStart { startFunction :: String }
 
 data Node m = Node { nodeActivation :: SMTExpr Bool
                    , nodeActivationProxy :: SMTExpr Bool
-                   , nodeMemoryIn :: LocalMem m
-                   , nodeMemoryOut :: LocalMem m
                    , nodeType :: NodeType m
                    }
 
@@ -83,37 +85,41 @@ instance Show (Node m) where
     RealizedBlock { nodeBlock = blk
                   , nodeSubblock = sblk } -> blk++"."++show sblk
 
-data NodeType m 
+data NodeType ptr
   = RealizedStart { nodeStartName :: String
-                  , nodeArguments :: [(String,Val m)] }
+                  , nodeArguments :: [(String,Val ptr)] }
   | RealizedEnd { nodeEndFunctionNode :: Gr.Node
-                , nodeReturns :: Maybe (Val m) }
+                , nodeReturns :: Maybe (Val ptr) }
   | RealizedBlock { nodeFunctionNode :: Gr.Node
                   , nodeBlock :: String
                   , nodeSubblock :: Integer
-                  , nodeInput :: Map String (Val m)
+                  , nodeInput :: Map String (Val ptr)
                   , nodePhis :: Map String (SMTExpr Bool)
-                  , nodeOutput :: Map String (Val m)
-                  , nodeFinalization :: BlockFinalization m
+                  , nodeOutput :: Map String (Val ptr)
+                  , nodeFinalization :: BlockFinalization ptr
+                  , nodeMemProgram :: MemoryProgram ptr
                   , nodeWatchpoints :: [Watchpoint]
                   , nodeGuards :: [Guard]
                   }
     deriving (Show)
 
-data UnrollGraph gr m
+data UnrollGraph gr m ptr
   = UnrollGraph { allFunctions :: Map String ([(String,TypeDesc)],TypeDesc,
                                               [(String,[(BlockSig,[Instruction])])],
                                               Map String TypeDesc
                                              )
                 , globalMemory :: m
-                , globalPointers :: Map String (Pointer m)
+                , globalPointers :: Map String ptr
                 , nodeInstances :: Map NodeId [Gr.Node]
-                , nodeGraph :: gr (Node m) (Transition m)
+                , nodeGraph :: gr (Node ptr) (Transition ptr)
                 , startNode :: Gr.Node
                 , nextNode :: Gr.Node
-                , queuedNodes :: [QueueEntry m]
+                , nextPointer :: ptr
+                , queuedNodes :: [QueueEntry ptr]
                 , delayedNodes :: [DelayedReturn]
                 }
+
+type Unrollment gr m ptr = StateT (UnrollGraph gr m ptr) SMT
 
 data DelayedReturn = DelayedReturn { callingNode :: Gr.Node
                                    , callingFunction :: String
@@ -123,17 +129,17 @@ data DelayedReturn = DelayedReturn { callingNode :: Gr.Node
                                    , callReturnsTo :: String
                                    } deriving Show
 
-data QueueEntry m = QueueEntry { queuedNode :: NodeId
-                               , incomingNode :: Gr.Node
-                               , incomingReadNode :: Gr.Node
-                               , incomingEdge :: Transition m
-                               } deriving Show
+data QueueEntry ptr = QueueEntry { queuedNode :: NodeId
+                                 , incomingNode :: Gr.Node
+                                 , incomingReadNode :: Gr.Node
+                                 , incomingEdge :: Transition ptr
+                                 } deriving Show
 
-data Transition m = TBegin
-                  | TJump (Maybe (SMTExpr Bool))
-                  | TCall [Val m]
-                  | TReturn (Maybe (Val m))
-                  | TDeliver String
+data Transition ptr = TBegin
+                    | TJump (Maybe (SMTExpr Bool))
+                    | TCall [Val ptr]
+                    | TReturn (Maybe (Val ptr))
+                    | TDeliver String
 
 instance Show (Transition m) where
   showsPrec _ TBegin = id
@@ -145,13 +151,23 @@ instance Show (Transition m) where
     Just v -> showString "retval"
   showsPrec p (TDeliver to) = id
 
+newValue :: Enum ptr => TypeDesc -> Unrollment gr m ptr (Val ptr)
+newValue (TDPtr tp) = do
+  st <- get
+  let ptr = nextPointer st
+  put $ st { nextPointer = succ ptr }
+  return $ PointerValue ptr
+newValue tp = do
+  v <- lift $ varNamedAnn "inputVar" (fromIntegral $ bitWidth tp)
+  return (DirectValue v)
+
 isForwardJump :: String -> String -> [(String,a)] -> Bool
 isForwardJump from to ((trg,_):rest)
   | trg == from = True
   | trg == to = False
   | otherwise = isForwardJump from to rest
 
-nodeSuccessors :: Gr.Graph gr => UnrollGraph gr m -> Gr.Node -> [QueueEntry m]
+nodeSuccessors :: Gr.Graph gr => UnrollGraph gr m ptr -> Gr.Node -> [QueueEntry ptr]
 nodeSuccessors gr nd = case Gr.lab (nodeGraph gr) nd of
   Nothing -> error "nbis internal error: nodeSuccessors called with unknown node."
   Just st -> case nodeType st of
@@ -186,7 +202,7 @@ nodeSuccessors gr nd = case Gr.lab (nodeGraph gr) nd of
                                             , incomingEdge = TCall args
                                             } ]
 
-updateDelayed :: Gr.Graph gr => UnrollGraph gr m -> Gr.Node -> [DelayedReturn] -> ([QueueEntry m],[DelayedReturn])
+updateDelayed :: Gr.Graph gr => UnrollGraph gr m ptr -> Gr.Node -> [DelayedReturn] -> ([QueueEntry ptr],[DelayedReturn])
 updateDelayed gr nd delayed
   = case Gr.lab (nodeGraph gr) nd of
     Just (Node { nodeType = RealizedEnd fnode _ }) -> update' fnode delayed
@@ -206,42 +222,42 @@ updateDelayed gr nd delayed
                               }:qs,dels')
              else (qs,del:dels)
 
-makeNode :: (MemoryModel m,Gr.DynGraph gr)
-            => UnrollGraph gr m
-            -> Maybe Gr.Node
+makeNode :: (Gr.DynGraph gr,Enum ptr,MemoryModel m ptr)
+            => Maybe Gr.Node
             -> NodeId 
-            -> SMT (Gr.Node,UnrollGraph gr m)
-makeNode gr from nid = do
+            -> Unrollment gr m ptr Gr.Node
+makeNode from nid = do
   let act_name = case nid of
         IdStart fun -> "start_"++fun
         IdEnd fun -> "end_"++fun
         IdBlock fun blk sblk -> "act_"++fun++"_"++blk++"_"++show sblk
-  act <- varNamed act_name
-  mem_in <- memInit (globalMemory gr)
-  (node_type,mem,mem_out) <- case nid of
+  act <- lift $ varNamed act_name
+  (node_type,prog) <- case nid of
     IdStart fun -> do
+      gr <- get
       let (args,rtp,blks,_) = (allFunctions gr)!fun
-          makeArgs [] cmem = return ([],cmem)
-          makeArgs ((name,tp):rest) cmem = do
-            (val,cmem') <- newValue cmem tp
-            (rest',cmem'') <- makeArgs rest cmem'
-            return ((name,val):rest',cmem'')
-      (args',mem') <- makeArgs args (globalMemory gr)
-      mem_out <- memInit mem'
-      return (RealizedStart fun args',mem',mem_out)
+      args' <- mapM (\(name,tp) -> do
+                        val <- newValue tp 
+                        return (name,val)) args
+      {-let io_p = mapMaybe (\(name,val) -> case val of
+                              PointerValue ptr -> Just ptr
+                              _ -> Nothing
+                          ) args'-}
+      return (RealizedStart fun args',[])
     IdEnd fun -> do
+      gr <- get
       let (args,rtp,blks,_) = (allFunctions gr)!fun
           Just pnode = from
           Just (Node { nodeType = RealizedBlock { nodeFunctionNode = fnode } })
             = Gr.lab (nodeGraph gr) pnode
-      (rv,mem') <- case rtp of
-        TDVoid -> return (Nothing,globalMemory gr)
+      rv <- case rtp of
+        TDVoid -> return Nothing
         _ -> do
-          (v,mem') <- newValue (globalMemory gr) rtp
-          return (Just v,mem')
-      mem_out <- memInit mem'
-      return (RealizedEnd fnode rv,mem',mem_out)
+          v <- newValue rtp
+          return (Just v)
+      return (RealizedEnd fnode rv,[])
     IdBlock fun blk sblk -> do
+      gr <- get
       let (args,rtp,blks,pred) = (allFunctions gr)!fun
           Just (_,subs) = List.find (\(name,_) 
                                      -> name == blk
@@ -254,61 +270,56 @@ makeNode gr from nid = do
             RealizedStart _ _ -> fnid
             RealizedBlock { nodeFunctionNode = n } -> n
           Just (Node { nodeType = RealizedStart _ fun_args }) = Gr.lab (nodeGraph gr) ffid
-          mkVars [] cmem = return ([],cmem)
-          mkVars ((name,tp):rest) cmem = do
-            (val,nmem1) <- newValue cmem tp
-            (vals,nmem2) <- mkVars rest nmem1
-            return ((name,val):vals,nmem2)
-      (inps,mem1) <- mkVars (Map.toList (blockInputs sig)) (globalMemory gr)
+      inps <- mapM newValue (blockInputs sig)
       let allPhis = foldl (\s (_,s') -> Set.union s s') Set.empty (blockPhis sig)
       phis <- fmap Map.fromList $
-              mapM (\from -> do
-                       phi_cond <- varNamed "phi"
-                       return (from,phi_cond)
-                   ) (Set.toList allPhis)
-      --(phi_inps,mem2) <- mkVars (Map.toList $ fmap fst $ blockPhis sig) mem1
-      let all_inp = Map.fromList inps --Map.union (Map.fromList inps) (Map.fromList phi_inps)
-          env = RealizationEnv { reFunction = fun
+              lift $ mapM (\from -> do
+                              phi_cond <- varNamed "phi"
+                              return (from,phi_cond)
+                          ) (Set.toList allPhis)
+      let env = RealizationEnv { reFunction = fun
                                , reBlock = blk
                                , reSubblock = sblk
                                , reActivation = act
-                               , reMemChanged = False
-                               , reGlobalMem = mem1
-                               , reLocalMem = mem_in
                                , reGlobals = globalPointers gr
                                , reArgs = Map.fromList fun_args
-                               , reLocals = all_inp
                                , rePhis = phis
-                               , reWatchpoints = []
-                               , reGuards = []
                                , rePrediction = pred
                                }
-      (fin,nenv) <- runStateT (realizeInstructions instrs) env
+          st = RealizationState { reLocals = inps
+                                , reNextPtr = nextPointer gr
+                                }
+      (fin,nst,outp) <- lift $ runRWST (realizeInstructions instrs) env st
+      put $ gr { nextPointer = reNextPtr nst }
       return (RealizedBlock { nodeFunctionNode = ffid
                             , nodeBlock = blk
                             , nodeSubblock = sblk
-                            , nodeInput = all_inp
+                            , nodeInput = inps
                             , nodePhis = phis
-                            , nodeOutput = reLocals nenv
+                            , nodeOutput = reLocals nst
                             , nodeFinalization = fin
-                            , nodeWatchpoints = reWatchpoints nenv
-                            , nodeGuards = reGuards nenv
-                            },reGlobalMem nenv,reLocalMem nenv)
-  let node_graph' = Gr.insNode (nextNode gr,Node { nodeActivation = act
-                                                 , nodeActivationProxy = act
-                                                 , nodeMemoryIn = mem_in
-                                                 , nodeMemoryOut = mem_out
-                                                 , nodeType = node_type })
-                    (nodeGraph gr)
-  return (nextNode gr,gr { nodeGraph = node_graph'
-                         , nextNode = (nextNode gr) + 1
-                         , globalMemory = mem
-                         })
+                            , nodeMemProgram = reMemInstrs outp
+                            , nodeWatchpoints = reWatchpoints outp
+                            , nodeGuards = reGuards outp
+                            },reMemInstrs outp)
+  ngr <- get
+  let node_graph' = Gr.insNode (nextNode ngr,
+                                Node { nodeActivation = act
+                                     , nodeActivationProxy = act
+                                     , nodeType = node_type })
+                    (nodeGraph ngr)
+  nmem <- lift $ addProgram (globalMemory ngr) (nextNode ngr) prog
+  put $ ngr { nodeGraph = node_graph'
+            , nextNode = succ (nextNode ngr)
+            , globalMemory = nmem
+            }
+  return $ nextNode ngr
 
-connectNodes :: (Gr.DynGraph gr,MemoryModel m) 
-                => Gr.Node -> Gr.Node -> Transition m -> Gr.Node 
-                -> UnrollGraph gr m -> SMT (UnrollGraph gr m)
-connectNodes from read_from trans to gr = do
+connectNodes :: (Gr.DynGraph gr,MemoryModel m ptr)
+                => Gr.Node -> Gr.Node -> Transition ptr -> Gr.Node 
+                -> Unrollment gr m ptr ()
+connectNodes from read_from trans to = do
+  gr <- get
   let Just nd_from = Gr.lab (nodeGraph gr) from
       nd_read_from = if from==read_from
                      then nd_from
@@ -345,102 +356,94 @@ connectNodes from read_from trans to gr = do
               (Just r1,Just r2) -> [(r2,r1)]
           Call f args del -> case nodeType nd_to of
             RealizedStart _ args' -> zipWith (\(_,arg_i) arg_o -> (arg_i,arg_o)) args' args
-      mkEqs cond [] cmem = return cmem
-      mkEqs cond ((PointerValue p1,PointerValue p2):vs) cmem = do
-        cmem' <- memPtrExtend cmem p1 p2 cond
-        mkEqs cond vs cmem'
-      mkEqs cond ((v1,v2):vs) cmem = do
-        let (b,cmem') = valEq cmem v1 v2
-        assert $ cond .=>. b
-        mkEqs cond vs cmem'
-  nproxy <- varNamed "proxy"
-  assert $ nodeActivationProxy nd_to .==. (cond .||. nproxy)
-  mem' <- mkEqs cond eqs (globalMemory gr)
+  nproxy <- lift $ varNamed "proxy"
+  lift $ assert $ nodeActivationProxy nd_to .==. (cond .||. nproxy)
+  let (ptr_eqs,val_eqs) = foldr (\pair (ptr_eqs,val_eqs) -> case pair of
+                                    (PointerValue p1,PointerValue p2) -> ((p1,p2):ptr_eqs,val_eqs)
+                                    _ -> (ptr_eqs,pair:val_eqs)
+                                ) ([],[]) eqs
+  mapM_ (\(v1,v2) -> lift $ assert $ cond .=>. valEq v1 v2) val_eqs
+  mem' <- lift $ connectPrograms (globalMemory gr) cond from to ptr_eqs
   case nodeType nd_from of
     RealizedBlock { nodeBlock = blk } -> case nodeType nd_to of
       RealizedBlock { nodePhis = phis } 
-        -> assert $ cond .=>. app and' [ if blk==blk' 
-                                         then cond'
-                                         else not' cond'
-                                       | (blk',cond') <- Map.toList phis ]
+        -> lift $ assert $ 
+           cond .=>. app and' [ if blk==blk' 
+                                then cond'
+                                else not' cond'
+                              | (blk',cond') <- Map.toList phis ]
       _ -> return ()
     _ -> return ()
-  (nloc,mem'') <- memEq mem' cond (nodeMemoryOut nd_from) (nodeMemoryIn nd_to)
-  return $ gr { nodeGraph = (in_to,to,nd_to { nodeActivationProxy = nproxy 
-                                            , nodeMemoryIn = nloc },out_to) Gr.& gr1
-              , globalMemory = mem'' }
+  put $ gr { nodeGraph = (in_to,to,nd_to { nodeActivationProxy = nproxy },out_to) Gr.& gr1
+           , globalMemory = mem' }
 
-targetNode :: (Gr.DynGraph gr,MemoryModel m) 
-              => UnrollGraph gr m
-              -> Gr.Node -> NodeId 
-              -> SMT (Gr.Node,Bool,UnrollGraph gr m)
-targetNode gr from to 
-  = case getNode Nothing insts of
+targetNode :: (Gr.DynGraph gr,Enum ptr,MemoryModel m ptr)
+              => Gr.Node -> NodeId 
+              -> Unrollment gr m ptr (Gr.Node,Bool)
+targetNode from to = do
+  gr <- get
+  case getNode gr Nothing (insts gr) of
     Nothing -> do
-      (nd,gr1) <- makeNode gr (Just from) to
-      return 
-        (nd,True,
-         gr1 { nodeInstances 
-                 = Map.alter (\minsts -> case minsts of
-                                 Nothing -> Just [nd]
-                                 Just nds -> Just $ nd:nds
-                             ) to 
-                   (nodeInstances gr1)
-             })
-    Just nd -> return (nd,False,gr)
+      nd <- makeNode (Just from) to
+      modify $ \gr -> gr { nodeInstances = Map.alter (\minsts -> case minsts of
+                                                         Nothing -> Just [nd]
+                                                         Just nds -> Just $ nd:nds
+                                                     ) to 
+                                           (nodeInstances gr) }
+      return (nd,True)
+    Just nd -> return (nd,False)
   where
-    insts = case Map.lookup to (nodeInstances gr) of
+    insts gr = case Map.lookup to (nodeInstances gr) of
       Nothing -> []
       Just i -> i
-    getNode res [] = res
-    getNode res (x:xs) 
+    getNode gr res [] = res
+    getNode gr res (x:xs) 
       = let ngr = Gr.insEdge (from,x,undefined) (nodeGraph gr)
         in if all (\x -> case x of
                       [_] -> True
                       _ -> False
                   ) (Gr.scc ngr) && not (Gr.hasLoop ngr)
-           then getNode (Just x) xs
+           then getNode gr (Just x) xs
            else res
 
-incrementGraph :: (Gr.DynGraph gr,MemoryModel m)
-                  => UnrollGraph gr m
-                  -> SMT (UnrollGraph gr m)
-incrementGraph gr
-  = case queuedNodes gr of
+incrementGraph :: (Gr.DynGraph gr,Enum ptr,MemoryModel m ptr)
+                  => Unrollment gr m ptr ()
+incrementGraph = do
+  gr <- get
+  case queuedNodes gr of
     [] -> error "incrementGraph: Nothing more to realize."
     (x:xs) -> do
-      -- Remove element from queue and determine
-      -- the target node.
-      (nd,new,gr1) <- targetNode 
-                      (gr { queuedNodes = xs })
-                      (incomingNode x)
-                      (queuedNode x) 
+      -- Remove element from queue 
+      put $ gr { queuedNodes = xs }
+      -- and determine the target node
+      (nd,new) <- targetNode (incomingNode x) (queuedNode x) 
       -- Connect the nodes
-      gr2 <- connectNodes (incomingNode x) 
-             (incomingReadNode x) 
-             (incomingEdge x) nd gr1
+      connectNodes (incomingNode x) 
+        (incomingReadNode x)
+        (incomingEdge x) nd
       -- Add an edge to the node graph
-      let gr3 = gr2 { nodeGraph 
-                        = Gr.insEdge (incomingNode x,nd,
-                                      incomingEdge x)
-                          (nodeGraph gr2) }
-          (qs1,ndl) = updateDelayed gr3 nd 
-                      (delayedNodes gr3)
-          qs2 = if new then nodeSuccessors gr3 nd
+      modify $ \gr -> gr { nodeGraph = Gr.insEdge (incomingNode x,nd,
+                                                   incomingEdge x)
+                                       (nodeGraph gr) }
+      -- Update delayed nodes
+      gr <- get
+      let (qs1,ndl) = updateDelayed gr nd (delayedNodes gr)
+          qs2 = if new then nodeSuccessors gr nd
                 else []
-      return (gr3 { queuedNodes = (queuedNodes gr3) ++ 
-                                  qs1 ++ qs2
-                  , delayedNodes = ndl })
+      put $ gr { queuedNodes = (queuedNodes gr) ++ 
+                               qs1 ++ qs2
+               , delayedNodes = ndl }
 
-unrollGraphComplete :: UnrollGraph gr m -> Bool
+unrollGraphComplete :: UnrollGraph gr m ptr -> Bool
 unrollGraphComplete gr = case queuedNodes gr of
   [] -> True
   _ -> False
 
-initialGraph :: (MemoryModel m,Gr.DynGraph gr) 
+unrollProgram :: (Gr.DynGraph gr,Integral ptr,MemoryModel m ptr)
                 => ProgDesc -> String 
-                -> SMT (UnrollGraph gr m)
-initialGraph prog@(funs,globs) init = do
+                -> Unrollment gr m ptr a 
+                -> SMT a
+unrollProgram prog@(funs,globs) init (f::Unrollment gr m ptr a) = do
   let (init_args,_,init_blks) = funs!init
       tps = getProgramTypes prog
       globs_mp = fmap (\(tp,_,_) -> tp) globs
@@ -456,51 +459,53 @@ initialGraph prog@(funs,globs) init = do
                              predictMallocUse (concat [ instrs | (_,sblks) <- blks, instrs <- sblks ])
                             )
                      ) funs
-      {-mkPointers ptrs [] cmem = (ptrs,cmem)
-      mkPointers ptrs ((name,(tp,_,_)):rest) cmem 
-        = let (ptr,cmem') = memPtrNull cmem
-          in mkPointers (Map.insert name ptr ptrs) rest cmem'-}
-      mkPointers ptrs [] cmem lmem = return (ptrs,cmem,lmem)
-      mkPointers ptrs ((name,(tp,cont,_)):rest) cmem lmem = do
-        (ptr,cmem',lmem') <- memAlloc tp (Left (typeWidth tp)) (Just cont) cmem lmem
-        mkPointers (Map.insert name ptr ptrs) rest cmem' lmem'
-  mem0 <- memNew tps
-  lmem0 <- memInit mem0
-  (ptrs,mem1,lmem1) <- mkPointers Map.empty (Map.toList globs) mem0 lmem0
+  mem0 <- memNew (undefined::ptr) tps
+  let ((cptr,prog),globs') = mapAccumL (\(ptr',prog') (tp,cont,_) 
+                                        -> ((succ ptr',(ptr',cont):prog'),ptr')
+                                       ) (0,[]) globs
+  mem1 <- foldlM (\cmem (ptr,cont) -> addGlobal cmem ptr cont) mem0 prog
   let gr0 = UnrollGraph { allFunctions = allfuns
                         , globalMemory = mem1
-                        , globalPointers = ptrs
+                        , globalPointers = globs'
                         , nodeInstances = Map.empty
                         , nodeGraph = Gr.empty
                         , startNode = 0
                         , nextNode = 0
+                        , nextPointer = cptr
                         , queuedNodes = []
                         , delayedNodes = []
                         }
-  (nd,gr1) <- makeNode gr0 Nothing (IdStart { startFunction = init })
+  evalStateT (do
+                 nd_start <- makeNode Nothing (IdStart { startFunction = init })
+                 modify $ \gr -> gr { startNode = nd_start 
+                                    , queuedNodes = nodeSuccessors gr nd_start }
+                 f) gr0
+  
+  {-(nd,gr1) <- makeNode gr0 Nothing (IdStart { startFunction = init })
   return (gr1 { queuedNodes = nodeSuccessors gr1 nd
-              , startNode = nd })
+              , startNode = nd })-}
 
-renderNodeGraph :: (Gr.Graph gr) => UnrollGraph gr m -> String
+renderNodeGraph :: (Gr.Graph gr) => UnrollGraph gr m ptr -> String
 renderNodeGraph gr = Gr.graphviz (nodeGraph gr) "nbis" (16,10) (1,1) Gr.Portrait
 
-checkGraph :: (Gr.Graph gr,MemoryModel m) => UnrollGraph gr m -> SMT (Maybe (ErrorDesc,[String]))
-checkGraph gr = stack $ do
-  -- Set all proxies to false (except for the start node)
-  mapM_ (\(nd_id,nd) -> if nd_id == startNode gr
-                        then assert $ nodeActivationProxy nd
-                        else assert $ not' $ nodeActivationProxy nd
-        ) (Gr.labNodes (nodeGraph gr))
+checkGraph :: (Gr.Graph gr) => UnrollGraph gr m ptr -> SMT (Maybe (ErrorDesc,[String]))
+checkGraph gr = do
   let errs = concat $ fmap (\(_,nd) -> case nodeType nd of
                                RealizedBlock { nodeGuards = g } -> g
                                _ -> []) (Gr.labNodes (nodeGraph gr))
       watchs = concat $ fmap (\(_,nd) -> case nodeType nd of
                                  RealizedBlock { nodeWatchpoints = w } -> w
                                  _ -> []) (Gr.labNodes (nodeGraph gr))
-  liftIO $ putStrLn $ "Checking "++show (length errs)++" errors..."
   if Prelude.null errs
     then return Nothing
-    else (do
+    else (stack $ do
+             -- Set all proxies to false (except for the start node)
+             mapM_ (\(nd_id,nd) -> if nd_id == startNode gr
+                                   then assert $ nodeActivationProxy nd
+                                   else assert $ not' $ nodeActivationProxy nd
+                   ) (Gr.labNodes (nodeGraph gr))
+
+             liftIO $ putStrLn $ "Checking "++show (length errs)++" errors..."
              assert $ app or' $ fmap (\(_,cond) -> cond) $ errs
              res <- checkSat
              if res
@@ -539,32 +544,32 @@ main = do
                     Just bin -> bin) $ do
     setOption (PrintSuccess False)
     setOption (ProduceModels True)
-    case memoryModelOption opts of
-      _ -> perform program (entryPoint opts) (bmcDepth opts) (checkUser opts) (checkMemoryAccess opts) 
-           :: SMT (UnrollGraph Gr.Gr (Memory Gr.Gr))
+    unrollProgram program (entryPoint opts) $ case memoryModelOption opts of
+      _ -> perform (bmcDepth opts) (checkUser opts) (checkMemoryAccess opts) :: Unrollment Gr.Gr (SnowMemory Integer) Integer ()
     return ()
   where
-    {-perform :: (MemoryModel mem,DynGraph gr)
-               => ProgDesc -> String -> Integer -> Bool -> Bool -> SMT (StateGraph gr mem Integer cont)-}
-    perform program entry depth check_user check_mem = do
-      gr <- initialGraph program entry
-      check gr 0 depth
+    perform depth check_user check_mem 
+      = check 0 depth
       
-    check gr i depth
-      | i == depth = return gr
-      | unrollGraphComplete gr = return gr
+    check i depth
+      | i == depth = return ()
       | otherwise = do
-        liftIO $ putStrLn $ "Step "++show i++":"
-        --liftIO $ print $ queuedNodes gr
-        --liftIO $ print $ delayedNodes gr
-        --liftIO $ putStrLn $ "Realizing "++show (queuedState $ head $ queue gr')++"("++show (incomingEdge $ head $ queue gr')++")"
-        liftIO $ putStrLn $ memDebug (globalMemory gr)
-        ngr <- incrementGraph gr
-        res <- checkGraph ngr
-        --liftIO $ writeFile ("graph"++show i++".dot") (renderNodeGraph ngr)
-        case res of
-          Nothing -> check ngr (i+1) depth
-          Just (err,watch) -> do
-            liftIO $ putStrLn $ "Error "++show err++" found."
-            mapM_ (\str -> liftIO $ putStrLn str) watch
-            return ngr
+        gr <- get
+        if unrollGraphComplete gr 
+          then return ()
+          else (do
+                   liftIO $ putStrLn $ "Step "++show i++":"
+                   --liftIO $ print $ queuedNodes gr
+                   --liftIO $ print $ delayedNodes gr
+                   --liftIO $ putStrLn $ "Realizing "++show (queuedState $ head $ queue gr')++"("++show (incomingEdge $ head $ queue gr')++")"
+                   --liftIO $ putStrLn $ memDebug (globalMemory gr)
+                   incrementGraph
+                   ngr <- get
+                   res <- lift $ checkGraph ngr
+                   --liftIO $ writeFile ("graph"++show i++".dot") (renderNodeGraph ngr)
+                   case res of
+                     Nothing -> check (i+1) depth
+                     Just (err,watch) -> do
+                       liftIO $ putStrLn $ "Error "++show err++" found."
+                       mapM_ (\str -> liftIO $ putStrLn str) watch
+                       return ())
