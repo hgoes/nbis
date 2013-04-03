@@ -2,11 +2,11 @@
 module MemoryModel where
 
 import Language.SMTLib2
-import LLVM.Core (TypeDesc(..))
 import Data.Typeable
 import Data.Unit
 import Data.List (genericSplitAt,genericReplicate)
 import Data.Set as Set
+import TypeDesc
 
 data MemContent = MemCell Integer Integer
                 | MemArray [MemContent]
@@ -51,32 +51,32 @@ flattenMemContent (MemCell w v) = [(w,v)]
 flattenMemContent (MemArray xs) = concat $ fmap flattenMemContent xs
 
 typeWidth :: TypeDesc -> Integer
-typeWidth (TDInt _ w)
+typeWidth (IntegerType w)
   | w `mod` 8 == 0 = w `div` 8
   | otherwise = error $ "typeWidth called for "++show w
-typeWidth (TDArray n tp) = n*(typeWidth tp)
-typeWidth (TDStruct (Right (tps,_))) = sum (fmap typeWidth tps)
+typeWidth (ArrayType n tp) = n*(typeWidth tp)
+typeWidth (StructType (Right tps)) = sum (fmap typeWidth tps)
 typeWidth tp = error $ "No typeWidth for "++show tp
 
 bitWidth :: TypeDesc -> Integer
-bitWidth (TDInt _ w) = w
-bitWidth (TDArray n tp) = n*(bitWidth tp)
-bitWidth (TDStruct (Right (tps,_))) = sum (fmap bitWidth tps)
+bitWidth (IntegerType w) = w
+bitWidth (ArrayType n tp) = n*(bitWidth tp)
+bitWidth (StructType (Right tps)) = sum (fmap bitWidth tps)
 bitWidth tp = error $ "No bitWidth for "++show tp
 
 getOffset :: (TypeDesc -> Integer) -> TypeDesc -> [Integer] -> Integer
 getOffset width tp idx = getOffset' tp idx 0
     where
       getOffset' _ [] off = off
-      getOffset' (TDPtr tp) (i:is) off = getOffset' tp is (off + i*(width tp))
-      getOffset' (TDStruct (Right (tps,_))) (i:is) off = let (pre,tp:_) = genericSplitAt i tps
+      getOffset' (PointerType tp) (i:is) off = getOffset' tp is (off + i*(width tp))
+      getOffset' (StructType (Right tps)) (i:is) off = let (pre,tp:_) = genericSplitAt i tps
                                                          in getOffset' tp is (off + sum (fmap width pre))
-      getOffset' (TDArray _ tp) (i:is) off = getOffset' tp is (off + i*(width tp))
+      getOffset' (ArrayType _ tp) (i:is) off = getOffset' tp is (off + i*(width tp))
 
 --getDynamicOffset :: (TypeDesc -> Integer) -> TypeDesc -> [Either Integer 
 
 flattenType :: TypeDesc -> [TypeDesc]
-flattenType (TDStruct (Right (tps,_))) = concat $ fmap flattenType tps
-flattenType (TDArray n tp) = concat $ genericReplicate n (flattenType tp)
-flattenType (TDVector n tp) = concat $ genericReplicate n (flattenType tp)
+flattenType (StructType (Right tps)) = concat $ fmap flattenType tps
+flattenType (ArrayType n tp) = concat $ genericReplicate n (flattenType tp)
+flattenType (VectorType n tp) = concat $ genericReplicate n (flattenType tp)
 flattenType tp = [tp]

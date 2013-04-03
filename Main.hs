@@ -7,6 +7,8 @@ import Realization
 import ConditionList
 import Options
 import Program
+import TypeDesc
+import InstrDesc
 
 import MemoryModel
 {-import MemoryModel.Untyped
@@ -20,9 +22,6 @@ import Control.Monad.Trans
 import Data.List as List (genericLength,genericReplicate,genericSplitAt,zip4,zipWith4,zipWith5,null,lookup,find,genericIndex)
 import Data.Map as Map hiding (foldl,foldr,(!),mapMaybe)
 import Data.Set as Set hiding (foldl,foldr)
-import LLVM.Core
-import LLVM.Pretty
-import qualified LLVM.FFI.Core as FFI
 import Debug.Trace
 import Prelude hiding (foldl,concat,mapM_,any,foldr,mapM,foldl1,all)
 import Data.Foldable
@@ -39,6 +38,11 @@ import Data.Monoid
 import qualified Data.Graph.Inductive as Gr
 import Control.Monad.State (runStateT)
 
+import LLVM.FFI.BasicBlock
+import LLVM.FFI.Value
+import LLVM.FFI.Instruction
+import LLVM.FFI.Constant
+
 (!) :: (Show k,Ord k) => Map k a -> k -> a
 (!) mp k = case Map.lookup k mp of
              Nothing -> error $ "Couldn't find key "++show k++" in "++show (Map.keys mp)
@@ -46,7 +50,7 @@ import Control.Monad.State (runStateT)
 
 valSwitch :: MemoryModel m => m -> TypeDesc -> [(Val m,SMTExpr Bool)] -> SMT (Val m,m)
 valSwitch mem _ [(val,_)] = return (val,mem)
-valSwitch mem (TDPtr _) choices = do
+valSwitch mem (PointerType _) choices = do
   (res,mem') <- memPtrSwitch mem [ (ptr,cond) | (PointerValue ptr,cond) <- choices ]
   return $ (PointerValue res,mem')
 valSwitch mem tp choices = return (DirectValue $ mkSwitch choices,mem)
@@ -55,8 +59,8 @@ valSwitch mem tp choices = return (DirectValue $ mkSwitch choices,mem)
     mkSwitch ((val,cond):rest) = ite cond (valValue val) (mkSwitch rest)
 
 newValue :: MemoryModel mem => mem -> TypeDesc -> SMT (Val mem,mem)
-newValue mem (TDPtr tp) = let (ptr,nmem) = memPtrNew mem
-                          in return (PointerValue ptr,nmem)
+newValue mem (PointerType tp) = let (ptr,nmem) = memPtrNew mem
+                                in return (PointerValue ptr,nmem)
 newValue mem tp = do
   v <- varAnn (fromIntegral $ bitWidth tp)
   return (DirectValue v,mem)
@@ -64,7 +68,7 @@ newValue mem tp = do
 data NodeId = IdStart { startFunction :: String }
             | IdEnd { endFunction :: String }
             | IdBlock { idFunction :: String
-                      , idBlock :: String
+                      , idBlock :: Ptr BasicBlock
                       , idSubblock :: Integer 
                       }
             deriving (Eq,Ord,Show)
@@ -81,19 +85,19 @@ instance Show (Node m) where
     RealizedStart fun _ -> "start "++fun
     RealizedEnd _ _ -> "end"
     RealizedBlock { nodeBlock = blk
-                  , nodeSubblock = sblk } -> blk++"."++show sblk
+                  , nodeSubblock = sblk } -> show blk++"."++show sblk
 
 data NodeType m 
   = RealizedStart { nodeStartName :: String
-                  , nodeArguments :: [(String,Val m)] }
+                  , nodeArguments :: [(Ptr Argument,Val m)] }
   | RealizedEnd { nodeEndFunctionNode :: Gr.Node
                 , nodeReturns :: Maybe (Val m) }
   | RealizedBlock { nodeFunctionNode :: Gr.Node
-                  , nodeBlock :: String
+                  , nodeBlock :: Ptr BasicBlock
                   , nodeSubblock :: Integer
-                  , nodeInput :: Map String (Val m)
-                  , nodePhis :: Map String (SMTExpr Bool)
-                  , nodeOutput :: Map String (Val m)
+                  , nodeInput :: Map (Ptr Instruction) (Val m)
+                  , nodePhis :: Map (Ptr BasicBlock) (SMTExpr Bool)
+                  , nodeOutput :: Map (Ptr Instruction) (Val m)
                   , nodeFinalization :: BlockFinalization m
                   , nodeWatchpoints :: [Watchpoint]
                   , nodeGuards :: [Guard]
@@ -101,12 +105,12 @@ data NodeType m
     deriving (Show)
 
 data UnrollGraph gr m
-  = UnrollGraph { allFunctions :: Map String ([(String,TypeDesc)],TypeDesc,
-                                              [(String,[(BlockSig,[Instruction])])],
-                                              Map String TypeDesc
+  = UnrollGraph { allFunctions :: Map String ([(Ptr Argument,TypeDesc)],TypeDesc,
+                                              [(Ptr BasicBlock,[(BlockSig,[InstrDesc Operand])])],
+                                              Map (Ptr Instruction) TypeDesc
                                              )
                 , globalMemory :: m
-                , globalPointers :: Map String (Pointer m)
+                , globalPointers :: Map (Ptr GlobalVariable) (Pointer m)
                 , nodeInstances :: Map NodeId [Gr.Node]
                 , nodeGraph :: gr (Node m) (Transition m)
                 , startNode :: Gr.Node
@@ -117,10 +121,10 @@ data UnrollGraph gr m
 
 data DelayedReturn = DelayedReturn { callingNode :: Gr.Node
                                    , callingFunction :: String
-                                   , callingBlock :: String
+                                   , callingBlock :: Ptr BasicBlock
                                    , callingSubblock :: Integer
                                    , calledNode :: Gr.Node
-                                   , callReturnsTo :: String
+                                   , callReturnsTo :: Ptr Instruction
                                    } deriving Show
 
 data QueueEntry m = QueueEntry { queuedNode :: NodeId
@@ -133,7 +137,7 @@ data Transition m = TBegin
                   | TJump (Maybe (SMTExpr Bool))
                   | TCall [Val m]
                   | TReturn (Maybe (Val m))
-                  | TDeliver String
+                  | TDeliver (Ptr Instruction)
 
 instance Show (Transition m) where
   showsPrec _ TBegin = id
@@ -215,7 +219,7 @@ makeNode gr from nid = do
   let act_name = case nid of
         IdStart fun -> "start_"++fun
         IdEnd fun -> "end_"++fun
-        IdBlock fun blk sblk -> "act_"++fun++"_"++blk++"_"++show sblk
+        IdBlock fun blk sblk -> "act_"++fun++"_"++show blk++"_"++show sblk
   act <- varNamed act_name
   mem_in <- memInit (globalMemory gr)
   (node_type,mem,mem_out) <- case nid of
@@ -235,7 +239,7 @@ makeNode gr from nid = do
           Just (Node { nodeType = RealizedBlock { nodeFunctionNode = fnode } })
             = Gr.lab (nodeGraph gr) pnode
       (rv,mem') <- case rtp of
-        TDVoid -> return (Nothing,globalMemory gr)
+        VoidType -> return (Nothing,globalMemory gr)
         _ -> do
           (v,mem') <- newValue (globalMemory gr) rtp
           return (Just v,mem')
@@ -443,9 +447,9 @@ initialGraph :: (MemoryModel m,Gr.DynGraph gr)
 initialGraph prog@(funs,globs) init = do
   let (init_args,_,init_blks) = funs!init
       tps = getProgramTypes prog
-      globs_mp = fmap (\(tp,_,_) -> tp) globs
+      globs_mp = fmap (\(tp,_) -> tp) globs
       allfuns = fmap (\(sig,rtp,blks) 
-                      -> let block_sigs = mkBlockSigs (Set.fromList $ fmap fst sig) blks
+                      -> let block_sigs = mkBlockSigs blks
                          in (sig,rtp,
                              fmap (\(blk_name,subs) 
                                    -> (blk_name,fmap (\(i,instrs) 
@@ -461,8 +465,8 @@ initialGraph prog@(funs,globs) init = do
         = let (ptr,cmem') = memPtrNull cmem
           in mkPointers (Map.insert name ptr ptrs) rest cmem'-}
       mkPointers ptrs [] cmem lmem = return (ptrs,cmem,lmem)
-      mkPointers ptrs ((name,(tp,cont,_)):rest) cmem lmem = do
-        (ptr,cmem',lmem') <- memAlloc tp (Left (typeWidth tp)) (Just cont) cmem lmem
+      mkPointers ptrs ((name,(tp,cont)):rest) cmem lmem = do
+        (ptr,cmem',lmem') <- memAlloc tp (Left (typeWidth tp)) cont cmem lmem
         mkPointers (Map.insert name ptr ptrs) rest cmem' lmem'
   mem0 <- memNew tps
   lmem0 <- memInit mem0

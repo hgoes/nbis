@@ -3,7 +3,6 @@ module MemoryModel.CBMCLike where
 
 import DecisionTree
 import Language.SMTLib2
-import LLVM.Core (TypeDesc)
 import Data.Map as Map hiding (foldl)
 import Data.Typeable
 import qualified Data.Graph.Inductive as Gr

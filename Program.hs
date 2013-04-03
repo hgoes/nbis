@@ -1,10 +1,11 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 module Program where
 
 import MemoryModel
 import Analyzation
+import TypeDesc
+import InstrDesc
 
-import LLVM.Core
-import qualified LLVM.FFI.Core as FFI
 import Control.Monad.Trans
 import Data.Map as Map hiding (foldl)
 import Data.Set as Set hiding (foldl)
@@ -13,89 +14,97 @@ import Foreign.Storable
 import Language.SMTLib2
 import Prelude as P hiding (foldl,concat)
 import Data.Foldable
+import Foreign.Ptr
 
-type ProgDesc = (Map String ([(String, TypeDesc)],
+import LLVM.FFI.Instruction
+import LLVM.FFI.BasicBlock
+import LLVM.FFI.Constant
+import LLVM.FFI.MemoryBuffer
+import LLVM.FFI.SMDiagnostic
+import LLVM.FFI.Module
+import LLVM.FFI.Context
+import LLVM.FFI.IPList
+import LLVM.FFI.Function
+import LLVM.FFI.Value
+import LLVM.FFI.Type
+import LLVM.FFI.APInt
+import LLVM.FFI.OOP
+import LLVM.FFI.User
+
+type ProgDesc = (Map String ([(Ptr Argument, TypeDesc)],
                              TypeDesc,
-                             [(String, [[Instruction]])]),
-                 Map String (TypeDesc, MemContent, Bool))
+                             [(Ptr BasicBlock, [[InstrDesc Operand]])]),
+                 Map (Ptr GlobalVariable) (TypeDesc, Maybe MemContent))
 
 getProgram :: String -> IO ProgDesc
 getProgram file = do
-  m <- readBitcodeFromFile file
-  glob <- getGlobalVariables m >>= 
-          mapM (\(name,val) -> do
-                   tp <- FFI.typeOf val >>= typeDesc2
-                   (c,isConst) <- getConstant val
-                   return (name,(tp,c,isConst))
-               ) >>= return.(Map.fromList)
-  print glob
-  funs <- getFunctions m
-  res <- mapM (\(name,fun) -> do
-                  pars <- liftIO $ getParams fun >>= mapM (\(name,ref) -> do
-                                                              tp <- FFI.typeOf ref >>= typeDesc2
-                                                              return (name,tp))
-                  tp <- liftIO $ FFI.typeOf fun >>= FFI.getElementType >>= FFI.getReturnType >>= typeDesc2
-                  blks <- liftIO $ getBasicBlocks fun >>= mapM (\(name,blk) -> do
-                                                                   instrs <- getInstructions blk >>= mapM (\(name,instr) -> getInstruction instr)
-                                                                   return (name,mkSubBlocks [] instrs))
-                  return (name,(pars,tp,blks))) funs
-  return (Map.fromList res,glob)
+  Just buf <- getFileMemoryBufferSimple file
+  diag <- newSMDiagnostic
+  ctx <- newLLVMContext
+  mod <- parseIR buf diag ctx
+  funs <- getFunctionList mod >>= 
+          ipListToList >>=
+          mapM (\fun -> do
+                   fname <- getNameString fun
+                   ftp <- functionGetFunctionType fun
+                   rtp <- functionTypeGetReturnType ftp >>= reifyType
+                   sz <- functionTypeGetNumParams ftp
+                   argtps <- mapM (\i -> functionTypeGetParamType ftp i >>=
+                                         reifyType
+                                  ) [0..(sz-1)]
+                   args <- functionGetArgumentList fun >>= ipListToList
+                   blks <- getBasicBlockList fun >>= 
+                           ipListToList >>=
+                           mapM (\blk -> do
+                                    instrs <- getInstList blk >>=
+                                              ipListToList >>=
+                                              mapM reifyInstr
+                                    return (blk,mkSubBlocks [] instrs))
+                   return (fname,(zip args argtps,rtp,blks))) >>=
+          return . Map.fromList
+  globs <- getGlobalList mod >>= 
+           ipListToList >>= 
+           mapM (\g -> do
+                    init <- globalVariableGetInitializer g
+                    init' <- if init == nullPtr
+                             then return Nothing
+                             else fmap Just (getConstant init)
+                    tp <- getType g >>= reifyType . castUp
+                    return (g,(tp,init'))) >>=
+           return . Map.fromList
+  print globs
+  return (funs,globs)
   where
-    mkSubBlocks :: [Instruction] -> [Instruction] -> [[Instruction]]
+    mkSubBlocks :: [InstrDesc Operand] -> [InstrDesc Operand] -> [[InstrDesc Operand]]
     mkSubBlocks cur (i:is) = case i of
-      ICall _ _ _ _ _ -> (cur++[i]):mkSubBlocks [] is
-      IRetVoid -> [cur++[i]]
-      IRet _ -> [cur++[i]]
-      IBr _ -> [cur++[i]]
-      IBrCond _ _ _ -> [cur++[i]]
-      ISwitch _ _ _ -> [cur++[i]]
+      ITerminator (ICall _ _ _) -> (cur++[i]):mkSubBlocks [] is
+      ITerminator _ -> [cur++[i]]
       _ -> mkSubBlocks (cur++[i]) is
 
-getConstant :: FFI.ValueRef -> IO (MemContent,Bool)
-getConstant val = do
-  tp <- FFI.typeOf val >>= typeDesc2
-  c <- FFI.isGlobalConstant val
-  val <- getConstant' tp val
-  return (val,c/=0)
-  where
-    {-getConstant' (TDStruct name) val = do
-      res <- mapM (\(tp,i) -> do
-                      nv <- Alloc.alloca (\ptr -> do
-                                             poke ptr i
-                                             FFI.constExtractValue val ptr 1
-                                         )
-                      getConstant' tp nv) (zip tps [0..])
-      return $ MemArray res-}
-    getConstant' (TDArray n tp) val = do
-      res <- mapM (\i -> do
-                      nv <- Alloc.alloca (\ptr -> do
-                                             poke ptr (fromIntegral i)
-                                             FFI.constExtractValue val ptr 1
-                                         )
-                      getConstant' tp nv
-                  ) [0..(n-1)]
-      return $ MemArray res
-    getConstant' (TDVector n tp) val = do
-      res <- mapM (\i -> do
-                      nv <- Alloc.alloca (\ptr -> do
-                                             poke ptr (fromIntegral i)
-                                             FFI.constExtractValue val ptr 1
-                                         )
-                      getConstant' tp nv) [0..(n-1)]
-      return $ MemArray res
-    getConstant' (TDInt _ w) val = do
-      v <- FFI.constIntGetZExtValue val
-      return $ MemCell w (fromIntegral v)
-    getConstant' (TDPtr tp) val = do
-      n <- FFI.isNull val
-      if n/=0
-        then return MemNull
-        else (do
-                 v <- Alloc.alloca (\ptr -> do
-                                       poke ptr (fromIntegral 0)
-                                       FFI.constExtractValue val ptr 1
-                                   )
-                 getConstant' tp v)
+getConstant :: Ptr Constant -> IO MemContent
+getConstant val 
+  = mkSwitch
+    [fmap (\ci -> do
+              val <- constantIntGetValue ci
+              w <- apIntGetBitWidth val
+              rval <- apIntGetSExtValue val
+              return $ MemCell w (toInteger rval)
+          ) (castDown val)
+    ,fmap (\carr -> do
+              sz <- getNumOperands (carr::Ptr ConstantArray)
+              els <- mapM (\i -> do
+                              op <- getOperand carr i
+                              case castDown op of
+                                Nothing -> error "Constant array operand isn't a constant"
+                                Just op' -> getConstant op'
+                          ) [0..(sz-1)]
+              return $ MemArray els
+          ) (castDown val)
+    ,fmap (\(pnull::Ptr ConstantPointerNull) -> return $ MemNull) (castDown val)
+    ]
+    where
+      mkSwitch ((Just act):_) = act
+      mkSwitch (Nothing:rest) = mkSwitch rest
 
 mergePrograms :: ProgDesc -> ProgDesc -> ProgDesc
 mergePrograms (p1,g1) (p2,g2) 
@@ -118,15 +127,15 @@ getProgramTypes (funs,_)
               (allTypesArgs args)
           ) Set.empty funs
   where
-    allTypesArgs :: [(String,TypeDesc)] -> Set TypeDesc
+    allTypesArgs :: [(Ptr Argument,TypeDesc)] -> Set TypeDesc
     allTypesArgs = allTypes' Set.empty
     
     allTypes' tps [] = tps
     allTypes' tps ((name,tp):vals) = case tp of
-      TDPtr tp' -> allTypes' (Set.insert tp' tps) vals
+      PointerType tp' -> allTypes' (Set.insert tp' tps) vals
       _ -> allTypes' tps vals
 
-    allTypesBlks :: [(String,[[Instruction]])] 
+    allTypesBlks :: [(Ptr BasicBlock,[[InstrDesc Operand]])] 
                     -> Set TypeDesc
     allTypesBlks = allTypes'' [] Set.empty
     
@@ -135,11 +144,11 @@ getProgramTypes (funs,_)
       = allTypes'' (concat subblks) tps blks
     allTypes'' (i:is) tps blks 
       = case i of
-        ILoad lbl e _ -> case exprType e of
-          TDPtr tp -> allTypes'' is 
-                      (Set.insert tp tps) blks
-        IStore w to _ -> allTypes'' is 
-                         (Set.insert (exprType w) tps) blks
-        IAlloca lbl tp _ _ -> allTypes'' is 
-                              (Set.insert tp tps) blks
+        IAssign lbl (ILoad e) -> case operandType e of
+          PointerType tp -> allTypes'' is 
+                            (Set.insert tp tps) blks
+        IStore w to -> allTypes'' is 
+                       (Set.insert (operandType w) tps) blks
+        IAssign lbl (IAlloca tp sz) -> allTypes'' is 
+                                       (Set.insert tp tps) blks
         _ -> allTypes'' is tps blks

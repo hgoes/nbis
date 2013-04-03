@@ -5,8 +5,8 @@ import MemoryModel
 
 import Language.SMTLib2
 import Data.Typeable
-import LLVM.Core
 import Data.Bits as Bits
+import LLVM.FFI.Instruction
 
 data Val m = ConstValue { asConst :: Integer
                         , constWidth :: Integer }
@@ -67,55 +67,55 @@ valSwitch ((val,cond):rest)
   (ConditionValue v1 w,ConditionValue v2 _) -> ConditionValue (ite cond v1 v2) w
   (x,xs) -> DirectValue (ite cond (valValue x) (valValue xs))
 
-valIntComp :: IntPredicate -> Val m -> Val m -> Val m
+valIntComp :: ICmpOp -> Val m -> Val m -> Val m
 valIntComp op (ConstValue lhs _) (ConstValue rhs _)
   = ConstCondition $ case op of
-  IntEQ -> lhs == rhs
-  IntNE -> lhs /= rhs
-  IntUGT -> lhs > rhs
-  IntUGE -> lhs >= rhs
-  IntULT -> lhs < rhs
-  IntULE -> lhs <= rhs
-  IntSGT -> lhs > rhs
-  IntSGE -> lhs >= rhs
-  IntSLT -> lhs < rhs
-  IntSLE -> lhs <= rhs
+  I_EQ -> lhs == rhs
+  I_NE -> lhs /= rhs
+  I_UGT -> lhs > rhs
+  I_UGE -> lhs >= rhs
+  I_ULT -> lhs < rhs
+  I_ULE -> lhs <= rhs
+  I_SGT -> lhs > rhs
+  I_SGE -> lhs >= rhs
+  I_SLT -> lhs < rhs
+  I_SLE -> lhs <= rhs
 valIntComp op lhs rhs
   = let lhs' = valValue lhs
         rhs' = valValue rhs
     in ConditionValue (case op of
-                          IntEQ -> lhs' .==. rhs'
-                          IntNE -> not' (lhs' .==. rhs')
-                          IntUGT -> bvugt lhs' rhs'
-                          IntUGE -> bvuge lhs' rhs'
-                          IntULT -> bvult lhs' rhs'
-                          IntULE -> bvule lhs' rhs'
-                          IntSGT -> bvsgt lhs' rhs'
-                          IntSGE -> bvsge lhs' rhs'
-                          IntSLT -> bvslt lhs' rhs'
-                          IntSLE -> bvsle lhs' rhs') 1
+                          I_EQ -> lhs' .==. rhs'
+                          I_NE -> not' (lhs' .==. rhs')
+                          I_UGT -> bvugt lhs' rhs'
+                          I_UGE -> bvuge lhs' rhs'
+                          I_ULT -> bvult lhs' rhs'
+                          I_ULE -> bvule lhs' rhs'
+                          I_SGT -> bvsgt lhs' rhs'
+                          I_SGE -> bvsge lhs' rhs'
+                          I_SLT -> bvslt lhs' rhs'
+                          I_SLE -> bvsle lhs' rhs') 1
 
-valBinOp ::  BinOpDesc -> Val m -> Val m -> Val m
+valBinOp ::  BinOpType -> Val m -> Val m -> Val m
 valBinOp op (ConstValue lhs w) (ConstValue rhs _)
   = ConstValue (case op of
-                   BOXor -> Bits.xor lhs rhs
-                   BOAdd -> lhs + rhs
-                   BOAnd -> lhs .&. rhs
-                   BOSub -> lhs - rhs
-                   BOShL -> shiftL lhs (fromIntegral rhs)
-                   BOOr -> lhs .|. rhs
-                   BOMul -> lhs * rhs) w
+                   Xor -> Bits.xor lhs rhs
+                   Add -> lhs + rhs
+                   And -> lhs .&. rhs
+                   Sub -> lhs - rhs
+                   Shl -> shiftL lhs (fromIntegral rhs)
+                   Or -> lhs .|. rhs
+                   Mul -> lhs * rhs) w
 valBinOp op lhs rhs 
   = let lhs' = valValue lhs
         rhs' = valValue rhs
         rop = case op of
-          BOXor -> bvxor
-          BOAdd -> bvadd
-          BOAnd -> bvand
-          BOSub -> bvsub
-          BOShL -> bvshl
-          BOLShR -> bvlshr
-          BOOr -> bvor
-          BOMul -> bvmul
+          Xor -> bvxor
+          Add -> bvadd
+          And -> bvand
+          Sub -> bvsub
+          Shl -> bvshl
+          LShr -> bvlshr
+          Or -> bvor
+          Mul -> bvmul
           _ -> error $ "nbis: Unsupported binary operator "++show op
     in DirectValue (rop lhs' rhs')
