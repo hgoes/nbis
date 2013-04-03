@@ -146,14 +146,30 @@ getInputOutput origins succ (local,mp) blk sblk instr
     ITerminator (IBr _) -> (Set.empty,mp)
     ITerminator (IBrCond cond _ _) -> (Set.empty,addExpr cond mp)
     ITerminator (ISwitch val _ cases) -> (Set.empty,addExpr val $ foldr addExpr mp (fmap fst cases))
-    --IAssign trg expr -> (Set.insert trg local,addExpr expr mp)
-    IAssign trg (IAlloca _ sz) -> (Set.insert trg local,case sz of
-                                      Nothing -> mp
-                                      Just sz' -> addExpr sz' mp)
-    IAssign trg (ILoad ptr) -> (Set.insert trg local,addExpr ptr mp)
+    IAssign trg expr -> (Set.insert trg local,case expr of
+                            IBinaryOperator _ lhs rhs -> addExpr lhs $
+                                                         addExpr rhs mp
+                            IFCmp _ lhs rhs -> addExpr lhs $
+                                               addExpr rhs mp
+                            IICmp _ lhs rhs -> addExpr lhs $
+                                               addExpr rhs mp
+                            IGetElementPtr ptr idx -> addExpr ptr $ foldr addExpr mp idx
+                            IPhi cases -> foldr addExpr mp (fmap snd cases)
+                            ISelect x y z -> addExpr x $ 
+                                             addExpr y $
+                                             addExpr z mp
+                            ILoad ptr -> addExpr ptr mp
+                            IBitCast _ p -> addExpr p mp
+                            ISExt _ p -> addExpr p mp
+                            ITrunc _ p -> addExpr p mp
+                            IZExt _ p -> addExpr p mp
+                            IAlloca _ sz -> case sz of
+                              Nothing -> mp
+                              Just sz' -> addExpr sz' mp
+                        )
     IStore e ptr -> (local,addExpr e $ addExpr ptr mp)
-    IAssign trg (IPhi cases) -> (Set.insert trg local,foldr addExpr mp (fmap snd cases))
     ITerminator (ICall _ _ args) -> (Set.empty,foldr addExpr mp args)
+    _ -> error $ "Implement getInputOutput for "++show instr
     where
       addExpr :: Operand -> (Map (Ptr BasicBlock,Integer) (Map (Ptr Instruction) TypeDesc),
                              Map (Ptr BasicBlock,Integer) (Map (Ptr Argument) TypeDesc),
@@ -176,14 +192,10 @@ getInputOutput origins succ (local,mp) blk sblk instr
                                      Map.insertWith Map.union (blk',sblk') (Map.singleton name (operandType e)) outp)
                                     (intermediateBlocks (blk',sblk') (blk,sblk) succ)
         ODArgument arg -> (inp,Map.insertWith Map.union (blk,sblk) (Map.singleton arg (operandType e)) args,outp)
-        {-EDUnOp _ arg -> addExpr arg mp
-        EDICmp _ lhs rhs -> addExpr lhs $ addExpr rhs mp
-        EDBinOp _ lhs rhs -> addExpr lhs $ addExpr rhs mp
-        EDGetElementPtr expr args -> addExpr expr $ foldr addExpr mp args
-        EDSelect cond lhs rhs -> addExpr cond $ addExpr lhs $ addExpr rhs mp-}
         ODInt _ -> mp
         ODUndef -> mp
         ODNull -> mp
+        ODMetaData _ -> mp
         e' -> error $ "Implement addExpr for "++show e'
 
 foldInstrs :: (a -> Ptr BasicBlock -> Integer -> InstrDesc Operand -> a) -> a -> [(Ptr BasicBlock,[[InstrDesc Operand]])] -> a
