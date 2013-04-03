@@ -1,5 +1,7 @@
-{-# LANGUAGE TypeFamilies,FlexibleContexts #-}
+{-# LANGUAGE TypeFamilies,FlexibleContexts,MultiParamTypeClasses #-}
 module MemoryModel where
+
+import ConditionList
 
 import Language.SMTLib2
 import Data.Typeable
@@ -11,7 +13,7 @@ import TypeDesc
 data MemContent = MemCell Integer Integer
                 | MemArray [MemContent]
                 | MemNull
-                deriving Show
+                deriving (Show,Eq,Ord)
 
 data ErrorDesc = Custom
                | NullDeref
@@ -19,32 +21,28 @@ data ErrorDesc = Custom
                | FreeAccess
                deriving (Show,Eq,Ord)
 
-class MemoryModel m where
-    type LocalMem m
-    type Pointer m
-    memNew :: Set TypeDesc -> SMT m
-    memInit :: m -> SMT (LocalMem m)
-    memAlloc :: TypeDesc -> Either Integer (SMTExpr (BitVector BVUntyped)) 
-                -> Maybe MemContent -> m -> LocalMem m -> SMT (Pointer m,m,LocalMem m)
-    memLoad :: TypeDesc -> Pointer m -> SMTExpr Bool -> m -> LocalMem m -> SMT (SMTExpr (BitVector BVUntyped),[(ErrorDesc,SMTExpr Bool)],m)
-    memLoadPtr :: TypeDesc -> Pointer m -> m -> LocalMem m -> (Pointer m,[(ErrorDesc,SMTExpr Bool)],m)
-    memStore :: TypeDesc -> Pointer m -> SMTExpr (BitVector BVUntyped) -> SMTExpr Bool -> m -> LocalMem m 
-                -> SMT (m,LocalMem m,[(ErrorDesc,SMTExpr Bool)])
-    memStorePtr :: TypeDesc -> Pointer m -> Pointer m -> m -> LocalMem m -> (m,LocalMem m,[(ErrorDesc,SMTExpr Bool)])
-    memIndex :: m -> TypeDesc -> [Either Integer (SMTExpr (BitVector BVUntyped))] -> Pointer m -> (Pointer m,m)
-    memCast :: m -> TypeDesc -> Pointer m -> (Pointer m,m)
-    --memEq :: m -> LocalMem m -> LocalMem m -> SMTExpr Bool
-    memEq :: m -> SMTExpr Bool -> LocalMem m -> LocalMem m -> SMT (LocalMem m,m)
-    memPtrEq :: m -> Pointer m -> Pointer m -> (SMTExpr Bool,m)
-    memPtrSwitch :: m -> [(Pointer m,SMTExpr Bool)] -> SMT (Pointer m,m)
-    memCopy :: m -> Integer -> Pointer m -> Pointer m -> LocalMem m -> (LocalMem m,m)
-    memSet :: m -> Integer -> SMTExpr (BitVector BVUntyped) -> Pointer m -> LocalMem m -> (LocalMem m,m)
-    memDump :: m -> LocalMem m -> SMT String
-    memSwitch :: m -> [(LocalMem m,SMTExpr Bool)] -> SMT (LocalMem m)
-    memPtrNull :: m -> (Pointer m,m)
-    memPtrNew :: m -> (Pointer m,m)
-    memPtrExtend :: m -> Pointer m -> Pointer m -> SMTExpr Bool -> SMT m
-    memDebug :: m -> String
+data MemoryInstruction p
+  = MINull TypeDesc p
+  | MIAlloc TypeDesc (Either Integer (SMTExpr (BitVector BVUntyped))) p
+  | MILoad p (SMTExpr (BitVector BVUntyped))
+  | MILoadPtr p p
+  | MIStore (SMTExpr (BitVector BVUntyped)) p
+  | MIStorePtr p p
+  | MICompare p p (SMTExpr Bool)
+  | MISelect [(SMTExpr Bool,p)] p
+  | MICast TypeDesc TypeDesc p p
+  | MIIndex [Either Integer (SMTExpr (BitVector BVUntyped))] p p
+  | MICopy (Either Integer (SMTExpr (BitVector BVUntyped))) p p
+  | MIGlobal TypeDesc MemContent p
+  deriving (Show,Eq)
+
+type MemoryProgram p = [MemoryInstruction p]
+
+class MemoryModel m ptr where
+  memNew :: ptr -> Set TypeDesc -> SMT m
+  addGlobal :: m -> ptr -> MemContent -> SMT m
+  addProgram :: m -> Int -> MemoryProgram ptr -> SMT m
+  connectPrograms :: m -> SMTExpr Bool -> Int -> Int -> [(ptr,ptr)] -> SMT m
 
 flattenMemContent :: MemContent -> [(Integer,Integer)]
 flattenMemContent (MemCell w v) = [(w,v)]

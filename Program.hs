@@ -10,6 +10,7 @@ import Control.Monad.Trans
 import Data.Map as Map hiding (foldl)
 import Data.Set as Set hiding (foldl)
 import qualified Foreign.Marshal.Alloc as Alloc
+import Foreign.Ptr as FFI
 import Foreign.Storable
 import Language.SMTLib2
 import Prelude as P hiding (foldl,concat)
