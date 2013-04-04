@@ -447,9 +447,9 @@ unrollProgram :: (Gr.DynGraph gr,Integral ptr,MemoryModel m ptr)
                 => ProgDesc -> String 
                 -> Unrollment gr m ptr a 
                 -> SMT a
-unrollProgram prog@(funs,globs) init (f::Unrollment gr m ptr a) = do
+unrollProgram prog@(funs,globs,tps) init (f::Unrollment gr m ptr a) = do
   let (init_args,_,init_blks) = funs!init
-      tps = getProgramTypes prog
+      --tps = getProgramTypes prog
       globs_mp = fmap (\(tp,_) -> tp) globs
       allfuns = fmap (\(sig,rtp,blks) 
                       -> let block_sigs = mkBlockSigs blks

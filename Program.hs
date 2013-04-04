@@ -31,11 +31,24 @@ import LLVM.FFI.Type
 import LLVM.FFI.APInt
 import LLVM.FFI.OOP
 import LLVM.FFI.User
+import LLVM.FFI.Pass
+import LLVM.FFI.SetVector
 
 type ProgDesc = (Map String ([(Ptr Argument, TypeDesc)],
                              TypeDesc,
                              [(Ptr BasicBlock, [[InstrDesc Operand]])]),
-                 Map (Ptr GlobalVariable) (TypeDesc, Maybe MemContent))
+                 Map (Ptr GlobalVariable) (TypeDesc, Maybe MemContent),
+                 Set TypeDesc)
+
+getUsedTypes :: Ptr Module -> IO [TypeDesc]
+getUsedTypes mod = do
+  pass <- newFindUsedTypes
+  succ <- modulePassRunOnModule pass mod
+  tps_set <- findUsedTypesGetTypes pass
+  tps <- setVectorToList tps_set
+  res <- mapM reifyType tps
+  deleteFindUsedTypes pass
+  return res
 
 getProgram :: String -> IO ProgDesc
 getProgram file = do
@@ -73,8 +86,8 @@ getProgram file = do
                     tp <- getType g >>= reifyType . castUp
                     return (g,(tp,init'))) >>=
            return . Map.fromList
-  print globs
-  return (funs,globs)
+  tps <- getUsedTypes mod
+  return (funs,globs,Set.fromList tps)
   where
     mkSubBlocks :: [InstrDesc Operand] -> [InstrDesc Operand] -> [[InstrDesc Operand]]
     mkSubBlocks cur (i:is) = case i of
@@ -108,7 +121,7 @@ getConstant val
       mkSwitch (Nothing:rest) = mkSwitch rest
 
 mergePrograms :: ProgDesc -> ProgDesc -> ProgDesc
-mergePrograms (p1,g1) (p2,g2) 
+mergePrograms (p1,g1,tp1) (p2,g2,tp2) 
   = (Map.unionWithKey (\name (args1,tp1,blks1) (args2,tp2,blks2)
                        -> if fmap snd args1 /= fmap snd args2 || tp1 /= tp2
                           then error $ "Conflicting signatures for function "++show name++" detected"
@@ -117,39 +130,8 @@ mergePrograms (p1,g1) (p2,g2)
                                 else (if P.null blks2
                                       then (args1,tp1,blks1)
                                       else error $ "Conflicting definitions for function "++show name++" found"))) p1 p2,
-     Map.union g1 g2)
+     Map.union g1 g2,
+     Set.union tp1 tp2)
 
 getProgramTypes :: ProgDesc -> Set TypeDesc
-getProgramTypes (funs,_) 
-  = foldl (\tps' (args,rtp,blks)
-           -> Set.union tps' $ 
-              Set.union 
-              (allTypesBlks blks) 
-              (allTypesArgs args)
-          ) Set.empty funs
-  where
-    allTypesArgs :: [(Ptr Argument,TypeDesc)] -> Set TypeDesc
-    allTypesArgs = allTypes' Set.empty
-    
-    allTypes' tps [] = tps
-    allTypes' tps ((name,tp):vals) = case tp of
-      PointerType tp' -> allTypes' (Set.insert tp' tps) vals
-      _ -> allTypes' tps vals
-
-    allTypesBlks :: [(Ptr BasicBlock,[[InstrDesc Operand]])] 
-                    -> Set TypeDesc
-    allTypesBlks = allTypes'' [] Set.empty
-    
-    allTypes'' [] tps [] = tps
-    allTypes'' [] tps ((_,subblks):blks)
-      = allTypes'' (concat subblks) tps blks
-    allTypes'' (i:is) tps blks 
-      = case i of
-        IAssign lbl (ILoad e) -> case operandType e of
-          PointerType tp -> allTypes'' is 
-                            (Set.insert tp tps) blks
-        IStore w to -> allTypes'' is 
-                       (Set.insert (operandType w) tps) blks
-        IAssign lbl (IAlloca tp sz) -> allTypes'' is 
-                                       (Set.insert tp tps) blks
-        _ -> allTypes'' is tps blks
+getProgramTypes (_,_,tps) = tps
