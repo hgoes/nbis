@@ -232,19 +232,19 @@ realizeInstruction (IAssign trg expr) = do
                                 (constantAnn (BitVector (-1)) d::SMTExpr (BitVector BVUntyped))
                                 (constantAnn (BitVector 0) (fromIntegral d))) v
              in return $ DirectValue nv
-    ITrunc _ arg -> do
-      let w = bitWidth (operandType arg)
+    ITrunc tp arg -> do
+      let w = bitWidth tp
       arg' <- argToExpr arg
       case arg' of
         ConstValue bv _ -> return $ ConstValue bv w
         ConditionValue v _ -> return $ ConditionValue v w
         _ -> return $ DirectValue (bvextract' 0 w (valValue arg'))
-    IZExt _ arg -> do
+    IZExt tp arg -> do
       arg' <- argToExpr arg
       case arg' of
         ConditionValue v w -> return $ ConditionValue v (bitWidth (operandType arg))
         _ -> let v = valValue arg'
-                 d = (bitWidth (operandType arg)) - (bitWidth (operandType arg))
+                 d = (bitWidth tp) - (bitWidth (operandType arg))
                  nv = bvconcat (constantAnn (BitVector 0) d::SMTExpr (BitVector BVUntyped)) v
              in return $ DirectValue nv
     IAlloca tp sz -> do
