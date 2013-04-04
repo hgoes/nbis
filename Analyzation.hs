@@ -67,7 +67,8 @@ mkBlockSigs instrs
   = let (origins,(preds,succs),phis) 
           = foldInstrs (\(orig,succ,phi) blk sblk instr 
                         -> (getVariableOrigins orig blk sblk instr,
-                            getSuccessors succ blk sblk instr,getPhis phi blk sblk instr)
+                            getSuccessors succ blk sblk instr,
+                            getPhis phi blk sblk instr)
                        ) (Map.empty,(Map.empty,Map.empty),Map.empty) instrs
         (_,(inps,args,outps)) = foldInstrs (getInputOutput origins succs) (Set.empty,(Map.empty,Map.empty,Map.empty)) instrs
         sigs_preds = fmap (\pred -> emptyBlockSig { blockOrigins = pred }) preds
@@ -83,6 +84,7 @@ getVariableOrigins :: Map (Ptr Instruction) (Ptr BasicBlock,Integer) -> Ptr Basi
 getVariableOrigins mp blk sblk instr
   = case instr of
     IAssign trg _ -> Map.insert trg (blk,sblk) mp
+    ITerminator (ICall trg _ _) -> Map.insert trg (blk,sblk) mp
     _ -> mp
 
 getSuccessors :: (Map (Ptr BasicBlock,Integer) (Set (Ptr BasicBlock,Integer)),Map (Ptr BasicBlock,Integer) (Set (Ptr BasicBlock,Integer))) -> Ptr BasicBlock -> Integer -> InstrDesc Operand
