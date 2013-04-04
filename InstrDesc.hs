@@ -121,9 +121,12 @@ reifyInstr ptr
           ) (castDown ptr)
     ,fmap (\gep -> do
               ptr' <- getElementPtrInstGetPointerOperand gep >>= reifyOperand
-              begin <- getElementPtrInstIdxBegin gep
-              end <- getElementPtrInstIdxEnd gep
-              idx <- useToList begin end >>= mapM reifyOperand
+              --begin <- getElementPtrInstIdxBegin gep
+              --end <- getElementPtrInstIdxEnd gep
+              --idx <- useToList begin end >>= mapM reifyOperand
+              sz <- getElementPtrInstGetNumIndices gep
+              idx <- mapM (\i -> getOperand gep i >>= reifyOperand) [1..sz]
+              --print sz
               return $ IAssign ptr (IGetElementPtr ptr' idx)
           ) (castDown ptr)
     ,fmap (\zext -> do
