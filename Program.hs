@@ -16,6 +16,7 @@ import Language.SMTLib2
 import Prelude as P hiding (foldl,concat)
 import Data.Foldable
 import Foreign.Ptr
+import Data.Maybe (catMaybes)
 
 import LLVM.FFI.Instruction
 import LLVM.FFI.BasicBlock
@@ -33,22 +34,36 @@ import LLVM.FFI.OOP
 import LLVM.FFI.User
 import LLVM.FFI.Pass
 import LLVM.FFI.SetVector
+import LLVM.FFI.StringRef
 
 type ProgDesc = (Map String ([(Ptr Argument, TypeDesc)],
                              TypeDesc,
                              [(Ptr BasicBlock, [[InstrDesc Operand]])]),
                  Map (Ptr GlobalVariable) (TypeDesc, Maybe MemContent),
-                 Set TypeDesc)
+                 Set TypeDesc,
+                 Map String [TypeDesc])
 
-getUsedTypes :: Ptr Module -> IO [TypeDesc]
+getUsedTypes :: Ptr Module -> IO ([TypeDesc],Map String [TypeDesc])
 getUsedTypes mod = do
   pass <- newFindUsedTypes
   succ <- modulePassRunOnModule pass mod
   tps_set <- findUsedTypesGetTypes pass
   tps <- setVectorToList tps_set
-  res <- mapM reifyType tps
+  all_tps <- mapM reifyType tps
+  structs <- mapM (\tp -> case castDown tp of
+                      Nothing -> return Nothing
+                      Just stp -> do
+                        hasN <- structTypeHasName stp
+                        if hasN
+                          then (do
+                                   name <- structTypeGetName stp >>= stringRefData
+                                   sz <- structTypeGetNumElements stp
+                                   els <- mapM (\i -> structTypeGetElementType stp i >>= reifyType) [0..(sz-1)]
+                                   return $ Just (name,els))
+                          else return Nothing
+                  ) tps
   deleteFindUsedTypes pass
-  return res
+  return (all_tps,Map.fromList $ catMaybes structs)
 
 getProgram :: String -> IO ProgDesc
 getProgram file = do
@@ -86,8 +101,8 @@ getProgram file = do
                     tp <- getType g >>= reifyType . castUp
                     return (g,(tp,init'))) >>=
            return . Map.fromList
-  tps <- getUsedTypes mod
-  return (funs,globs,Set.fromList tps)
+  (tps,structs) <- getUsedTypes mod
+  return (funs,globs,Set.fromList tps,structs)
   where
     mkSubBlocks :: [InstrDesc Operand] -> [InstrDesc Operand] -> [[InstrDesc Operand]]
     mkSubBlocks cur (i:is) = case i of
@@ -121,7 +136,7 @@ getConstant val
       mkSwitch (Nothing:rest) = mkSwitch rest
 
 mergePrograms :: ProgDesc -> ProgDesc -> ProgDesc
-mergePrograms (p1,g1,tp1) (p2,g2,tp2) 
+mergePrograms (p1,g1,tp1,s1) (p2,g2,tp2,s2) 
   = (Map.unionWithKey (\name (args1,tp1,blks1) (args2,tp2,blks2)
                        -> if fmap snd args1 /= fmap snd args2 || tp1 /= tp2
                           then error $ "Conflicting signatures for function "++show name++" detected"
@@ -131,7 +146,5 @@ mergePrograms (p1,g1,tp1) (p2,g2,tp2)
                                       then (args1,tp1,blks1)
                                       else error $ "Conflicting definitions for function "++show name++" found"))) p1 p2,
      Map.union g1 g2,
-     Set.union tp1 tp2)
-
-getProgramTypes :: ProgDesc -> Set TypeDesc
-getProgramTypes (_,_,tps) = tps
+     Set.union tp1 tp2,
+     Map.union s1 s2)
