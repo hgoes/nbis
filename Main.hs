@@ -282,6 +282,7 @@ makeNode from nid = do
                               phi_cond <- varNamed "phi"
                               return (from,phi_cond)
                           ) (Set.toList allPhis)
+      gr <- get
       let env = RealizationEnv { reFunction = fun
                                , reBlock = blk
                                , reSubblock = sblk
