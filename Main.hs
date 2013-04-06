@@ -464,12 +464,12 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m ptr a) = do
                              predictMallocUse (concat [ instrs | (_,sblks) <- blks, instrs <- sblks ])
                             )
                      ) funs
-  mem0 <- memNew (undefined::ptr) tps
+  mem0 <- memNew (undefined::ptr) tps structs
   let ((cptr,prog),globs') = mapAccumL (\(ptr',prog') (tp,cont) 
-                                        -> ((succ ptr',(ptr',cont):prog'),ptr')
+                                        -> ((succ ptr',(ptr',tp,cont):prog'),ptr')
                                        ) (0,[]) globs
-  mem1 <- foldlM (\cmem (ptr,cont) -> case cont of
-                     Just cont' -> addGlobal cmem ptr cont'
+  mem1 <- foldlM (\cmem (ptr,tp,cont) -> case cont of
+                     Just cont' -> addGlobal cmem ptr tp cont'
                      Nothing -> return cmem
                  ) mem0 prog
   let gr0 = UnrollGraph { allFunctions = allfuns

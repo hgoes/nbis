@@ -1,8 +1,9 @@
-{-# LANGUAGE FlexibleInstances,MultiParamTypeClasses #-}
+{-# LANGUAGE FlexibleInstances,MultiParamTypeClasses,GADTs,RankNTypes #-}
 module MemoryModel.Snow where
 
 import MemoryModel
 import DecisionTree
+import TypeDesc
 
 import Language.SMTLib2
 --import qualified Data.Graph.Inductive as Gr
@@ -12,82 +13,113 @@ import Prelude hiding (foldl1,foldl,mapM_)
 import Data.Bits
 import Control.Monad.Trans
 
+import MemoryModel.Snow.Object
+
 type BVPtr = BV64
 type BVByte = BitVector BVUntyped
 
-data Object 
-  = NormalObject (SMTExpr (SMTArray (SMTExpr BVPtr) BVByte))
-  | NullObject
+data ObjAccessor ptr = ObjAccessor (forall a. (Object ptr -> (Object ptr,a)) -> Object ptr -> (Object ptr,a))
 
-data SnowMemory ptr = SnowMemory { snowLocs :: Map Int (MemoryProgram ptr,Map ptr (DecisionTree Object))
-                                 , snowGlobals :: Map ptr Object
+data SnowMemory ptr = SnowMemory { snowStructs :: Map String [TypeDesc]
+                                 , snowLocs :: Map Int (MemoryProgram ptr,
+                                                        Map ptr (Integer,TypeDesc,
+                                                                 ObjAccessor ptr))
+                                 , snowObjects :: Map Integer (DecisionTree (Object ptr))
+                                 , snowGlobals :: Map ptr (Integer,TypeDesc)
+                                 , snowNextObject :: Integer
                                  }
 
 instance (Ord ptr,Show ptr) => MemoryModel (SnowMemory ptr) ptr where
-  memNew _ _ = return $ SnowMemory Map.empty Map.empty
-  addGlobal mem ptr cont = do
+  memNew _ _ structs = return $ SnowMemory structs Map.empty Map.empty Map.empty 0
+  addGlobal mem ptr tp cont = do
     glb <- mkGlobal cont
-    return $ mem { snowGlobals = Map.insert ptr glb (snowGlobals mem)
+    return $ mem { snowGlobals = Map.insert ptr (snowNextObject mem,tp) (snowGlobals mem)
+                 , snowObjects = Map.insert (snowNextObject mem) (decision glb) (snowObjects mem)
+                 , snowNextObject = succ (snowNextObject mem)
                  }
-  addProgram mem loc prog 
+  addProgram mem loc prog
     = do
       liftIO $ do
         putStrLn $ "New program for "++show loc++":"
         mapM_ print prog
-      objs <- initialObjects prog
-      return $ mem { snowLocs = Map.insert loc (prog,objs) (snowLocs mem) }
+      (ptrs,objs,next) <- initialObjects (snowStructs mem) (snowNextObject mem) prog
+      return $ mem { snowLocs = Map.insert loc (prog,ptrs) (snowLocs mem)
+                   , snowObjects = Map.union objs (snowObjects mem)
+                   , snowNextObject = next
+                   }
   connectPrograms mem cond from to ptrs = do
     liftIO $ do
       putStrLn $ "Connect location "++show from++" with "++show to
       putStrLn $ show ptrs
     let (_,env_from) = (snowLocs mem)!from
         (prog_to,env_to) = (snowLocs mem)!to
-        new_env1 = foldl (\mp (ptr_from,ptr_to) 
+        new_env1 = foldl (\mp (ptr_to,ptr_from)
                           -> Map.insert ptr_to (env_from!ptr_from) mp
-                         ) (Map.union env_to (fmap decision (snowGlobals mem))) ptrs
+                         ) (Map.union env_to (fmap (\(obj_p,tp) -> (obj_p,tp,ObjAccessor id))
+                                              (snowGlobals mem))) ptrs
         new_env2 = foldl (\mp ptr
                            -> case Map.lookup ptr env_from of
                             Nothing -> mp
                             Just glob -> Map.insert ptr glob mp
                          ) new_env1 (Map.keys (snowGlobals mem))
-    new_env' <- updateLocation cond new_env2 prog_to
-    return $ mem { snowLocs = Map.insert to (prog_to,new_env') (snowLocs mem) }
+    (new_env',nobjs) <- updateLocation cond new_env2 (snowObjects mem) prog_to
+    return $ mem { snowLocs = Map.insert to (prog_to,new_env') (snowLocs mem)
+                 , snowObjects = nobjs
+                 }
 
-initialObjects :: Ord ptr => [MemoryInstruction ptr] -> SMT (Map ptr (DecisionTree Object))
-initialObjects = foldlM (\mp instr -> case instr of
-                            MINull _ p -> return $ Map.insert p (decision NullObject) mp
-                            MIAlloc _ _ p -> do
-                              v <- varNamedAnn "allocation" ((),8)
-                              return $ Map.insert p (decision $ NormalObject v) mp
-                            _ -> return mp
-                        ) Map.empty
+initialObjects :: Ord ptr => Map String [TypeDesc]
+                  -> Integer
+                  -> [MemoryInstruction ptr]
+                  -> SMT (Map ptr (Integer,TypeDesc,ObjAccessor ptr),
+                          Map Integer (DecisionTree (Object ptr)),
+                          Integer)
+initialObjects structs n
+  = foldlM (\(ptrs,objs,next) instr -> case instr of
+               MINull tp p -> return (Map.insert p (next,tp,ObjAccessor id) ptrs,
+                                      Map.insert next (decision $ Bounded NullPointer) objs,
+                                      succ next)
+               MIAlloc tp sz p -> do
+                 obj <- allocaObject structs tp sz
+                 return (Map.insert p (next,tp,ObjAccessor id) ptrs,
+                         Map.insert next (decision obj) objs,
+                         succ next)
+               _ -> return (ptrs,objs,next)
+           ) (Map.empty,Map.empty,n)
 
-updateLocation :: Ord ptr => SMTExpr Bool 
-                  -> Map ptr (DecisionTree Object) 
+updateLocation :: (Ord ptr,Show ptr) => SMTExpr Bool 
+                  -> Map ptr (Integer,TypeDesc,ObjAccessor ptr)
+                  -> Map Integer (DecisionTree (Object ptr))
                   -> [MemoryInstruction ptr] 
-                  -> SMT (Map ptr (DecisionTree Object))
-updateLocation cond 
-  = foldlM (\mp instr -> case instr of
-               MILoad ptr res -> case Map.lookup ptr mp of
-                 Just dt -> do
-                   let sz = extractAnnotation res
-                       rsz = sz `div` 8
-                       obj' = fst $ accumDecisionTree 
-                              (\_ obj -> case obj of
-                                  NormalObject obj' 
-                                    -> let selects = fmap (\i -> select obj' (fromInteger i)) [0..rsz-1]
-                                       in (foldl1 bvconcat selects,())
-                              ) dt
-                   assert $ cond .=>. (res .==. obj')
-                   return mp
-               MIStore val ptr -> case Map.lookup ptr mp of
-                 Just dt -> do
-                   obj <- mkObject val
-                   let ndt = boolDecision cond (decision obj) dt
-                   return $ Map.insert ptr ndt mp
-               _ -> return mp
-           )
+                  -> SMT (Map ptr (Integer,TypeDesc,ObjAccessor ptr),
+                          Map Integer (DecisionTree (Object ptr)))
+updateLocation cond ptrs objs
+  = foldlM (\(ptrs,objs) instr -> case instr of
+               -- Allocations don't have to be updated
+               MIAlloc _ _ _ -> return (ptrs,objs)
+               MILoad ptr res -> case Map.lookup ptr ptrs of
+                 Just (obj_p,tp,ObjAccessor idx) -> case Map.lookup obj_p objs of
+                   Just dt -> do
+                     let sz = extractAnnotation res
+                         obj' = fst $ accumDecisionTree 
+                                (\_ obj -> let (_,res) = idx (\obj' -> (obj',loadObject sz obj')) obj
+                                           in res
+                                ) dt
+                     assert $ cond .=>. (res .==. obj')
+                     return (ptrs,objs)
+               MIStore val ptr -> case Map.lookup ptr ptrs of
+                 Just (obj_p,tp,ObjAccessor idx) -> case Map.lookup obj_p objs of
+                   Just dt -> do
+                     let ndt = fmap (\obj -> let (nobj,_) = idx (\obj' -> storeObject val obj') obj
+                                             in nobj) dt
+                     return (ptrs,Map.insert obj_p ndt objs)
+               MICast from to ptr_from ptr_to -> case Map.lookup ptr_from ptrs of
+                 Just (obj_p,tp,idx) -> return (Map.insert ptr_to (obj_p,to,idx) ptrs,objs)
+                 Nothing -> error $ "Snow memory model: Failed to find pointer "++show ptr_from
+               --MIIndex idx ptr_from ptr_to -> 
+               _ -> error $ "Memory instruction "++show instr++" not implemented in Snow memory model."
+           ) (ptrs,objs)
 
+{-
 mkObject :: SMTExpr (BitVector BVUntyped) -> SMT Object
 mkObject bv = do
   let sz = extractAnnotation bv
@@ -97,14 +129,9 @@ mkObject bv = do
                               (bvextract' ((rsz - i - 1)*8) 8 bv)
                   ) null [0..rsz-1]
   narr <- defConstNamed "storeRes" arr
-  return $ NormalObject narr
+  return $ NormalObject narr -}
 
-mkGlobal :: MemContent -> SMT Object
+mkGlobal :: MemContent -> SMT (Object ptr)
 mkGlobal (MemCell w v) = do
-  let null = constArray (constantAnn (BitVector 0) 8) ()
-      rw = w `div` 8
-      arr = foldl (\arr' i -> store arr' (fromInteger i)
-                              (constantAnn (BitVector $ v `shiftR` (fromInteger $ i*8)) 8)
-                  ) null [0..rw-1]
-  narr <- defConstNamed "global" arr
-  return $ NormalObject narr
+  obj <- defConstNamed "global" (constantAnn (BitVector v) w)
+  return $ Bounded (WordObject obj)

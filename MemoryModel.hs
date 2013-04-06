@@ -8,6 +8,7 @@ import Data.Typeable
 import Data.Unit
 import Data.List (genericSplitAt,genericReplicate)
 import Data.Set as Set
+import Data.Map as Map
 import TypeDesc
 
 data MemContent = MemCell Integer Integer
@@ -39,8 +40,8 @@ data MemoryInstruction p
 type MemoryProgram p = [MemoryInstruction p]
 
 class MemoryModel m ptr where
-  memNew :: ptr -> Set TypeDesc -> SMT m
-  addGlobal :: m -> ptr -> MemContent -> SMT m
+  memNew :: ptr -> Set TypeDesc -> Map String [TypeDesc] -> SMT m
+  addGlobal :: m -> ptr -> TypeDesc -> MemContent -> SMT m
   addProgram :: m -> Int -> MemoryProgram ptr -> SMT m
   connectPrograms :: m -> SMTExpr Bool -> Int -> Int -> [(ptr,ptr)] -> SMT m
 
