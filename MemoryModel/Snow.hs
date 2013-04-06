@@ -95,6 +95,8 @@ updateLocation structs cond ptrs objs
   = foldlM (\(ptrs,objs) instr -> case instr of
                -- Allocations don't have to be updated
                MIAlloc _ _ _ -> return (ptrs,objs)
+               -- Neither do null pointers
+               MINull _ _ -> return (ptrs,objs)
                MILoad ptr res -> case Map.lookup ptr ptrs of
                  Just (obj_p,tp,ObjAccessor idx) -> case Map.lookup obj_p objs of
                    Just dt -> do
