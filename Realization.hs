@@ -114,6 +114,17 @@ argToExpr expr = case operandDesc expr of
     case Map.lookup arg (reArgs re) of
       Nothing -> reEnvError $ "Couldn't find argument variable "++show arg
       Just res -> return res
+  ODGetElementPtr ptr idx -> do
+    PointerValue val_ptr <- argToExpr ptr
+    val_idx <- mapM (\i -> do
+                        i' <- argToExpr i 
+                        return $ case i' of
+                          ConstValue bv _ -> Left bv
+                          DirectValue bv -> Right bv
+                    ) idx
+    ptr' <- reNewPtr
+    reMemInstr (MIIndex val_idx val_ptr ptr')
+    return $ PointerValue ptr'    
   _ -> reError $ "Implement argToExpr for "++show expr
 
 realizeInstructions :: Enum ptr => [InstrDesc Operand] 

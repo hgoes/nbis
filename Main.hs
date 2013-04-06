@@ -43,7 +43,7 @@ import Control.Monad.RWS (runRWST)
 
 import LLVM.FFI.BasicBlock
 import LLVM.FFI.Value
-import LLVM.FFI.Instruction
+import LLVM.FFI.Instruction (Instruction)
 import LLVM.FFI.Constant
 
 (!) :: (Show k,Ord k) => Map k a -> k -> a

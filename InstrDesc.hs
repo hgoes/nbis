@@ -58,6 +58,7 @@ data OperandDesc a
   | ODMetaData (Ptr MDNode)
   | ODGlobal (Ptr GlobalVariable)
   | ODArgument (Ptr Argument)
+  | ODGetElementPtr a [a]
   deriving (Show,Eq,Ord)
 
 reifyInstr :: Ptr Instruction -> IO (InstrDesc Operand)
@@ -177,6 +178,18 @@ reifyOperand ptr = do
           ,fmap (\gv -> return $ ODGlobal gv) (castDown ptr)
           ,fmap (\arg -> return $ ODArgument arg) (castDown ptr)
           ,fmap (\(null::Ptr ConstantPointerNull) -> return ODNull) (castDown ptr)
+          ,fmap (\expr -> do
+                    opcode <- constantExprGetOpcode expr
+                    case opcode of
+                      MemoryOp GetElementPtr -> do
+                        sz <- getNumOperands expr
+                        ptr <- getOperand expr 0 >>= reifyOperand
+                        idx <- mapM (\i -> getOperand expr i >>= reifyOperand) [1..(sz-1)]
+                        return $ ODGetElementPtr ptr idx
+                      _ -> do
+                           valueDump expr
+                           error "Unknown constant expr"
+                ) (castDown ptr)
           ]
   return $ Operand { operandType = rtp
                    , operandDesc = desc

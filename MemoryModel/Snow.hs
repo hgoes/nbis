@@ -140,6 +140,12 @@ mkObject bv = do
   return $ NormalObject narr -}
 
 mkGlobal :: MemContent -> SMT (Object ptr)
-mkGlobal (MemCell w v) = do
-  obj <- defConstNamed "global" (constantAnn (BitVector v) w)
-  return $ Bounded (WordObject obj)
+mkGlobal cont = fmap Bounded (mkGlobal' cont)
+  where
+    mkGlobal' (MemCell w v) = do
+      obj <- defConstNamed "global" (constantAnn (BitVector v) w)
+      return $ WordObject obj
+    mkGlobal' (MemArray els) = do
+      els' <- mapM mkGlobal' els
+      return $ StaticArrayObject els'
+  

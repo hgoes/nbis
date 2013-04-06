@@ -194,10 +194,12 @@ getInputOutput origins succ (local,mp) blk sblk instr
                                      Map.insertWith Map.union (blk',sblk') (Map.singleton name (operandType e)) outp)
                                     (intermediateBlocks (blk',sblk') (blk,sblk) succ)
         ODArgument arg -> (inp,Map.insertWith Map.union (blk,sblk) (Map.singleton arg (operandType e)) args,outp)
+        ODGlobal _ -> mp
         ODInt _ -> mp
         ODUndef -> mp
         ODNull -> mp
         ODMetaData _ -> mp
+        ODGetElementPtr ptr idx -> foldr addExpr (addExpr ptr mp) idx
         e' -> error $ "Implement addExpr for "++show e'
 
 foldInstrs :: (a -> Ptr BasicBlock -> Integer -> InstrDesc Operand -> a) -> a -> [(Ptr BasicBlock,[[InstrDesc Operand]])] -> a

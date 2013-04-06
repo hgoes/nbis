@@ -130,10 +130,24 @@ getConstant val
               return $ MemArray els
           ) (castDown val)
     ,fmap (\(pnull::Ptr ConstantPointerNull) -> return $ MemNull) (castDown val)
+    ,fmap (\(arr::Ptr ConstantArray) -> do
+              tp <- getType arr
+              sz <- arrayTypeGetNumElements tp
+              els <- mapM (\i -> constantGetAggregateElement arr i >>= getConstant) [0..(sz-1)]
+              return $ MemArray els
+          ) (castDown val)
+    ,fmap (\(seq::Ptr ConstantDataSequential) -> do
+              sz <- constantDataSequentialGetNumElements seq
+              els <- mapM (\i -> constantDataSequentialGetElementAsConstant seq i >>= getConstant) [0..(sz-1)]
+              return $ MemArray els
+          ) (castDown val)
     ]
     where
       mkSwitch ((Just act):_) = act
       mkSwitch (Nothing:rest) = mkSwitch rest
+      mkSwitch [] = do
+        valueDump val
+        error "Unknown constant."
 
 mergePrograms :: ProgDesc -> ProgDesc -> ProgDesc
 mergePrograms (p1,g1,tp1,s1) (p2,g2,tp2,s2) 
