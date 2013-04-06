@@ -4,6 +4,8 @@ import Foreign
 import LLVM.FFI.Type as FFI
 import LLVM.FFI.OOP as FFI
 import LLVM.FFI.StringRef as FFI
+import Data.List as List
+import Data.Map as Map
 
 data TypeDesc
      = VoidType
@@ -105,3 +107,17 @@ reifyType tp
     mkSwitch [] = do
       typeDump tp
       error "Unknown type"
+
+indexType :: Map String [TypeDesc] 
+             -> TypeDesc -> [Either Integer a] -> TypeDesc
+indexType structs tp (_:idx) = indexType' tp idx
+  where
+    indexType' tp [] = tp
+    indexType' (StructType descr) (Left i:is)
+      = let tps = case descr of
+              Left name -> case Map.lookup name structs of
+                Just res -> res
+              Right res -> res
+        in indexType' (List.genericIndex tps i) is
+    indexType' (ArrayType _ tp) (_:is)
+      = indexType' tp is

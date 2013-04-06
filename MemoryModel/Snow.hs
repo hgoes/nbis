@@ -18,8 +18,6 @@ import MemoryModel.Snow.Object
 type BVPtr = BV64
 type BVByte = BitVector BVUntyped
 
-data ObjAccessor ptr = ObjAccessor (forall a. (Object ptr -> (Object ptr,a)) -> Object ptr -> (Object ptr,a))
-
 data SnowMemory ptr = SnowMemory { snowStructs :: Map String [TypeDesc]
                                  , snowLocs :: Map Int (MemoryProgram ptr,
                                                         Map ptr (Integer,TypeDesc,
@@ -62,7 +60,7 @@ instance (Ord ptr,Show ptr) => MemoryModel (SnowMemory ptr) ptr where
                             Nothing -> mp
                             Just glob -> Map.insert ptr glob mp
                          ) new_env1 (Map.keys (snowGlobals mem))
-    (new_env',nobjs) <- updateLocation cond new_env2 (snowObjects mem) prog_to
+    (new_env',nobjs) <- updateLocation (snowStructs mem) cond new_env2 (snowObjects mem) prog_to
     return $ mem { snowLocs = Map.insert to (prog_to,new_env') (snowLocs mem)
                  , snowObjects = nobjs
                  }
@@ -86,13 +84,14 @@ initialObjects structs n
                _ -> return (ptrs,objs,next)
            ) (Map.empty,Map.empty,n)
 
-updateLocation :: (Ord ptr,Show ptr) => SMTExpr Bool 
+updateLocation :: (Ord ptr,Show ptr) => Map String [TypeDesc] 
+                  -> SMTExpr Bool 
                   -> Map ptr (Integer,TypeDesc,ObjAccessor ptr)
                   -> Map Integer (DecisionTree (Object ptr))
                   -> [MemoryInstruction ptr] 
                   -> SMT (Map ptr (Integer,TypeDesc,ObjAccessor ptr),
                           Map Integer (DecisionTree (Object ptr)))
-updateLocation cond ptrs objs
+updateLocation structs cond ptrs objs
   = foldlM (\(ptrs,objs) instr -> case instr of
                -- Allocations don't have to be updated
                MIAlloc _ _ _ -> return (ptrs,objs)
@@ -101,21 +100,28 @@ updateLocation cond ptrs objs
                    Just dt -> do
                      let sz = extractAnnotation res
                          obj' = fst $ accumDecisionTree 
-                                (\_ obj -> let (_,res) = idx (\obj' -> (obj',loadObject sz obj')) obj
-                                           in res
+                                (\_ obj -> let (_,res,errs) = idx (\obj' -> let (res,errs) = loadObject sz obj'
+                                                                            in (obj',res,errs)
+                                                                  ) obj
+                                           in (res,errs)
                                 ) dt
                      assert $ cond .=>. (res .==. obj')
                      return (ptrs,objs)
                MIStore val ptr -> case Map.lookup ptr ptrs of
                  Just (obj_p,tp,ObjAccessor idx) -> case Map.lookup obj_p objs of
                    Just dt -> do
-                     let ndt = fmap (\obj -> let (nobj,_) = idx (\obj' -> storeObject val obj') obj
+                     let ndt = fmap (\obj -> let (nobj,_,_) = idx (\obj' -> let (nobj',errs) = storeObject val obj'
+                                                                            in (nobj',(),errs)
+                                                                  ) obj
                                              in nobj) dt
                      return (ptrs,Map.insert obj_p ndt objs)
                MICast from to ptr_from ptr_to -> case Map.lookup ptr_from ptrs of
                  Just (obj_p,tp,idx) -> return (Map.insert ptr_to (obj_p,to,idx) ptrs,objs)
                  Nothing -> error $ "Snow memory model: Failed to find pointer "++show ptr_from
-               --MIIndex idx ptr_from ptr_to -> 
+               MIIndex idx ptr_from ptr_to -> case Map.lookup ptr_from ptrs of
+                 Just (obj_p,tp,access) -> do
+                   return (Map.insert ptr_to (obj_p,indexType structs tp idx,
+                                              indexObject structs tp idx access) ptrs,objs)
                _ -> error $ "Memory instruction "++show instr++" not implemented in Snow memory model."
            ) (ptrs,objs)
 
