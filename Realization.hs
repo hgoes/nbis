@@ -268,6 +268,18 @@ realizeInstruction (IAssign trg expr) = do
       ptr <- reNewPtr
       reMemInstr (MIAlloc tp size'' ptr)
       return $ PointerValue ptr
+    ISelect cond ifT ifF -> do
+      condArg <- argToExpr cond
+      ifTArg <- argToExpr ifT
+      ifFArg <- argToExpr ifF
+      let cond' = valCond condArg
+      case (ifTArg,ifFArg) of
+        (PointerValue ifT',PointerValue ifF') -> do
+          ptr <- reNewPtr
+          reMemInstr (MISelect [(cond',ifT'),(not' cond',ifF')] ptr)
+          return $ PointerValue ptr
+        (ifT',ifF') -> do
+          return $ valSwitch [(ifT',cond'),(ifF',not' cond')]
     _ -> reEnvError $ "Unimplemented assign instruction: "++show expr
   rePutVar trg rval
   return Nothing

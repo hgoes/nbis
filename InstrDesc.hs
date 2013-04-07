@@ -145,6 +145,12 @@ reifyInstr ptr
               tp <- getType bcast >>= reifyType
               return $ IAssign ptr (IBitCast tp op)
           ) (castDown ptr)
+    ,fmap (\sel -> do
+              cond <- selectInstGetCondition sel >>= reifyOperand
+              ifT <- selectInstGetTrueValue sel >>= reifyOperand
+              ifF <- selectInstGetFalseValue sel >>= reifyOperand
+              return $ IAssign ptr (ISelect cond ifT ifF)
+          ) (castDown ptr)
     ]
   where
     mkSwitch ((Just act):_) = act
