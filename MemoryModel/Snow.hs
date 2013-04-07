@@ -117,6 +117,14 @@ updateLocation structs cond ptrs objs
                                                                   ) obj
                                              in nobj) dt
                      return (ptrs,Map.insert obj_p ndt objs)
+               MIStorePtr ptr trg -> case Map.lookup trg ptrs of
+                 Just (obj_p,tp,ObjAccessor idx) -> case Map.lookup obj_p objs of
+                   Just dt -> do
+                     let ndt = fmap (\obj -> let (nobj,_,_) = idx (\obj' -> let (nobj',errs) = storePtr ptr obj'
+                                                                            in (nobj',(),errs)
+                                                                  ) obj
+                                             in nobj) dt
+                     return (ptrs,Map.insert obj_p ndt objs)
                MICast from to ptr_from ptr_to -> case Map.lookup ptr_from ptrs of
                  Just (obj_p,tp,idx) -> return (Map.insert ptr_to (obj_p,to,idx) ptrs,objs)
                  Nothing -> error $ "Snow memory model: Failed to find pointer "++show ptr_from
