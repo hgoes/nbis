@@ -159,7 +159,11 @@ updateLocation structs cond ptrs objs next
                    let ndt = fmap (\(obj_p,tp,access) -> (obj_p,indexType structs tp idx,
                                                           indexObject structs tp idx access)) dt
                    return (Map.insert ptr_to ndt ptrs,objs,next)
-               --MISelect opts ptr -> 
+               MISelect opts ptr
+                 -> return (Map.insert ptr (caseDecision Nothing [ (cond,case Map.lookup ptr' ptrs of 
+                                                                       Just res -> res)
+                                                                 | (cond,ptr') <- opts ]) ptrs,
+                            objs,next)
                _ -> error $ "Memory instruction "++show instr++" not implemented in Snow memory model."
            ) (ptrs,objs,next)
 

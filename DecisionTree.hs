@@ -3,6 +3,7 @@ module DecisionTree
        (DecisionTree()
        ,decision
        ,boolDecision
+       ,caseDecision
        ,switchDecision
        ,accumDecisionTree
        ,decisionTreeEq)
