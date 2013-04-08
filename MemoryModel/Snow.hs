@@ -167,17 +167,19 @@ updateLocation structs cond ptrs objs next
                _ -> error $ "Memory instruction "++show instr++" not implemented in Snow memory model."
            ) (ptrs,objs,next)
 
-{-
-mkObject :: SMTExpr (BitVector BVUntyped) -> SMT Object
-mkObject bv = do
-  let sz = extractAnnotation bv
-      rsz = sz `div` 8
-      null = constArray (constantAnn (BitVector 0) 8) ()
-      arr = foldl (\arr' i -> store arr' (fromInteger i)
-                              (bvextract' ((rsz - i - 1)*8) 8 bv)
-                  ) null [0..rsz-1]
-  narr <- defConstNamed "storeRes" arr
-  return $ NormalObject narr -}
+idxCompare :: [Either Integer (SMTExpr (BitVector BVUntyped))]
+              -> [Either Integer (SMTExpr (BitVector BVUntyped))]
+              -> Either Bool (SMTExpr Bool)
+idxCompare [] [] = Left True
+idxCompare (x:xs) (y:ys) = case compare' x y of
+  Left False -> Left False
+  Left True -> case idxCompare xs ys of
+    Left res' -> Left res'
+    Right res' -> Right res'
+  Right res -> case idxCompare xs ys of
+    Left False -> Left False
+    Left True -> Right res
+    Right res' -> Right $ res .&&. res'
 
 mkGlobal :: MemContent -> SMT (Object ptr)
 mkGlobal cont = do
