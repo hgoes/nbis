@@ -11,6 +11,8 @@ module DecisionTree
 import Language.SMTLib2
 import Data.Typeable
 import Data.Foldable
+import Data.Traversable
+import Control.Applicative
 import Data.Monoid
 
 data DecisionTree a
@@ -40,6 +42,14 @@ instance Foldable DecisionTree where
                                            Nothing -> mempty
                                            Just def' -> foldMap f def') `mappend`
                                        (foldMap (foldMap f . snd) cases)
+
+instance Traversable DecisionTree where
+  traverse f (GroundNode x) = GroundNode <$> f x
+  traverse f (BoolNode c ifT ifF) = BoolNode c <$> traverse f ifT <*> traverse f ifF
+  traverse f (SwitchNode c Nothing cases)
+    = SwitchNode c Nothing <$> traverse (\(val,dt) -> fmap (\ndt -> (val,ndt)) (traverse f dt)) cases
+  traverse f (SwitchNode c (Just def) cases)
+    = SwitchNode c <$> (Just <$> traverse f def) <*> traverse (\(val,dt) -> fmap (\ndt -> (val,ndt)) (traverse f dt)) cases
 
 {-
 unrollDecisionTree :: SMTType b => (a -> SMTExpr b) -> DecisionTree a -> SMTExpr b
