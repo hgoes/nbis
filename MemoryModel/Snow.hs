@@ -167,8 +167,8 @@ updateLocation structs cond ptrs objs next
                _ -> error $ "Memory instruction "++show instr++" not implemented in Snow memory model."
            ) (ptrs,objs,next)
 
-idxCompare :: [Either Integer (SMTExpr (BitVector BVUntyped))]
-              -> [Either Integer (SMTExpr (BitVector BVUntyped))]
+idxCompare :: [DynNum]
+              -> [DynNum]
               -> Either Bool (SMTExpr Bool)
 idxCompare [] [] = Left True
 idxCompare (x:xs) (y:ys) = case compare' x y of

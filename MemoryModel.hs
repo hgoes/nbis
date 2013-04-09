@@ -22,9 +22,11 @@ data ErrorDesc = Custom
                | FreeAccess
                deriving (Show,Eq,Ord)
 
+type DynNum = Either Integer (SMTExpr (BitVector BVUntyped))
+
 data MemoryInstruction p
   = MINull TypeDesc p
-  | MIAlloc TypeDesc (Either Integer (SMTExpr (BitVector BVUntyped))) p
+  | MIAlloc TypeDesc DynNum p
   | MILoad p (SMTExpr (BitVector BVUntyped))
   | MILoadPtr p p
   | MIStore (SMTExpr (BitVector BVUntyped)) p
@@ -32,8 +34,8 @@ data MemoryInstruction p
   | MICompare p p (SMTExpr Bool)
   | MISelect [(SMTExpr Bool,p)] p
   | MICast TypeDesc TypeDesc p p
-  | MIIndex [Either Integer (SMTExpr (BitVector BVUntyped))] p p
-  | MICopy (Either Integer (SMTExpr (BitVector BVUntyped))) p p
+  | MIIndex [DynNum] p p
+  | MICopy DynNum p p
   | MIGlobal TypeDesc MemContent p
   deriving (Show,Eq)
 
