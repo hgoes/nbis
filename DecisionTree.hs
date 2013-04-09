@@ -6,7 +6,8 @@ module DecisionTree
        ,caseDecision
        ,switchDecision
        ,accumDecisionTree
-       ,decisionTreeEq)
+       ,decisionTreeEq
+       ,decisionTreeElems)
        where
 
 import Language.SMTLib2
@@ -15,6 +16,7 @@ import Data.Foldable
 import Data.Traversable
 import Control.Applicative
 import Data.Monoid
+import Prelude hiding (concat)
 
 data DecisionTree a
   = BoolNode (SMTExpr Bool) (DecisionTree a) (DecisionTree a)
@@ -119,3 +121,11 @@ accumDecisionTree f = accum' f []
     mkCompare f cur def done ((cmp,tree):rest) = let (e,acc) = accum' f (cmp:cur) tree
                                                      (e',acc') = mkCompare f cur def ((not' cmp):done) rest
                                                  in (ite cmp e e',acc++acc')
+
+decisionTreeElems :: DecisionTree a -> [a]
+decisionTreeElems (GroundNode x) = [x]
+decisionTreeElems (BoolNode _ x y) = (decisionTreeElems x)++(decisionTreeElems y)
+decisionTreeElems (CaseNode def cases) = (case def of
+                                             Nothing -> []
+                                             Just def' -> decisionTreeElems def')++
+                                         (concat (fmap (decisionTreeElems . snd) cases))
