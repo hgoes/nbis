@@ -142,7 +142,7 @@ reifyInstr ptr
           ) (castDown ptr)
     ,fmap (\bcast -> do
               op <- getOperand (bcast::Ptr BitCastInst) 0 >>= reifyOperand
-              tp <- getType bcast >>= reifyType
+              PointerType tp <- getType bcast >>= reifyType
               return $ IAssign ptr (IBitCast tp op)
           ) (castDown ptr)
     ,fmap (\sel -> do
