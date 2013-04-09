@@ -171,7 +171,7 @@ idxCompare :: [DynNum]
               -> [DynNum]
               -> Either Bool (SMTExpr Bool)
 idxCompare [] [] = Left True
-idxCompare (x:xs) (y:ys) = case compare' x y of
+idxCompare (x:xs) (y:ys) = case dynNumCombine (\x y -> Left $ x==y) (\x y -> Right $ x .==. y) x y of
   Left False -> Left False
   Left True -> case idxCompare xs ys of
     Left res' -> Left res'
@@ -180,11 +180,6 @@ idxCompare (x:xs) (y:ys) = case compare' x y of
     Left False -> Left False
     Left True -> Right res
     Right res' -> Right $ res .&&. res'
-  where
-    compare' (Left i1) (Left i2) = Left $ i1==i2
-    compare' (Right i1) (Right i2) = Right $ i1 .==. i2
-    compare' (Left i1) (Right i2) = Right $ (constantAnn (BitVector i1) (extractAnnotation i2)) .==. i2
-    compare' (Right i1) (Left i2) = Right $ i1 .==. (constantAnn (BitVector i2) (extractAnnotation i1))
 
 mkGlobal :: MemContent -> SMT (Object ptr)
 mkGlobal cont = do

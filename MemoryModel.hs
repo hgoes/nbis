@@ -81,3 +81,15 @@ flattenType (StructType (Right tps)) = concat $ fmap flattenType tps
 flattenType (ArrayType n tp) = concat $ genericReplicate n (flattenType tp)
 flattenType (VectorType n tp) = concat $ genericReplicate n (flattenType tp)
 flattenType tp = [tp]
+
+dynNumCombine :: (Integer -> Integer -> a)
+              -> (SMTExpr (BitVector BVUntyped) -> SMTExpr (BitVector BVUntyped) -> a)
+              -> DynNum -> DynNum -> a
+dynNumCombine f _ (Left i1) (Left i2) = f i1 i2
+dynNumCombine _ g (Right i1) (Right i2)
+  = case compare (extractAnnotation i1) (extractAnnotation i2) of
+      EQ -> g i1 i2
+      LT -> g (bvconcat (constantAnn (BitVector 0) ((extractAnnotation i2) - (extractAnnotation i1)) :: SMTExpr (BitVector BVUntyped)) i1) i2
+      GT -> g i1 (bvconcat (constantAnn (BitVector 0) ((extractAnnotation i1) - (extractAnnotation i2)) :: SMTExpr (BitVector BVUntyped)) i2)
+dynNumCombine _ g (Left i1) (Right i2) = g (constantAnn (BitVector i1) (extractAnnotation i2)) i2
+dynNumCombine _ g (Right i1) (Left i2) = g i1 (constantAnn (BitVector i2) (extractAnnotation i1))
