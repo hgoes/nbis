@@ -189,4 +189,13 @@ mkGlobal cont = do
     mkGlobal' (MemArray els) = do
       els' <- mapM mkGlobal' els
       return $ StaticArrayObject els'
-  
+
+snowDebug :: Show ptr => SnowMemory ptr -> String
+snowDebug snow = unlines $
+                 ["Objects: "]++
+                 ["  "++show i++": "++show obj | (i,obj) <- Map.toList (snowObjects snow)]++
+                 ["Locations: "]++
+                 concat [["  "++show loc++":"]++
+                         ["    "++show ptr++": "++show (decisionTreeElems dt)
+                         | (ptr,dt) <- Map.toList ptrs]
+                        | (loc,(prog,ptrs)) <- Map.toList (snowLocs snow) ]
