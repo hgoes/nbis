@@ -9,9 +9,10 @@ import Language.SMTLib2
 --import qualified Data.Graph.Inductive as Gr
 import Data.Map as Map hiding (foldl)
 import Data.Foldable
-import Prelude hiding (foldl1,foldl,mapM_)
+import Prelude hiding (foldl1,foldl,mapM_,concat)
 import Data.Bits
 import Control.Monad.Trans
+import Data.Maybe (catMaybes)
 
 import MemoryModel.Snow.Object
 
@@ -161,10 +162,19 @@ updateLocation structs cond ptrs objs next
                    let ndt = fmap (\(obj_p,idx') -> (obj_p,ptrIndexIndex idx idx')) dt
                    return (Map.insert ptr_to ndt ptrs,objs,next)
                MISelect opts ptr
-                 -> return (Map.insert ptr (caseDecision Nothing [ (cond,case Map.lookup ptr' ptrs of 
-                                                                       Just res -> res)
-                                                                 | (cond,ptr') <- opts ]) ptrs,
+                 -> return (Map.insert ptr (caseDecision Nothing (catMaybes [ do
+                                                                                 dt <- Map.lookup ptr' ptrs
+                                                                                 return (cond,dt)
+                                                                            | (cond,ptr') <- opts ])) ptrs,
                             objs,next)
+               MICompare ptr1 ptr2 cmp_res -> do
+                 let Just dt1 = Map.lookup ptr1 ptrs
+                     Just dt2 = Map.lookup ptr2 ptrs
+                     res = decisionTreeEq (\(obj1,idx1) (obj2,idx2) -> if obj1/=obj2
+                                                                      then Left False
+                                                                      else ptrIndexEq idx1 idx2) dt1 dt2
+                 assert $ cmp_res .==. res
+                 return (ptrs,objs,next)
                _ -> error $ "Memory instruction "++show instr++" not implemented in Snow memory model."
            ) (ptrs,objs,next)
 

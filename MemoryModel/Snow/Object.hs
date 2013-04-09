@@ -91,6 +91,7 @@ changeAt n f (x:xs) = let (xs',y,z) = changeAt (n-1) f xs
 indexObject :: Map String [TypeDesc] -> TypeDesc 
                -> [DynNum]
                -> ObjAccessor ptr -> ObjAccessor ptr
+indexObject _ _ [] access = access
 -- Static array access
 indexObject structs (PointerType tp) (i:idx) (ObjAccessor access)
   = ObjAccessor 
@@ -105,6 +106,20 @@ indexObject structs (PointerType tp) (i:idx) (ObjAccessor access)
                                      = indexBounded structs tp idx f obj
                                in (Bounded obj,res,errs)
                       ) obj)
+indexObject structs (StructType desc) (Left i:idx) (ObjAccessor access)
+  = let tps = case desc of
+          Left name -> case Map.lookup name structs of
+            Just res -> res
+          Right res -> res
+        tp = List.genericIndex tps i
+    in ObjAccessor
+       (\f obj -> access (\obj' -> case obj' of
+                             Bounded (StructObject objs)
+                               -> let (nobjs,res,errs) = changeAt i (indexBounded structs tp idx f) objs
+                                  in (Bounded (StructObject nobjs),res,errs)
+                             _ -> error $ "Can't index "++show obj'++" as a struct"
+                         ) obj)
+indexObject _ tp idx _ = error $ "indexObject not implemented for "++show tp++" "++show idx
 
 indexBounded :: Map String [TypeDesc] -> TypeDesc -> [DynNum]
                 -> (Object ptr -> (Object ptr,a,[(ErrorDesc,SMTExpr Bool)]))
