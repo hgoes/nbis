@@ -35,6 +35,53 @@ data ObjAccessor ptr = ObjAccessor (forall a. (Object ptr -> (Object ptr,a,[(Err
                                     -> Object ptr 
                                     -> (Object ptr,a,[(ErrorDesc,SMTExpr Bool)]))
 
+type PtrIndex = [(TypeDesc,[DynNum])]
+
+ptrIndexCast :: TypeDesc -> PtrIndex -> PtrIndex
+ptrIndexCast tp [] = [(tp,[])]
+ptrIndexCast tp ((_,[]):rest) = (tp,[]):rest
+ptrIndexCast tp1 ((tp2,idx):rest)
+  | tp1 == tp2 = (tp1,idx):rest
+  | otherwise = (tp1,[]):(tp2,idx):rest
+
+ptrIndexIndex :: [DynNum] -> PtrIndex -> PtrIndex
+ptrIndexIndex idx' ((tp,idx):rest) = (tp,mergeIdx idx idx'):rest
+  where
+    mergeIdx [] idx = idx
+    mergeIdx [i1] (i2:rest) = dynNumCombine (\x y -> Left $ x+y) (\x y -> Right $ bvadd x y) i1 i2:rest
+    mergeIdx (i:is) idx = i:mergeIdx is idx
+
+ptrIndexEq :: PtrIndex -> PtrIndex -> Either Bool (SMTExpr Bool)
+ptrIndexEq [] [] = Left True
+ptrIndexEq ((_,[]):r1) ((_,[]):r2) = ptrIndexEq r1 r2
+ptrIndexEq ((tp1,idx1):r1) ((tp2,idx2):r2)
+  | tp1 == tp2 = case idxCompare idx1 idx2 of
+                  Left False -> Left False
+                  Left True -> ptrIndexEq r1 r2
+                  Right c1 -> case ptrIndexEq r1 r2 of
+                               Left False -> Left False
+                               Left True -> Right c1
+                               Right c2 -> Right (c1 .&&. c2)
+
+ptrIndexGetAccessor :: Map String [TypeDesc] -> PtrIndex -> ObjAccessor ptr
+ptrIndexGetAccessor _ [] = ObjAccessor id
+ptrIndexGetAccessor structs ((tp,idx):rest) 
+  = indexObject structs tp idx (ptrIndexGetAccessor structs rest)
+
+idxCompare :: [DynNum]
+              -> [DynNum]
+              -> Either Bool (SMTExpr Bool)
+idxCompare [] [] = Left True
+idxCompare (x:xs) (y:ys) = case dynNumCombine (\x y -> Left $ x==y) (\x y -> Right $ x .==. y) x y of
+  Left False -> Left False
+  Left True -> case idxCompare xs ys of
+    Left res' -> Left res'
+    Right res' -> Right res'
+  Right res -> case idxCompare xs ys of
+    Left False -> Left False
+    Left True -> Right res
+    Right res' -> Right $ res .&&. res'
+
 changeAt :: Integer -> (a -> (a,b,c)) -> [a] -> ([a],b,c)
 changeAt 0 f (x:xs) = let (x',y,z) = f x
                       in (x':xs,y,z)
@@ -42,7 +89,7 @@ changeAt n f (x:xs) = let (xs',y,z) = changeAt (n-1) f xs
                       in (x:xs',y,z)
 
 indexObject :: Map String [TypeDesc] -> TypeDesc 
-               -> [Either Integer (SMTExpr (BitVector BVUntyped))] 
+               -> [DynNum]
                -> ObjAccessor ptr -> ObjAccessor ptr
 -- Static array access
 indexObject structs (PointerType tp) (i:idx) (ObjAccessor access)
@@ -59,8 +106,8 @@ indexObject structs (PointerType tp) (i:idx) (ObjAccessor access)
                                in (Bounded obj,res,errs)
                       ) obj)
 
-indexBounded :: Map String [TypeDesc] -> TypeDesc -> [Either Integer (SMTExpr (BitVector BVUntyped))] 
-                -> (Object ptr -> (Object ptr,a,[(ErrorDesc,SMTExpr Bool)])) 
+indexBounded :: Map String [TypeDesc] -> TypeDesc -> [DynNum]
+                -> (Object ptr -> (Object ptr,a,[(ErrorDesc,SMTExpr Bool)]))
                 -> BoundedObject ptr -> (BoundedObject ptr,a,[(ErrorDesc,SMTExpr Bool)])
 indexBounded _ _ [] f obj = let (Bounded nobj,res,errs) = f (Bounded obj)
                             in (nobj,res,errs)
