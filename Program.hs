@@ -70,8 +70,16 @@ getUsedTypes mod = do
 applyOptimizations :: Ptr Module -> IO ()
 applyOptimizations mod = do
   pm <- newPassManager
-  mem2reg <- createPromoteMemoryToRegisterPass
-  passManagerAdd pm mem2reg
+  opts <- sequence [createPromoteMemoryToRegisterPass
+                   ,createConstantPropagationPass
+                   ,createIndVarSimplifyPass
+                   ,createLoopSimplifyPass
+                   ,createCFGSimplificationPass
+                   ,createLICMPass
+                   ,createLoopRotatePass
+                   ,createLoopUnrollPass
+                   ]
+  mapM (passManagerAdd pm) opts
   passManagerRun pm mod
   deletePassManager pm
   moduleDump mod
