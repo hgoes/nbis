@@ -31,7 +31,6 @@ data RealizationEnv ptr
                    , reGlobals :: Map (Ptr GlobalVariable) ptr
                    , reArgs :: Map (Ptr Argument) (Val ptr)
                    , rePhis :: Map (Ptr BasicBlock) (SMTExpr Bool)
-                   , rePrediction :: Map (Ptr Instruction) TypeDesc
                    }
 
 data RealizationState ptr 
@@ -328,7 +327,6 @@ intrinsics "nbis_nondet_u32" = Just (intr_nondet 32)
 intrinsics "nbis_nondet_u16" = Just (intr_nondet 16)
 intrinsics "nbis_nondet_u8" = Just (intr_nondet 8)
 intrinsics "nbis_watch" = Just intr_watch
-intrinsics "malloc" = Just intr_malloc
 intrinsics _ = Nothing
 
 intr_memcpy _ [(PointerValue to,_),(PointerValue from,_),(len,_),_,_] = do
@@ -364,16 +362,6 @@ intr_watch _ ((ConstValue bv _,_):exprs) = do
   tell $ mempty { reWatchpoints = [(show bv,reActivation re,
                                     [ (tp,valValue val) 
                                     | (val,tp) <- exprs ])] }
-
-intr_malloc trg [(size,sztp)] = do
-  re <- ask
-  let Just tp = Map.lookup trg (rePrediction re)
-      size' = case size of
-        ConstValue bv _ -> Left bv
-        DirectValue bv -> Right bv
-  ptr <- reNewPtr
-  reMemInstr (MIAlloc tp size' ptr)
-  rePutVar trg (PointerValue ptr)
 
 intr_nondet width trg [] = do
   v <- lift $ varNamedAnn "nondetVar" width

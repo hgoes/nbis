@@ -109,9 +109,7 @@ data NodeType ptr
 
 data UnrollGraph gr m ptr
   = UnrollGraph { allFunctions :: Map String ([(Ptr Argument,TypeDesc)],TypeDesc,
-                                              [(Ptr BasicBlock,[(BlockSig,[InstrDesc Operand])])],
-                                              Map (Ptr Instruction) TypeDesc
-                                             )
+                                              [(Ptr BasicBlock,[(BlockSig,[InstrDesc Operand])])])
                 , allStructs :: Map String [TypeDesc]
                 , globalMemory :: m
                 , globalPointers :: Map (Ptr GlobalVariable) ptr
@@ -177,7 +175,7 @@ nodeSuccessors gr nd = case Gr.lab (nodeGraph gr) nd of
   Nothing -> error "nbis internal error: nodeSuccessors called with unknown node."
   Just st -> case nodeType st of
     RealizedStart fun _ 
-      -> let (_,_,blks,_) = (allFunctions gr)!fun
+      -> let (_,_,blks) = (allFunctions gr)!fun
              start_blk = fst $ head blks
          in [QueueEntry { queuedNode = IdBlock fun start_blk 0 
                         , incomingNode = nd
@@ -240,7 +238,7 @@ makeNode from nid = do
   (node_type,prog) <- case nid of
     IdStart fun -> do
       gr <- get
-      let (args,rtp,blks,_) = (allFunctions gr)!fun
+      let (args,rtp,blks) = (allFunctions gr)!fun
       args' <- mapM (\(name,tp) -> do
                         val <- newValue tp 
                         return (name,val)) args
@@ -251,7 +249,7 @@ makeNode from nid = do
       return (RealizedStart fun args',[])
     IdEnd fun -> do
       gr <- get
-      let (args,rtp,blks,_) = (allFunctions gr)!fun
+      let (args,rtp,blks) = (allFunctions gr)!fun
           Just pnode = from
           Just (Node { nodeType = RealizedBlock { nodeFunctionNode = fnode } })
             = Gr.lab (nodeGraph gr) pnode
@@ -263,7 +261,7 @@ makeNode from nid = do
       return (RealizedEnd fnode rv,[])
     IdBlock fun blk sblk -> do
       gr <- get
-      let (args,rtp,blks,pred) = (allFunctions gr)!fun
+      let (args,rtp,blks) = (allFunctions gr)!fun
           Just (_,subs) = List.find (\(name,_) 
                                      -> name == blk
                                     ) blks
@@ -290,7 +288,6 @@ makeNode from nid = do
                                , reGlobals = globalPointers gr
                                , reArgs = Map.fromList fun_args
                                , rePhis = phis
-                               , rePrediction = pred
                                }
           st = RealizationState { reLocals = inps
                                 , reNextPtr = nextPointer gr
@@ -460,8 +457,7 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m ptr a) = do
                                                       -> (block_sigs!(blk_name,i),instrs)
                                                      ) (zip [0..] subs)
                                       )
-                                  ) blks,
-                             predictMallocUse (concat [ instrs | (_,sblks) <- blks, instrs <- sblks ])
+                                  ) blks
                             )
                      ) funs
   mem0 <- memNew (undefined::ptr) tps structs

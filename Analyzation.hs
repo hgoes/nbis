@@ -211,23 +211,3 @@ foldInstrs f = foldl (\x1 (blk,sblks)
                                       -> (sblk+1,foldl (\x3 instr -> f x3 blk sblk instr) x2 instrs)
                                      ) (0,x1) sblks
                      )
-
-predictMallocUse :: [InstrDesc Operand] -> Map (Ptr Instruction) TypeDesc
-predictMallocUse = predict' Map.empty Set.empty
-  where
-    predict' mp act [] = Map.union mp (Map.fromList [ (entr,IntegerType 8) | entr <- Set.toList act ])
-    predict' mp act (instr:instrs) = case instr of
-      ITerminator (IMalloc trg _ _ _) -> predict' mp (Set.insert trg act) instrs
-      IAssign _ (IGetElementPtr (Operand { operandDesc = ODInstr instr _ }) _) 
-        -> if Set.member instr act
-           then predict' (Map.insert instr (IntegerType 8) mp) (Set.delete instr act) instrs
-           else predict' mp act instrs
-      IAssign _ (IBitCast tp (Operand { operandDesc = ODInstr instr _ }))
-        -> if Set.member instr act
-           then predict' (Map.insert instr tp mp) (Set.delete instr act) instrs
-           else predict' mp act instrs
-      IAssign _ (ILoad (Operand { operandDesc = ODInstr instr _ }))
-        -> if Set.member instr act
-           then predict' (Map.insert instr (IntegerType 8) mp) (Set.delete instr act) instrs
-           else predict' mp act instrs
-      _ -> predict' mp act instrs
