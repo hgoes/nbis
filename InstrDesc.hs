@@ -13,6 +13,7 @@ import LLVM.FFI.Type
 import LLVM.FFI.Constant
 import LLVM.FFI.APInt
 import LLVM.FFI.Use
+import LLVM.FFI.Pass
 
 data InstrDesc a
   = IAssign (Ptr Instruction) (AssignDesc a)
@@ -42,6 +43,7 @@ data TerminatorDesc a
   | IBrCond a (Ptr BasicBlock) (Ptr BasicBlock)
   | ISwitch a (Ptr BasicBlock) [(a,Ptr BasicBlock)]
   | ICall (Ptr Instruction) a [a]
+  | IMalloc (Ptr Instruction) (Maybe TypeDesc) a Bool
   deriving (Show,Eq,Ord)
 
 data Operand = Operand { operandType :: TypeDesc
@@ -61,8 +63,8 @@ data OperandDesc a
   | ODGetElementPtr a [a]
   deriving (Show,Eq,Ord)
 
-reifyInstr :: Ptr Instruction -> IO (InstrDesc Operand)
-reifyInstr ptr 
+reifyInstr :: Ptr TargetLibraryInfo -> Ptr DataLayout -> Ptr Instruction -> IO (InstrDesc Operand)
+reifyInstr tl dl ptr
   = mkSwitch
     [fmap (\binop -> do
               opcode <- binOpGetOpCode binop
@@ -71,10 +73,27 @@ reifyInstr ptr
               return $ IAssign ptr $ IBinaryOperator opcode op1 op2
           ) (castDown ptr)
     ,fmap (\call -> do
-              cobj <- callInstGetCalledValue call >>= reifyOperand
-              nargs <- callInstGetNumArgOperands call
-              args <- mapM (\i -> callInstGetArgOperand call i >>= reifyOperand) [0..(nargs-1)]
-              return $ ITerminator $ ICall ptr cobj args
+              isMalloc <- isMallocLikeFn call tl False
+              if isMalloc
+                then (do
+                         tp <- getMallocAllocatedType call tl
+                         rtp <- if tp==nullPtr
+                                then return Nothing
+                                else fmap Just (reifyType tp)
+                         sz <- getMallocArraySize call dl tl False
+                         (rsz,c) <- if sz==nullPtr
+                                    then (do
+                                             x <- callInstGetArgOperand call 0 >>= reifyOperand
+                                             return (x,False))
+                                    else (do
+                                             x <- reifyOperand sz
+                                             return (x,True))
+                         return $ ITerminator $ IMalloc ptr rtp rsz c)
+                else (do
+                         cobj <- callInstGetCalledValue call >>= reifyOperand
+                         nargs <- callInstGetNumArgOperands call
+                         args <- mapM (\i -> callInstGetArgOperand call i >>= reifyOperand) [0..(nargs-1)]
+                         return $ ITerminator $ ICall ptr cobj args)
           ) (castDown ptr)
     ,fmap (\cmp -> do
               op <- getICmpOp cmp

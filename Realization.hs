@@ -15,7 +15,7 @@ import Data.Foldable as F
 import Foreign.Ptr
 
 import LLVM.FFI.Value
-import LLVM.FFI.Instruction
+import LLVM.FFI.Instruction (Instruction,ICmpOp(..))
 import LLVM.FFI.BasicBlock
 import LLVM.FFI.Constant
 
@@ -59,7 +59,7 @@ type Realization ptr = RWST (RealizationEnv ptr) (RealizationOutput ptr) (Realiz
 
 data BlockFinalization mem = Jump (ConditionList (Ptr BasicBlock,Integer))
                            | Return (Maybe (Val mem))
-                           | Call String [Val mem] String
+                           | Call String [Val mem] (Ptr Instruction)
                            deriving (Show)
 
 reError :: String -> Realization ptr a
@@ -300,6 +300,16 @@ realizeInstruction (ITerminator (ICall trg f args)) = case operandDesc f of
         intr trg args'
         re <- ask
         return $ Just $ Jump (CondElse (reBlock re,reSubblock re + 1))
+      Nothing -> return $ Just $ Call fn (fmap fst args') trg
+realizeInstruction (ITerminator (IMalloc trg (Just tp) sz True)) = do
+  rsz <- argToExpr sz
+  let size = case rsz of
+        ConstValue bv _ -> Left bv
+        DirectValue bv -> Right bv
+  ptr <- reNewPtr
+  reMemInstr (MIAlloc tp size ptr)
+  rePutVar trg (PointerValue ptr)
+  return Nothing
 realizeInstruction instr = reError $ "Implement realizeInstruction for "++show instr
 
 intrinsics :: Enum ptr => String -> Maybe (Ptr Instruction -> [(Val ptr,TypeDesc)] -> Realization ptr ())

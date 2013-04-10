@@ -33,8 +33,10 @@ import LLVM.FFI.APInt
 import LLVM.FFI.OOP
 import LLVM.FFI.User
 import LLVM.FFI.Pass
+import LLVM.FFI.PassManager
 import LLVM.FFI.SetVector
 import LLVM.FFI.StringRef
+import LLVM.FFI.Transforms.Scalar
 
 type ProgDesc = (Map String ([(Ptr Argument, TypeDesc)],
                              TypeDesc,
@@ -65,12 +67,37 @@ getUsedTypes mod = do
   deleteFindUsedTypes pass
   return (all_tps,Map.fromList $ catMaybes structs)
 
+applyOptimizations :: Ptr Module -> IO ()
+applyOptimizations mod = do
+  pm <- newPassManager
+  mem2reg <- createPromoteMemoryToRegisterPass
+  passManagerAdd pm mem2reg
+  passManagerRun pm mod
+  deletePassManager pm
+  moduleDump mod
+  return ()
+
+getTargetLibraryInfo :: Ptr Module -> IO (Ptr TargetLibraryInfo)
+getTargetLibraryInfo mod = do
+  tli <- newTargetLibraryInfo
+  modulePassRunOnModule tli mod
+  return tli
+
+getDataLayout :: Ptr Module -> IO (Ptr DataLayout)
+getDataLayout mod = do
+  dl <- newDataLayoutFromModule mod
+  modulePassRunOnModule dl mod
+  return dl
+
 getProgram :: String -> IO ProgDesc
 getProgram file = do
   Just buf <- getFileMemoryBufferSimple file
   diag <- newSMDiagnostic
   ctx <- newLLVMContext
   mod <- parseIR buf diag ctx
+  applyOptimizations mod
+  tli <- getTargetLibraryInfo mod
+  dl <- getDataLayout mod
   funs <- getFunctionList mod >>= 
           ipListToList >>=
           mapM (\fun -> do
@@ -87,7 +114,7 @@ getProgram file = do
                            mapM (\blk -> do
                                     instrs <- getInstList blk >>=
                                               ipListToList >>=
-                                              mapM reifyInstr
+                                              mapM (reifyInstr tli dl)
                                     return (blk,mkSubBlocks [] instrs))
                    return (fname,(zip args argtps,rtp,blks))) >>=
           return . Map.fromList
@@ -107,6 +134,7 @@ getProgram file = do
     mkSubBlocks :: [InstrDesc Operand] -> [InstrDesc Operand] -> [[InstrDesc Operand]]
     mkSubBlocks cur (i:is) = case i of
       ITerminator (ICall _ _ _) -> (cur++[i]):mkSubBlocks [] is
+      ITerminator (IMalloc _ _ _ _) -> mkSubBlocks (cur++[i]) is
       ITerminator _ -> [cur++[i]]
       _ -> mkSubBlocks (cur++[i]) is
 
