@@ -155,7 +155,7 @@ updateLocation structs cond ptrs objs next
                    return (nptrs,nobjs,nnext)
                MICast from to ptr_from ptr_to -> case Map.lookup ptr_from ptrs of
                  Just dt -> do
-                   let ndt = fmap (\(obj_p,idx) -> (obj_p,ptrIndexCast to idx)) dt
+                   let ndt = fmap (\(obj_p,idx) -> (obj_p,ptrIndexCast structs to idx)) dt
                    return (Map.insert ptr_to ndt ptrs,objs,next)
                MIIndex idx ptr_from ptr_to -> case Map.lookup ptr_from ptrs of
                  Just dt -> do

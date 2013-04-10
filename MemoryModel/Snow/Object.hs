@@ -37,10 +37,22 @@ data ObjAccessor ptr = ObjAccessor (forall a. (Object ptr -> (Object ptr,a,[(Err
 
 type PtrIndex = [(TypeDesc,[DynNum])]
 
-ptrIndexCast :: TypeDesc -> PtrIndex -> PtrIndex
-ptrIndexCast tp [] = [(tp,[])]
-ptrIndexCast tp ((_,[]):rest) = (tp,[]):rest
-ptrIndexCast tp1 ((tp2,idx):rest)
+ptrIndexCast :: Map String [TypeDesc] -> TypeDesc -> PtrIndex -> PtrIndex
+ptrIndexCast structs tp1 ref@((tp2,idx):rest) = case indexType structs tp2 idx of
+  StructType desc -> let tps = case desc of
+                           Left name -> case Map.lookup name structs of
+                             Just res -> res
+                           Right res -> res
+                     in if head tps == tp1
+                        then (tp2,idx++[Left 0]):rest
+                        else ptrIndexCast' tp1 ref
+  _ -> ptrIndexCast' tp1 ref
+ptrIndexCast _ tp ref = ptrIndexCast' tp ref
+
+ptrIndexCast' :: TypeDesc -> PtrIndex -> PtrIndex
+ptrIndexCast' tp [] = [(tp,[])]
+ptrIndexCast' tp ((_,[]):rest) = (tp,[]):rest
+ptrIndexCast' tp1 ((tp2,idx):rest)
   | tp1 == tp2 = (tp1,idx):rest
   | otherwise = (tp1,[]):(tp2,idx):rest
 
