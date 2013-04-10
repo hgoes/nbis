@@ -50,11 +50,11 @@ ptrIndexCast structs tp1 ref@((tp2,idx):rest) = case indexType structs tp2 idx o
 ptrIndexCast _ tp ref = ptrIndexCast' tp ref
 
 ptrIndexCast' :: TypeDesc -> PtrIndex -> PtrIndex
-ptrIndexCast' tp [] = [(tp,[])]
-ptrIndexCast' tp ((_,[]):rest) = (tp,[]):rest
-ptrIndexCast' tp1 ((tp2,idx):rest)
-  | tp1 == tp2 = (tp1,idx):rest
-  | otherwise = (tp1,[]):(tp2,idx):rest
+ptrIndexCast' tp [] = [(PointerType tp,[])]
+ptrIndexCast' tp ((_,[]):rest) = (PointerType tp,[]):rest
+ptrIndexCast' tp1 ((PointerType tp2,idx):rest)
+  | tp1 == tp2 = (PointerType tp1,idx):rest
+  | otherwise = (PointerType tp1,[]):(PointerType tp2,idx):rest
 
 ptrIndexIndex :: [DynNum] -> PtrIndex -> PtrIndex
 ptrIndexIndex idx' ((tp,idx):rest) = (tp,mergeIdx idx idx'):rest
