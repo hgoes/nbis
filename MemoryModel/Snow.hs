@@ -121,7 +121,7 @@ updateLocation structs cond ptrs objs next
                          = foldl (\(cnext,cobjs,cups) (obj_p,idx)
                                   -> case Map.lookup obj_p objs of
                                     Just obj -> let ObjAccessor access = ptrIndexGetAccessor structs idx
-                                                    (nobj,_,_) = access (\obj' -> let (nobj',errs') = storeObject val obj
+                                                    (nobj,_,_) = access (\obj' -> let (nobj',errs') = storeObject val obj'
                                                                                  in (nobj',(),errs')
                                                                         ) obj
                                                 in (succ cnext,
@@ -140,7 +140,7 @@ updateLocation structs cond ptrs objs next
                          = foldl (\(cnext,cobjs,cups) (obj_p,idx)
                                   -> case Map.lookup obj_p objs of
                                     Just obj -> let ObjAccessor access = ptrIndexGetAccessor structs idx
-                                                    (nobj,_,_) = access (\obj' -> let (nobj',errs') = storePtr ptr obj
+                                                    (nobj,_,_) = access (\obj' -> let (nobj',errs') = storePtr ptr obj'
                                                                                  in (nobj',(),errs')
                                                                         ) obj
                                                 in (succ cnext,
