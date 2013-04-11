@@ -116,7 +116,7 @@ indexObject structs (PointerType tp) (i:idx) (ObjAccessor access)
                           (Bounded obj,Left 0) 
                             -> let (nobj,res,errs) 
                                      = indexBounded structs tp idx f obj
-                               in (Bounded obj,res,errs)
+                               in (Bounded nobj,res,errs)
                       ) obj)
 indexObject structs (StructType desc) (Left i:idx) (ObjAccessor access)
   = let tps = case desc of
