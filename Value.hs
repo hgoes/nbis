@@ -3,7 +3,7 @@ module Value where
 
 import MemoryModel
 
-import Language.SMTLib2
+import Language.SMTLib2 as SMT2
 import Data.Typeable
 import Data.Bits as Bits
 import LLVM.FFI.Instruction
@@ -102,6 +102,16 @@ valBinOp op (ConstValue lhs w) (ConstValue rhs _)
                    Shl -> shiftL lhs (fromIntegral rhs)
                    Or -> lhs .|. rhs
                    Mul -> lhs * rhs) w
+valBinOp op l@(ConditionValue lhs w) r@(ConditionValue rhs _) = case op of
+  Xor -> ConditionValue (app SMT2.xor [lhs,rhs]) w
+  Add -> DirectValue (bvadd (valValue l) (valValue r))
+  And -> ConditionValue (lhs .&&. rhs) w
+  Sub -> DirectValue (bvsub (valValue l) (valValue r))
+  Shl -> DirectValue (bvshl (valValue l) (valValue r))
+  LShr -> DirectValue (bvlshr (valValue l) (valValue r))
+  Or -> ConditionValue (lhs .||. rhs) w
+  Mul -> DirectValue (bvmul (valValue l) (valValue r))
+  _ -> error $ "nbis: Unsupported binary operator "++show op
 valBinOp op lhs rhs 
   = let lhs' = valValue lhs
         rhs' = valValue rhs
