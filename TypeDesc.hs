@@ -110,6 +110,7 @@ reifyType tp
 
 indexType :: Map String [TypeDesc] 
              -> TypeDesc -> [Either Integer a] -> TypeDesc
+indexType _ tp [] = tp
 indexType structs tp (_:idx) = indexType' tp idx
   where
     indexType' tp [] = tp
