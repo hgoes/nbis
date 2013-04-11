@@ -234,7 +234,9 @@ makeNode from nid = do
         IdStart fun -> "start_"++fun
         IdEnd fun -> "end_"++fun
         IdBlock fun blk sblk -> "act_"++fun++"_"++show blk++"_"++show sblk
-  act <- lift $ varNamed act_name
+  act <- case from of
+    Nothing -> return $ constant True -- Don't use an activation variable for the first node
+    Just _ -> lift $ varNamed act_name
   (node_type,prog) <- case nid of
     IdStart fun -> do
       gr <- get
@@ -506,7 +508,7 @@ checkGraph gr = do
     else (stack $ do
              -- Set all proxies to false (except for the start node)
              mapM_ (\(nd_id,nd) -> if nd_id == startNode gr
-                                   then assert $ nodeActivationProxy nd
+                                   then return ()
                                    else assert $ not' $ nodeActivationProxy nd
                    ) (Gr.labNodes (nodeGraph gr))
 
