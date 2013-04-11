@@ -353,9 +353,14 @@ intr_assert _ [(val,_)] = do
   let nval = valValue val
       sz = extractAnnotation nval
       guard_cond = case val of
-        ConditionValue val _ -> (reActivation re) .&&. (not' val)
-        _ -> (reActivation re) .&&. (nval .==. constantAnn (BitVector 0) sz)
-  tell $ mempty { reGuards = [(Custom,guard_cond)] }
+        ConstValue v w -> if v==0
+                          then Just (reActivation re)
+                          else Nothing
+        ConditionValue val _ -> Just $ (reActivation re) .&&. (not' val)
+        _ -> Just $ (reActivation re) .&&. (nval .==. constantAnn (BitVector 0) sz)
+  case guard_cond of
+    Just guard' -> tell $ mempty { reGuards = [(Custom,guard')] }
+    Nothing -> return ()
 
 intr_watch _ ((ConstValue bv _,_):exprs) = do
   re <- ask
