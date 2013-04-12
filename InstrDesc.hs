@@ -14,6 +14,7 @@ import LLVM.FFI.Constant
 import LLVM.FFI.APInt
 import LLVM.FFI.Use
 import LLVM.FFI.Pass
+import Data.Map as Map
 
 data InstrDesc a
   = IAssign (Ptr Instruction) (AssignDesc a)
@@ -177,6 +178,41 @@ reifyInstr tl dl ptr
     mkSwitch [] = do
       valueDump ptr
       error "Unknown instruction."
+
+getInstrType :: Map String [TypeDesc] -> InstrDesc Operand -> TypeDesc
+getInstrType structs (IAssign _ desc) = case desc of
+  IBinaryOperator _ l _ -> operandType l
+  IFCmp _ _ _ -> IntegerType 1
+  IICmp _ _ _ -> IntegerType 1
+  IGetElementPtr ptr idx -> let PointerType tp = operandType ptr
+                            in indexType structs tp [ case operandDesc i of
+                                                         ODInt x -> Left x
+                                                         _ -> Right ()
+                                                    | i <- idx ]
+  IPhi ((_,op):_) -> operandType op
+  ISelect _ arg _ -> operandType arg
+  ILoad ptr -> let PointerType tp = operandType ptr
+               in tp
+  IBitCast to _ -> to
+  ISExt to _ -> to
+  ITrunc to _ -> to
+  IZExt to _ -> to
+  IAlloca tp _ -> PointerType tp
+getInstrType _ (IStore _ _) = VoidType
+getInstrType _ (ITerminator desc) = case desc of
+  ICall _ f _ -> case operandType f of
+    PointerType (FunctionType rtp _ _) -> rtp
+    tp -> error $ "Invalid type for call argument: "++show tp
+  IMalloc _ (Just tp) _ _ -> PointerType tp
+  _ -> VoidType
+
+getInstrTarget :: InstrDesc Operand -> Maybe (Ptr Instruction)
+getInstrTarget (IAssign x _) = Just x
+getInstrTarget (ITerminator desc) = case desc of
+  ICall trg _ _ -> Just trg
+  IMalloc trg _ _ _ -> Just trg
+  _ -> Nothing
+getInstrTarget (IStore _ _) = Nothing
 
 reifyOperand :: Ptr Value -> IO Operand
 reifyOperand ptr = do
