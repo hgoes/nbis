@@ -206,6 +206,10 @@ loadObject' sz (StaticArrayObject (obj:objs)) = case loadObject' sz obj of
                              Nothing -> Just r1
                              Just r2 -> Just $ bvconcat r1 r2,errs++errs')
 
+loadPtr :: Object ptr -> (Maybe ptr,[(ErrorDesc,SMTExpr Bool)])
+loadPtr (Bounded (ValidPointer p)) = (Just p,[])
+loadPtr (Bounded NullPointer) = (Nothing,[])
+
 storeObject :: SMTExpr (BitVector BVUntyped) -> Object ptr -> (Object ptr,[(ErrorDesc,SMTExpr Bool)])
 storeObject bv (Bounded obj) 
   = let (noff,nobj,errs) = storeObject' 0 bv obj

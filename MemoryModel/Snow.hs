@@ -9,7 +9,8 @@ import Language.SMTLib2
 --import qualified Data.Graph.Inductive as Gr
 import Data.Map as Map hiding (foldl)
 import Data.Foldable
-import Prelude hiding (foldl1,foldl,mapM_,concat)
+import Data.Traversable
+import Prelude hiding (foldl1,foldl,mapM_,concat,mapM)
 import Data.Bits
 import Control.Monad.Trans
 import Data.Maybe (catMaybes)
@@ -115,6 +116,21 @@ updateLocation structs cond ptrs objs next
                               ) dt
                    assert $ cond .=>. (res .==. obj')
                    return (ptrs,objs,next)
+               MILoadPtr from to -> case Map.lookup from ptrs of
+                 Just dt -> do
+                   let ((errs,nnext,nobjs),ndt)
+                         = mapAccumL (\(cerrs,cnext,cobjs) (obj_p,idx)
+                                      -> let Just obj = Map.lookup obj_p objs
+                                             ObjAccessor access = ptrIndexGetAccessor structs idx
+                                             (_,ptr,errs) = access (\obj' -> let (res,errs) = loadPtr obj'
+                                                                             in (obj',res,errs)
+                                                                   ) obj
+                                         in ((cerrs++errs,succ cnext,Map.insert cnext (case ptr of
+                                                                                          Nothing -> Bounded NullPointer
+                                                                                          Just p -> Bounded (ValidPointer p)
+                                                                                      ) cobjs),(cnext,[]))
+                                     ) ([],next,objs) dt
+                   return (Map.insert to ndt ptrs,nobjs,nnext)
                MIStore val ptr -> case Map.lookup ptr ptrs of
                  Just dt -> do
                    let (nnext,nobjs,ups)
