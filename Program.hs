@@ -88,7 +88,7 @@ passes = [APass createPromoteMemoryToRegisterPass
                     export_list <- newArrayRef arr 1
                     --export_list <- newArrayRefEmpty
                     createInternalizePass export_list)
-         ,APass (createFunctionInliningPass 0)
+         ,APass (createFunctionInliningPass 100)
          ]
 
 applyOptimizations :: Ptr Module -> IO ()
