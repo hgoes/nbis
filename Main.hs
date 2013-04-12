@@ -84,14 +84,15 @@ data Node m = Node { nodeActivation :: SMTExpr Bool
 
 instance Show (Node m) where
   show nd = case nodeType nd of
-    RealizedStart fun _ -> "start "++fun
+    RealizedStart fun _ _ -> "start "++fun
     RealizedEnd _ _ -> "end"
     RealizedBlock { nodeBlock = blk
                   , nodeSubblock = sblk } -> show blk++"."++show sblk
 
 data NodeType ptr
   = RealizedStart { nodeStartName :: String
-                  , nodeArguments :: [(Ptr Argument,Val ptr)] }
+                  , nodeArguments :: [(Ptr Argument,Val ptr)]
+                  , nodeRealizedEnd :: Maybe Gr.Node }
   | RealizedEnd { nodeEndFunctionNode :: Gr.Node
                 , nodeReturns :: Maybe (Val ptr) }
   | RealizedBlock { nodeFunctionNode :: Gr.Node
@@ -174,7 +175,7 @@ nodeSuccessors :: Gr.Graph gr => UnrollGraph gr m ptr -> Gr.Node -> [QueueEntry 
 nodeSuccessors gr nd = case Gr.lab (nodeGraph gr) nd of
   Nothing -> error "nbis internal error: nodeSuccessors called with unknown node."
   Just st -> case nodeType st of
-    RealizedStart fun _ 
+    RealizedStart fun _ _
       -> let (_,_,blks) = (allFunctions gr)!fun
              start_blk = fst $ head blks
          in [QueueEntry { queuedNode = IdBlock fun start_blk 0 
@@ -205,9 +206,29 @@ nodeSuccessors gr nd = case Gr.lab (nodeGraph gr) nd of
                                             , incomingEdge = TCall args
                                             } ]
 
-updateDelayed :: Gr.Graph gr => UnrollGraph gr m ptr -> Gr.Node -> [DelayedReturn] -> ([QueueEntry ptr],[DelayedReturn])
-updateDelayed gr nd delayed
+updateDelayed :: Gr.Graph gr => UnrollGraph gr m ptr -> Gr.Node -> Gr.Node -> [DelayedReturn] -> ([QueueEntry ptr],[DelayedReturn])
+updateDelayed gr from nd delayed
   = case Gr.lab (nodeGraph gr) nd of
+    Just (Node { nodeType = RealizedStart _ _ (Just fnode) }) -> update' fnode delayed
+    Just (Node { nodeType = RealizedStart _ _ Nothing })
+      -> case Gr.lab (nodeGraph gr) from of
+      Just (Node { nodeType = RealizedBlock { nodeFinalization = Call _ _ cret
+                                            , nodeFunctionNode = fnode
+                                            , nodeBlock = blk
+                                            , nodeSubblock = sblk
+                                            }
+                 }) -> (case Gr.lab (nodeGraph gr) fnode of
+                           Just (Node { nodeType = RealizedStart fname _ _ })
+                             -> trace ("Delaying "++show (fname,blk,sblk+1))
+                                ([],DelayedReturn { callingNode = from
+                                                  , callingFunction = fname
+                                                  , callingBlock = blk
+                                                  , callingSubblock = sblk+1
+                                                  , calledNode = nd
+                                                  , callReturnsTo = cret
+                                                  }:delayed)
+                           Nothing -> error $ "Failed to lookup function node "++show fnode
+                           Just x -> error $ "Function node is not a function start?? "++show x)
     Just (Node { nodeType = RealizedEnd fnode _ }) -> update' fnode delayed
     _ -> ([],delayed)
     where
@@ -227,9 +248,10 @@ updateDelayed gr nd delayed
 
 makeNode :: (Gr.DynGraph gr,Enum ptr,MemoryModel m ptr)
             => Maybe Gr.Node
+            -> Maybe Gr.Node
             -> NodeId 
             -> Unrollment gr m ptr Gr.Node
-makeNode from nid = do
+makeNode read_from from nid = do
   let act_name = case nid of
         IdStart fun -> "start_"++fun
         IdEnd fun -> "end_"++fun
@@ -248,7 +270,7 @@ makeNode from nid = do
                               PointerValue ptr -> Just ptr
                               _ -> Nothing
                           ) args'-}
-      return (RealizedStart fun args',[])
+      return (RealizedStart fun args' Nothing,[])
     IdEnd fun -> do
       gr <- get
       let (args,rtp,blks) = (allFunctions gr)!fun
@@ -260,21 +282,32 @@ makeNode from nid = do
         _ -> do
           v <- newValue rtp
           return (Just v)
+      -- Set the pointer of the function start node
+      modify (\gr -> case Gr.match fnode (nodeGraph gr) of
+                 (Just (inc,_,nd@Node { nodeType = RealizedStart fun args Nothing },outc),gr')
+                   -> gr { nodeGraph = (inc,fnode,nd { nodeType = RealizedStart fun args (Just $ nextNode gr) },outc) Gr.& gr' }
+             )
       return (RealizedEnd fnode rv,[])
     IdBlock fun blk sblk -> do
       gr <- get
       let (args,rtp,blks) = (allFunctions gr)!fun
-          Just (_,subs) = List.find (\(name,_) 
-                                     -> name == blk
-                                    ) blks
+          subs = case List.find (\(name,_)
+                                 -> name == blk
+                                ) blks of
+                   Just (_,s) -> s
+                   Nothing -> error $ "Failed to find subblock "++show blk++" of function "++fun
           (sig,instrs) = subs `genericIndex` sblk
           Just fnid = from
           Just (Node { nodeType = from_nt }) 
             = Gr.lab (nodeGraph gr) fnid
           ffid = case from_nt of
-            RealizedStart _ _ -> fnid
+            RealizedStart _ _ _ -> fnid
+            RealizedEnd _ _ -> case read_from of
+              Just f -> case Gr.lab (nodeGraph gr) f of
+                Just (Node { nodeType = RealizedBlock { nodeFunctionNode = fn } })
+                  -> fn
             RealizedBlock { nodeFunctionNode = n } -> n
-          Just (Node { nodeType = RealizedStart _ fun_args }) = Gr.lab (nodeGraph gr) ffid
+          Just (Node { nodeType = RealizedStart _ fun_args _ }) = Gr.lab (nodeGraph gr) ffid
       inps <- mapM newValue (blockInputs sig)
       let allPhis = foldl (\s (_,s') -> Set.union s s') Set.empty (blockPhis sig)
       phis <- fmap Map.fromList $
@@ -339,8 +372,8 @@ connectNodes from read_from trans to = do
         TReturn _ -> nodeActivation nd_from
         TDeliver _ -> nodeActivation nd_read_from
       eqs = case nodeType nd_from of
-        RealizedStart fun_name args -> case nodeType nd_to of
-          RealizedBlock {} -> []
+        RealizedStart fun_name args _ -> case nodeType nd_to of
+          RealizedBlock {} -> [ (PointerValue v,PointerValue v) | (_,PointerValue v) <- args ]
         RealizedEnd _ ret -> case trans of
           TDeliver ret_name -> case nodeType nd_read_from of
             RealizedBlock { nodeOutput = outp_read } -> case nodeType nd_to of
@@ -360,7 +393,7 @@ connectNodes from read_from trans to = do
               (Nothing,Nothing) -> []
               (Just r1,Just r2) -> [(r2,r1)]
           Call f args del -> case nodeType nd_to of
-            RealizedStart _ args' -> zipWith (\(_,arg_i) arg_o -> (arg_i,arg_o)) args' args
+            RealizedStart _ args' _ -> zipWith (\(_,arg_i) arg_o -> (arg_i,arg_o)) args' args
   nproxy <- lift $ varNamed "proxy"
   lift $ assert $ nodeActivationProxy nd_to .==. (cond .||. nproxy)
   let (ptr_eqs,val_eqs) = foldr (\pair (ptr_eqs,val_eqs) -> case pair of
@@ -383,13 +416,13 @@ connectNodes from read_from trans to = do
            , globalMemory = mem' }
 
 targetNode :: (Gr.DynGraph gr,Enum ptr,MemoryModel m ptr)
-              => Gr.Node -> NodeId 
+              => Gr.Node -> Gr.Node -> NodeId
               -> Unrollment gr m ptr (Gr.Node,Bool)
-targetNode from to = do
+targetNode read_from from to = do
   gr <- get
   case getNode gr Nothing (insts gr) of
     Nothing -> do
-      nd <- makeNode (Just from) to
+      nd <- makeNode (Just read_from) (Just from) to
       modify $ \gr -> gr { nodeInstances = Map.alter (\minsts -> case minsts of
                                                          Nothing -> Just [nd]
                                                          Just nds -> Just $ nd:nds
@@ -421,7 +454,7 @@ incrementGraph = do
       -- Remove element from queue 
       put $ gr { queuedNodes = xs }
       -- and determine the target node
-      (nd,new) <- targetNode (incomingNode x) (queuedNode x) 
+      (nd,new) <- targetNode (incomingReadNode x) (incomingNode x) (queuedNode x)
       -- Connect the nodes
       connectNodes (incomingNode x) 
         (incomingReadNode x)
@@ -432,7 +465,7 @@ incrementGraph = do
                                        (nodeGraph gr) }
       -- Update delayed nodes
       gr <- get
-      let (qs1,ndl) = updateDelayed gr nd (delayedNodes gr)
+      let (qs1,ndl) = updateDelayed gr (incomingNode x) nd (delayedNodes gr)
           qs2 = if new then nodeSuccessors gr nd
                 else []
       put $ gr { queuedNodes = (queuedNodes gr) ++ 
@@ -483,7 +516,7 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m ptr a) = do
                         , delayedNodes = []
                         }
   evalStateT (do
-                 nd_start <- makeNode Nothing (IdStart { startFunction = init })
+                 nd_start <- makeNode Nothing Nothing (IdStart { startFunction = init })
                  modify $ \gr -> gr { startNode = nd_start 
                                     , queuedNodes = nodeSuccessors gr nd_start }
                  f) gr0
