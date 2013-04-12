@@ -11,6 +11,7 @@ import LLVM.FFI.Instruction
 import LLVM.FFI.BasicBlock
 import LLVM.FFI.Value
 import Foreign.Ptr
+import qualified Data.Graph.Inductive as Gr
 
 data BlockSig = BlockSig 
                 { blockPhis :: Map (Ptr Instruction) (TypeDesc,Set (Ptr BasicBlock))
@@ -211,3 +212,32 @@ foldInstrs f = foldl (\x1 (blk,sblks)
                                       -> (sblk+1,foldl (\x3 instr -> f x3 blk sblk instr) x2 instrs)
                                      ) (0,x1) sblks
                      )
+
+programAsGraph :: Gr.DynGraph gr => [(Ptr BasicBlock,[[InstrDesc Operand]])] 
+                  -> (gr (Ptr BasicBlock,Integer,[InstrDesc Operand]) (),Map (Ptr BasicBlock,Integer) Gr.Node)
+programAsGraph prog = createEdges $ createNodes (Gr.empty,Map.empty) prog
+  where
+    createNodes res [] = res
+    createNodes res ((blk,sblks):rest)
+      = foldl (\(cgr,cmp) (instrs,sblk)
+               -> let [nnode] = Gr.newNodes 1 cgr
+                  in (Gr.insNode (nnode,(blk,sblk,instrs)) cgr,Map.insert (blk,sblk) nnode cmp)
+              ) res (zip sblks [0..])
+
+    createEdges (gr,mp) = (Gr.ufold (\(_,node,(blk,sblk,instrs),_) cgr
+                                     -> case last instrs of
+                                       ITerminator term -> case term of
+                                         IRetVoid -> cgr
+                                         IRet _ -> cgr
+                                         IBr trg -> case Map.lookup (trg,0) mp of
+                                           Just tnd -> Gr.insEdge (node,tnd,()) cgr
+                                         IBrCond _ l r -> case (Map.lookup (l,0) mp,Map.lookup (r,0) mp) of
+                                           (Just t1,Just t2) -> Gr.insEdges [(node,t1,()),(node,t2,())] cgr
+                                         ISwitch _ def cases -> case Map.lookup (def,0) mp of
+                                           Just tdef -> Gr.insEdge (node,tdef,())
+                                                        (foldl (\cgr' (_,c) -> case Map.lookup (c,0) mp of
+                                                                   Just t -> Gr.insEdge (node,t,()) cgr'
+                                                               ) cgr cases)
+                                         ICall _ _ _ -> case Map.lookup (blk,sblk+1) mp of
+                                           Just trg -> Gr.insEdge (node,trg,()) cgr
+                                    ) gr gr,mp)
