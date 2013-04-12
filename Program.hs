@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ScopedTypeVariables,ExistentialQuantification #-}
 module Program where
 
 import MemoryModel
@@ -16,6 +16,8 @@ import Language.SMTLib2
 import Prelude as P hiding (foldl,concat)
 import Data.Foldable
 import Foreign.Ptr
+import Foreign.C.String
+import Foreign.Marshal.Array
 import Data.Maybe (catMaybes)
 
 import LLVM.FFI.Instruction
@@ -37,6 +39,8 @@ import LLVM.FFI.PassManager
 import LLVM.FFI.SetVector
 import LLVM.FFI.StringRef
 import LLVM.FFI.Transforms.Scalar
+import LLVM.FFI.Transforms.IPO
+import LLVM.FFI.ArrayRef
 
 type ProgDesc = (Map String ([(Ptr Argument, TypeDesc)],
                              TypeDesc,
@@ -67,19 +71,32 @@ getUsedTypes mod = do
   deleteFindUsedTypes pass
   return (all_tps,Map.fromList $ catMaybes structs)
 
+data APass = forall p. PassC p => APass (IO (Ptr p))
+
+passes :: [APass]
+passes = [APass createPromoteMemoryToRegisterPass
+         ,APass createConstantPropagationPass
+         ,APass createIndVarSimplifyPass
+         ,APass createLoopSimplifyPass
+         ,APass createCFGSimplificationPass
+         ,APass createLICMPass
+         ,APass createLoopRotatePass
+         ,APass createLoopUnrollPass
+         ,APass (do
+                    m <- newCString "main"
+                    arr <- newArray [m]
+                    export_list <- newArrayRef arr 1
+                    --export_list <- newArrayRefEmpty
+                    createInternalizePass export_list)
+         ,APass (createFunctionInliningPass 0)
+         ]
+
 applyOptimizations :: Ptr Module -> IO ()
 applyOptimizations mod = do
   pm <- newPassManager
-  opts <- sequence [createPromoteMemoryToRegisterPass
-                   ,createConstantPropagationPass
-                   ,createIndVarSimplifyPass
-                   ,createLoopSimplifyPass
-                   ,createCFGSimplificationPass
-                   ,createLICMPass
-                   ,createLoopRotatePass
-                   ,createLoopUnrollPass
-                   ]
-  mapM (passManagerAdd pm) opts
+  mapM (\(APass c) -> do
+           pass <- c
+           passManagerAdd pm pass) passes
   passManagerRun pm mod
   deletePassManager pm
   moduleDump mod
