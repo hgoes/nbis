@@ -58,7 +58,8 @@ switchDecision cmp def cases
   = CaseNode def (fmap (\(cmp',dt) -> (cmp .==. cmp',dt)) cases)
 
 caseDecision :: Maybe (DecisionTree a) -> [(SMTExpr Bool,DecisionTree a)] -> DecisionTree a
-caseDecision = CaseNode
+caseDecision Nothing [] = error "DecisionTree: Invalid case decision created"
+caseDecision def cases = CaseNode def cases
 
 decision :: a -> DecisionTree a
 decision = GroundNode
