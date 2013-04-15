@@ -4,12 +4,13 @@ Description:	A model checker for LLVM code
 License:	GPL
 License-File:	LICENSE
 Author:		Henning Günther <guenther@iti.cs.tu-bs.de>
-Build-Type:	Simple
+Build-Type:	Custom
 Category:	Testing
 Cabal-Version:	>= 1.2
 
 Executable nbis
   Main-Is:		Main.hs
+  Extensions:           CPP
   Other-Modules:
     MemoryModel
     MemoryModel.Untyped
