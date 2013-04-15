@@ -219,10 +219,11 @@ programAsGraph prog = createEdges $ createNodes (Gr.empty,Map.empty) prog
   where
     createNodes res [] = res
     createNodes res ((blk,sblks):rest)
-      = foldl (\(cgr,cmp) (instrs,sblk)
-               -> let [nnode] = Gr.newNodes 1 cgr
-                  in (Gr.insNode (nnode,(blk,sblk,instrs)) cgr,Map.insert (blk,sblk) nnode cmp)
-              ) res (zip sblks [0..])
+      = createNodes (foldl (\(cgr,cmp) (instrs,sblk)
+                            -> let [nnode] = Gr.newNodes 1 cgr
+                               in (Gr.insNode (nnode,(blk,sblk,instrs)) cgr,Map.insert (blk,sblk) nnode cmp)
+                           ) res (zip sblks [0..])
+                    ) rest
 
     createEdges (gr,mp) = (Gr.ufold (\(_,node,(blk,sblk,instrs),_) cgr
                                      -> case last instrs of
