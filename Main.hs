@@ -108,9 +108,17 @@ data NodeType ptr
                   }
     deriving (Show)
 
+data FunctionDescr gr = FunctionDescr
+                        { funDescrArgs :: [(Ptr Argument,TypeDesc)]
+                        , funDescrReturnType :: TypeDesc
+                        , funDescrBlocks :: [(Ptr BasicBlock,[(BlockSig,[InstrDesc Operand])])]
+                        , funDescrGraph :: gr (Ptr BasicBlock,Integer,[InstrDesc Operand]) ()
+                        , funDescrNodeMap :: Map (Ptr BasicBlock,Integer) Gr.Node
+                        , funDescrSCC :: [[Gr.Node]]
+                        }
+
 data UnrollGraph gr m ptr
-  = UnrollGraph { allFunctions :: Map String ([(Ptr Argument,TypeDesc)],TypeDesc,
-                                              [(Ptr BasicBlock,[(BlockSig,[InstrDesc Operand])])])
+  = UnrollGraph { allFunctions :: Map String (FunctionDescr gr)
                 , allStructs :: Map String [TypeDesc]
                 , globalMemory :: m
                 , globalPointers :: Map (Ptr GlobalVariable) ptr
@@ -176,7 +184,7 @@ nodeSuccessors gr nd = case Gr.lab (nodeGraph gr) nd of
   Nothing -> error "nbis internal error: nodeSuccessors called with unknown node."
   Just st -> case nodeType st of
     RealizedStart fun _ _
-      -> let (_,_,blks) = (allFunctions gr)!fun
+      -> let blks = funDescrBlocks $ (allFunctions gr)!fun
              start_blk = fst $ head blks
          in [QueueEntry { queuedNode = IdBlock fun start_blk 0 
                         , incomingNode = nd
@@ -262,7 +270,7 @@ makeNode read_from from nid = do
   (node_type,prog) <- case nid of
     IdStart fun -> do
       gr <- get
-      let (args,rtp,blks) = (allFunctions gr)!fun
+      let FunctionDescr { funDescrArgs = args } = (allFunctions gr)!fun
       args' <- mapM (\(name,tp) -> do
                         val <- newValue tp 
                         return (name,val)) args
@@ -273,7 +281,8 @@ makeNode read_from from nid = do
       return (RealizedStart fun args' Nothing,[])
     IdEnd fun -> do
       gr <- get
-      let (args,rtp,blks) = (allFunctions gr)!fun
+      let FunctionDescr { funDescrArgs = args
+                        , funDescrReturnType = rtp } = (allFunctions gr)!fun
           Just pnode = from
           Just (Node { nodeType = RealizedBlock { nodeFunctionNode = fnode } })
             = Gr.lab (nodeGraph gr) pnode
@@ -290,7 +299,7 @@ makeNode read_from from nid = do
       return (RealizedEnd fnode rv,[])
     IdBlock fun blk sblk -> do
       gr <- get
-      let (args,rtp,blks) = (allFunctions gr)!fun
+      let blks = funDescrBlocks $ (allFunctions gr)!fun
           subs = case List.find (\(name,_)
                                  -> name == blk
                                 ) blks of
@@ -486,14 +495,19 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m ptr a) = do
       globs_mp = fmap (\(tp,_) -> tp) globs
       allfuns = fmap (\(sig,rtp,blks) 
                       -> let block_sigs = mkBlockSigs blks
-                         in (sig,rtp,
-                             fmap (\(blk_name,subs) 
-                                   -> (blk_name,fmap (\(i,instrs) 
-                                                      -> (block_sigs!(blk_name,i),instrs)
-                                                     ) (zip [0..] subs)
-                                      )
-                                  ) blks
-                            )
+                             (pgr,pmp) = programAsGraph blks
+                         in FunctionDescr { funDescrArgs = sig
+                                          , funDescrReturnType = rtp
+                                          , funDescrBlocks = fmap (\(blk_name,subs)
+                                                                   -> (blk_name,fmap (\(i,instrs)
+                                                                                      -> (block_sigs!(blk_name,i),instrs)
+                                                                                     ) (zip [0..] subs)
+                                                                      )
+                                                                  ) blks
+                                          , funDescrGraph = pgr
+                                          , funDescrNodeMap = pmp
+                                          , funDescrSCC = Gr.scc pgr
+                                          }
                      ) funs
   mem0 <- memNew (undefined::ptr) tps structs
   let ((cptr,prog),globs') = mapAccumL (\(ptr',prog') (tp,cont) 
