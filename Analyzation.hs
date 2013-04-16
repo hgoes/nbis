@@ -69,7 +69,7 @@ mkBlockSigs instrs
           = foldInstrs (\(orig,succ,phi) blk sblk instr 
                         -> (getVariableOrigins orig blk sblk instr,
                             getSuccessors succ blk sblk instr,
-                            getPhis phi blk sblk instr)
+                            getPhis' phi blk sblk instr)
                        ) (Map.empty,(Map.empty,Map.empty),Map.empty) instrs
         (_,(inps,args,outps)) = foldInstrs (getInputOutput origins succs) (Set.empty,(Map.empty,Map.empty,Map.empty)) instrs
         sigs_preds = fmap (\pred -> emptyBlockSig { blockOrigins = pred }) preds
@@ -103,9 +103,9 @@ getSuccessors mp blk sblk instr
       jump blk sblk trgs (pred,succ) = (foldl (\pred' (blk',sblk') -> Map.insertWith Set.union (blk',sblk') (Set.singleton (blk,sblk)) pred') pred trgs,
                                         Map.insertWith Set.union (blk,sblk) trgs succ)
 
-getPhis :: Map (Ptr BasicBlock,Integer) (Map (Ptr Instruction) (TypeDesc,Set (Ptr BasicBlock))) -> Ptr BasicBlock -> Integer -> InstrDesc Operand
+getPhis' :: Map (Ptr BasicBlock,Integer) (Map (Ptr Instruction) (TypeDesc,Set (Ptr BasicBlock))) -> Ptr BasicBlock -> Integer -> InstrDesc Operand
            -> Map (Ptr BasicBlock,Integer) (Map (Ptr Instruction) (TypeDesc,Set (Ptr BasicBlock)))
-getPhis mp blk sblk instr = case instr of
+getPhis' mp blk sblk instr = case instr of
   IAssign trg (IPhi froms) -> let ((_,e1):_) = froms
                               in Map.insertWith Map.union (blk,sblk) 
                                  (Map.singleton trg (operandType e1,Set.fromList $ fmap fst froms)) mp
@@ -265,6 +265,11 @@ getUsedVars = getUsedVars' Set.empty Set.empty
                         else Set.insert name res
       ODGetElementPtr ptr idx -> foldr (addExpr loc) (addExpr loc ptr res) idx
       _ -> res
+
+getPhis :: [InstrDesc a] -> Map (Ptr Instruction) [(Ptr BasicBlock,a)]
+getPhis = foldl (\mp instr -> case instr of
+                    IAssign trg (IPhi blks) -> Map.insert trg blks mp
+                    _ -> mp) Map.empty
 
 programAsGraph :: Gr.DynGraph gr => [(Ptr BasicBlock,[[InstrDesc Operand]])]
                   -> (gr (Ptr BasicBlock,Integer,[InstrDesc Operand]) (),Map (Ptr BasicBlock,Integer) Gr.Node)
