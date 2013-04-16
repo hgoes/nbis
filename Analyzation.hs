@@ -225,47 +225,6 @@ getDefiningBlocks
                     ) mp1 (zip sblks [0..])
           ) Map.empty
 
-getUsedVars :: [InstrDesc Operand] -> Set (Ptr Instruction)
-getUsedVars = getUsedVars' Set.empty Set.empty
-  where
-    getUsedVars' _ res [] = res
-    getUsedVars' loc res (instr:instrs)
-      = getUsedVars' (case instr of
-                         IAssign trg expr -> Set.insert trg loc
-                         ITerminator (IMalloc trg _ _ _) -> Set.insert trg loc
-                         _ -> loc)
-        (case instr of
-            IAssign _ expr -> case expr of
-              IBinaryOperator _ lhs rhs -> addExpr loc lhs $ addExpr loc rhs res
-              IFCmp _ lhs rhs -> addExpr loc lhs $ addExpr loc rhs res
-              IICmp _ lhs rhs -> addExpr loc lhs $ addExpr loc rhs res
-              IGetElementPtr ptr idx -> addExpr loc ptr $ foldr (addExpr loc) res idx
-              IPhi cases -> foldr (addExpr loc) res (fmap snd cases)
-              ISelect x y z -> addExpr loc x $ addExpr loc y $ addExpr loc z res
-              ILoad ptr -> addExpr loc ptr res
-              IBitCast _ p -> addExpr loc p res
-              ISExt _ p -> addExpr loc p res
-              ITrunc _ p -> addExpr loc p res
-              IZExt _ p -> addExpr loc p res
-              IAlloca _ sz -> case sz of
-                Nothing -> res
-                Just sz' -> addExpr loc sz' res
-            ITerminator term -> case term of
-              IRetVoid -> res
-              IRet e -> addExpr loc e res
-              IBr _ -> res
-              IBrCond cond _ _ -> addExpr loc cond res
-              ISwitch val _ cases -> addExpr loc val $ foldr (addExpr loc) res (fmap fst cases)
-              ICall _ _ args -> foldr (addExpr loc) res args
-              IMalloc _ _ sz _ -> addExpr loc sz res
-        ) instrs
-    addExpr loc e res = case operandDesc e of
-      ODInstr name _ -> if Set.member name loc
-                        then res
-                        else Set.insert name res
-      ODGetElementPtr ptr idx -> foldr (addExpr loc) (addExpr loc ptr res) idx
-      _ -> res
-
 getPhis :: [InstrDesc a] -> Map (Ptr Instruction) [(Ptr BasicBlock,a)]
 getPhis = foldl (\mp instr -> case instr of
                     IAssign trg (IPhi blks) -> Map.insert trg blks mp

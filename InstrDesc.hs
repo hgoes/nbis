@@ -14,7 +14,11 @@ import LLVM.FFI.Constant
 import LLVM.FFI.APInt
 import LLVM.FFI.Use
 import LLVM.FFI.Pass
-import Data.Map as Map
+import qualified Data.Map as Map
+import Data.Map (Map)
+import qualified Data.Set as Set
+import Data.Foldable
+import Prelude hiding (foldl)
 
 data InstrDesc a
   = IAssign (Ptr Instruction) (AssignDesc a)
@@ -261,3 +265,32 @@ reifyOperand ptr = do
       mkSwitch [] = do
         valueDump ptr
         error "Unknown operand"
+
+getInstrsDeps :: [InstrDesc Operand] -> Map (Ptr Instruction) TypeDesc
+getInstrsDeps = snd . foldl (\(loc,mp) instr -> (case getInstrTarget instr of
+                                                    Nothing -> loc
+                                                    Just t -> Set.insert t loc,getInstrDeps loc mp instr)
+                            ) (Set.empty,Map.empty)
+  where
+    getInstrDeps loc mp (IAssign _ expr) = case expr of
+      IBinaryOperator _ l r -> getOperandDeps loc (getOperandDeps loc mp l) r
+      IFCmp _ l r -> getOperandDeps loc (getOperandDeps loc mp l) r
+      IICmp _ l r -> getOperandDeps loc (getOperandDeps loc mp l) r
+      IGetElementPtr ptr idx -> getOperandDeps loc (foldl (getOperandDeps loc) mp idx) ptr
+      IPhi phis -> foldl (\cmp (_,op) -> getOperandDeps loc cmp op) mp phis
+      ISelect c t f -> getOperandDeps loc (getOperandDeps loc (getOperandDeps loc mp c) t) f
+      ILoad ptr -> getOperandDeps loc mp ptr
+      IBitCast _ op -> getOperandDeps loc mp op
+      ISExt _ op -> getOperandDeps loc mp op
+      ITrunc _ op -> getOperandDeps loc mp op
+      IZExt _ op -> getOperandDeps loc mp op
+      IAlloca _ sz -> case sz of
+        Nothing -> mp
+        Just sz' -> getOperandDeps loc mp sz'
+
+    getOperandDeps loc mp op = case operandDesc op of
+      ODInstr instr _ -> if Set.member instr loc
+                         then mp
+                         else Map.insert instr (operandType op) mp
+      ODGetElementPtr ptr idx -> getOperandDeps loc (foldl (getOperandDeps loc) mp idx) ptr
+      _ -> mp
