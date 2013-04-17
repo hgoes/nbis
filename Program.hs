@@ -108,11 +108,19 @@ getTargetLibraryInfo mod = do
   modulePassRunOnModule tli mod
   return tli
 
+#if HS_LLVM_VERSION >= 303
 getDataLayout :: Ptr Module -> IO (Ptr DataLayout)
 getDataLayout mod = do
   dl <- newDataLayoutFromModule mod
   modulePassRunOnModule dl mod
   return dl
+#else
+getDataLayout :: Ptr Module -> IO (Ptr TargetData)
+getDataLayout mod = do
+  dl <- newTargetDataFromModule mod
+  modulePassRunOnModule dl mod
+  return dl
+#endif
 
 getProgram :: String -> IO ProgDesc
 getProgram file = do

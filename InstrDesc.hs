@@ -68,7 +68,14 @@ data OperandDesc a
   | ODGetElementPtr a [a]
   deriving (Show,Eq,Ord)
 
-reifyInstr :: Ptr TargetLibraryInfo -> Ptr DataLayout -> Ptr Instruction -> IO (InstrDesc Operand)
+reifyInstr :: Ptr TargetLibraryInfo
+#if HS_LLVM_VERSION >= 303
+              -> Ptr DataLayout
+#else
+              -> Ptr TargetData
+#endif
+              -> Ptr Instruction
+              -> IO (InstrDesc Operand)
 reifyInstr tl dl ptr
   = mkSwitch
     [fmap (\binop -> do
@@ -78,14 +85,26 @@ reifyInstr tl dl ptr
               return $ IAssign ptr $ IBinaryOperator opcode op1 op2
           ) (castDown ptr)
     ,fmap (\call -> do
+#if HS_LLVM_VERSION >= 303
               isMalloc <- isMallocLikeFn call tl False
+#else
+              isMalloc <- isMallocLikeFn call
+#endif
               if isMalloc
                 then (do
+#if HS_LLVM_VERSION >= 303
                          tp <- getMallocAllocatedType call tl
+#else
+                         tp <- getMallocAllocatedType call
+#endif
                          rtp <- if tp==nullPtr
                                 then return Nothing
                                 else fmap Just (reifyType tp)
+#if HS_LLVM_VERSION >= 303
                          sz <- getMallocArraySize call dl tl False
+#else
+                         sz <- getMallocArraySize call dl False
+#endif
                          (rsz,c) <- if sz==nullPtr
                                     then (do
                                              x <- callInstGetArgOperand call 0 >>= reifyOperand
