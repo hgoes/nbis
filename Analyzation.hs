@@ -2,9 +2,9 @@ module Analyzation where
 
 import Data.Map as Map hiding (foldl,foldr)
 import Data.Set as Set hiding (foldl,foldr)
-import Prelude hiding (foldl,foldr,concat)
+import Prelude hiding (foldl,foldr,concat,all,any)
 import Data.Foldable
-import Data.List as List (mapAccumL,lookup)
+import Data.List as List (mapAccumL,lookup,elem)
 import InstrDesc
 import TypeDesc
 import LLVM.FFI.Instruction
@@ -263,3 +263,18 @@ programAsGraph prog = createEdges $ createNodes (Gr.empty,Map.empty) prog
                                          ICall _ _ _ -> case Map.lookup (blk,sblk+1) mp of
                                            Just trg -> Gr.insEdge (node,trg,()) cgr
                                     ) gr gr,mp)
+
+isLoopCenter :: Gr.Graph gr => Gr.Node -> [Gr.Node] -> gr a b -> Bool
+isLoopCenter nd comp gr = returnsOnlyTo nd Set.empty
+  where
+    returnsOnlyTo cur seen = all (\succ -> if succ==nd
+                                           then True
+                                           else (if List.elem succ comp
+                                                 then (if Set.member succ seen
+                                                       then False
+                                                       else returnsOnlyTo succ (Set.insert cur seen))
+                                                 else False)
+                                 ) (Gr.suc gr cur)
+
+isSelfLoop :: Gr.Graph gr => Gr.Node -> gr a b -> Bool
+isSelfLoop nd gr = any (==nd) (Gr.suc gr nd)
