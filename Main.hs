@@ -21,9 +21,11 @@ import MemoryModel.Snow
 import Language.SMTLib2
 import Data.Typeable
 import Control.Monad.Trans
-import Data.List as List (genericLength,genericReplicate,genericSplitAt,zip4,zipWith4,zipWith5,null,lookup,find,genericIndex)
-import Data.Map as Map hiding (foldl,foldr,(!),mapMaybe)
-import Data.Set as Set hiding (foldl,foldr)
+import Data.List as List (genericLength,genericReplicate,genericSplitAt,zip4,zipWith4,zipWith5,null,lookup,find,genericIndex,elem)
+import Data.Map (Map)
+import qualified Data.Map as Map
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Debug.Trace
 import Prelude hiding (foldl,concat,mapM_,any,foldr,mapM,foldl1,all)
 import Data.Foldable
@@ -111,10 +113,11 @@ data NodeType ptr
 data FunctionDescr gr = FunctionDescr
                         { funDescrArgs :: [(Ptr Argument,TypeDesc)]
                         , funDescrReturnType :: TypeDesc
-                        , funDescrBlocks :: [(Ptr BasicBlock,[(BlockSig,[InstrDesc Operand])])]
+                        , funDescrBlocks :: [(Ptr BasicBlock,[[InstrDesc Operand]])]
                         , funDescrGraph :: gr (Ptr BasicBlock,Integer,[InstrDesc Operand]) ()
                         , funDescrNodeMap :: Map (Ptr BasicBlock,Integer) Gr.Node
                         , funDescrSCC :: [[Gr.Node]]
+                        , funDescrDefines :: Map (Ptr Instruction) (Ptr BasicBlock,Integer)
                         }
 
 data UnrollGraph gr m ptr
@@ -151,7 +154,7 @@ data Transition ptr = TBegin
                     | TJump (Maybe (SMTExpr Bool))
                     | TCall [Val ptr]
                     | TReturn (Maybe (Val ptr))
-                    | TDeliver (Ptr Instruction)
+                    | TDeliver (Ptr Instruction) Gr.Node
 
 instance Show (Transition m) where
   showsPrec _ TBegin = id
@@ -161,7 +164,7 @@ instance Show (Transition m) where
   showsPrec p (TReturn val) = case val of
     Nothing -> showString "ret"
     Just v -> showString "retval"
-  showsPrec p (TDeliver to) = id
+  showsPrec p (TDeliver to _) = id
 
 newValue :: Enum ptr => TypeDesc -> Unrollment gr m ptr (Val ptr)
 newValue (PointerType tp) = do
@@ -250,7 +253,7 @@ updateDelayed gr from nd delayed
                                              (callingSubblock del)
                               , incomingNode = nd
                               , incomingReadNode = callingNode del
-                              , incomingEdge = TDeliver (callReturnsTo del)
+                              , incomingEdge = TDeliver (callReturnsTo del) (callingNode del)
                               }:qs,dels')
              else (qs,del:dels)
 
@@ -274,10 +277,6 @@ makeNode read_from from nid = do
       args' <- mapM (\(name,tp) -> do
                         val <- newValue tp 
                         return (name,val)) args
-      {-let io_p = mapMaybe (\(name,val) -> case val of
-                              PointerValue ptr -> Just ptr
-                              _ -> Nothing
-                          ) args'-}
       return (RealizedStart fun args' Nothing,[])
     IdEnd fun -> do
       gr <- get
@@ -305,7 +304,7 @@ makeNode read_from from nid = do
                                 ) blks of
                    Just (_,s) -> s
                    Nothing -> error $ "Failed to find subblock "++show blk++" of function "++fun
-          (sig,instrs) = subs `genericIndex` sblk
+          instrs = subs `genericIndex` sblk
           Just fnid = from
           Just (Node { nodeType = from_nt }) 
             = Gr.lab (nodeGraph gr) fnid
@@ -317,8 +316,15 @@ makeNode read_from from nid = do
                   -> fn
             RealizedBlock { nodeFunctionNode = n } -> n
           Just (Node { nodeType = RealizedStart _ fun_args _ }) = Gr.lab (nodeGraph gr) ffid
-      inps <- mapM newValue (blockInputs sig)
-      let allPhis = foldl (\s (_,s') -> Set.union s s') Set.empty (blockPhis sig)
+      (inps,args) <- gatherInputs read_from from nid
+      let inps_def = Map.mapMaybe (\v -> case v of
+                                      Left val -> Just val
+                                      Right _ -> Nothing) inps
+      inps_new <- mapM newValue $ Map.mapMaybe (\v -> case v of
+                                                   Right tp -> Just tp
+                                                   Left _ -> Nothing) inps
+      let inps = Map.union inps_def inps_new
+          allPhis = foldl (\s s' -> Set.union s (Set.fromList $ fmap fst s')) Set.empty (getPhis instrs)
       phis <- fmap Map.fromList $
               lift $ mapM (\from -> do
                               phi_cond <- varNamed "phi"
@@ -341,7 +347,7 @@ makeNode read_from from nid = do
       return (RealizedBlock { nodeFunctionNode = ffid
                             , nodeBlock = blk
                             , nodeSubblock = sblk
-                            , nodeInput = inps
+                            , nodeInput = inps_new
                             , nodePhis = phis
                             , nodeOutput = reLocals nst
                             , nodeFinalization = fin
@@ -379,18 +385,19 @@ connectNodes from read_from trans to = do
         TJump Nothing -> nodeActivation nd_from
         TCall _ -> nodeActivation nd_from
         TReturn _ -> nodeActivation nd_from
-        TDeliver _ -> nodeActivation nd_read_from
+        TDeliver _ _ -> nodeActivation nd_read_from
       eqs = case nodeType nd_from of
         RealizedStart fun_name args _ -> case nodeType nd_to of
           RealizedBlock {} -> [ (PointerValue v,PointerValue v) | (_,PointerValue v) <- args ]
         RealizedEnd _ ret -> case trans of
-          TDeliver ret_name -> case nodeType nd_read_from of
+          TDeliver ret_name _ -> case nodeType nd_read_from of
             RealizedBlock { nodeOutput = outp_read } -> case nodeType nd_to of
               RealizedBlock { nodeInput = inp }
                 -> let io = Map.elems $ Map.intersectionWith (\x y -> (x,y)) inp outp_read
                        io' = case (Map.lookup ret_name inp,ret) of
                          (Nothing,Nothing) -> io
                          (Just i_ret,Just o_ret) -> (i_ret,o_ret):io
+                         x -> error $ "Return disagreement: "++show x++" "++show (nd_to,nd_from)
                    in io'
         RealizedBlock { nodeOutput = outp
                       , nodeFinalization = fin }
@@ -447,9 +454,9 @@ targetNode read_from from to = do
     getNode gr res (x:xs) 
       = let ngr = Gr.insEdge (from,x,undefined) (nodeGraph gr)
         in if all (\x -> case x of
-                      [_] -> True
+                      [nd] -> not $ isSelfLoop nd ngr
                       _ -> False
-                  ) (Gr.scc ngr) && not (Gr.hasLoop ngr)
+                  ) (Gr.scc ngr)
            then getNode gr (Just x) xs
            else res
 
@@ -494,26 +501,27 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m ptr a) = do
   let (init_args,_,init_blks) = funs!init
       globs_mp = fmap (\(tp,_) -> tp) globs
       allfuns = fmap (\(sig,rtp,blks) 
-                      -> let block_sigs = mkBlockSigs blks
-                             (pgr,pmp) = programAsGraph blks
+                      -> let (pgr,pmp) = programAsGraph blks
+                             defs = getDefiningBlocks (\name -> case intrinsics name :: Maybe (Ptr Instruction -> [(Val Int,TypeDesc)] -> Realization Int ()) of
+                                                          Nothing -> False
+                                                          Just _ -> True) blks
                          in FunctionDescr { funDescrArgs = sig
                                           , funDescrReturnType = rtp
-                                          , funDescrBlocks = fmap (\(blk_name,subs)
-                                                                   -> (blk_name,fmap (\(i,instrs)
-                                                                                      -> (block_sigs!(blk_name,i),instrs)
-                                                                                     ) (zip [0..] subs)
-                                                                      )
-                                                                  ) blks
+                                          , funDescrBlocks = blks
                                           , funDescrGraph = pgr
                                           , funDescrNodeMap = pmp
-                                          , funDescrSCC = Gr.scc pgr
+                                          , funDescrSCC = filter (\comp -> case comp of
+                                                                     [nd] -> isSelfLoop nd pgr
+                                                                     _ -> True
+                                                                 ) (Gr.scc pgr)
+                                          , funDescrDefines = defs
                                           }
                      ) funs
   mem0 <- memNew (undefined::ptr) tps structs
   let ((cptr,prog),globs') = mapAccumL (\(ptr',prog') (tp,cont) 
                                         -> ((succ ptr',(ptr',tp,cont):prog'),ptr')
                                        ) (0,[]) globs
-  mem1 <- foldlM (\cmem (ptr,tp,cont) -> case cont of
+  mem1 <- foldlM (\cmem (ptr,PointerType tp,cont) -> case cont of
                      Just cont' -> addGlobal cmem ptr tp cont'
                      Nothing -> return cmem
                  ) mem0 prog
@@ -627,3 +635,67 @@ main = do
                        liftIO $ putStrLn $ "Error "++show err++" found."
                        mapM_ (\str -> liftIO $ putStrLn str) watch
                        return ())
+
+scanForNode :: Gr.Graph gr => gr (Node ptr) (Transition ptr) -> Ptr BasicBlock -> Integer -> Gr.Node -> Maybe (Gr.Node,Node ptr)
+scanForNode gr blk sblk nd = trace ("Scanning for "++show blk++"."++show sblk) $ scanForNode' Set.empty nd
+  where
+    scanForNode' seen nd = case Gr.match nd gr of
+      (Just (inc,_,ndcont,_),_) -> case nodeType ndcont of
+        RealizedStart _ _ _ -> Nothing -- we've reached the top of the function
+        RealizedEnd _ _ -> Nothing -- we've reached a subcall
+        RealizedBlock { nodeBlock = blk'
+                      , nodeSubblock = sblk' }
+          -- Have we found the node we're looking for?
+          | blk==blk' && sblk==sblk' -> Just (nd,ndcont)
+          -- Or have we already seen it?
+          | Set.member nd seen -> Nothing
+          | otherwise -> case inc of
+            -- Skip the function call
+            [(TDeliver _ prev,_)] -> scanForNode' (Set.insert nd seen) prev
+            -- It's a normal node
+            prevs -> case mapMaybe (\(_,prev) -> scanForNode' (Set.insert nd seen) prev) prevs of
+              [] -> Nothing
+              (res:_) -> Just res
+
+gatherInputs :: Gr.Graph gr => Maybe Gr.Node -> Maybe Gr.Node -> NodeId -> Unrollment gr m ptr (Map (Ptr Instruction) (Either (Val ptr) TypeDesc),Map (Ptr Argument) (Val ptr))
+gatherInputs read_from from nid = do
+  case nid of
+    IdBlock fun blk sblk -> do
+      gr <- get
+      let FunctionDescr { funDescrBlocks = blks
+                        , funDescrDefines = defines
+                        , funDescrNodeMap = nd_mp
+                        , funDescrGraph = fun_gr
+                        , funDescrSCC = sccs
+                        } = (allFunctions gr)!fun
+          subs = case List.find (\(name,_) -> name==blk) blks of
+            Just (_,s) -> s
+          instrs = subs `genericIndex` sblk
+          Just fnid = read_from
+          Just fnode = Gr.lab (nodeGraph gr) fnid
+          args = case nodeType fnode of
+            RealizedStart { nodeArguments = r } -> r
+            RealizedBlock { nodeFunctionNode = fun_id } -> case Gr.lab (nodeGraph gr) fun_id of
+              Just (Node { nodeType = RealizedStart { nodeArguments = r }}) -> r
+          var_set = getInstrsDeps instrs
+          var_mp = Map.mapWithKey (\var tp -> case Map.lookup var defines of
+                                      Just src -> case Map.lookup src nd_mp of
+                                        Just nd_src -> case List.find (List.elem nd_src) sccs of
+                                          -- The source node is not part of any loop
+                                          Nothing -> let Just (_,Node { nodeType = ndsrc}) = scanForNode (nodeGraph gr) (fst src) (snd src) fnid
+                                                     in case Map.lookup var (nodeOutput ndsrc) of
+                                                       Just val -> Left val
+                                          -- There is a loop involved, we need a new copy
+                                          Just comp -> case nid of
+                                            IdBlock { idBlock = blk
+                                                    , idSubblock = sblk } -> case Map.lookup (blk,sblk) nd_mp of
+                                              Just nd_trg -> if List.elem nd_trg comp -- Are target and source in the same component?
+                                                             then (if isLoopCenter nd_src comp fun_gr || isLoopCenter nd_trg comp fun_gr -- Is either of them the loop center?
+                                                                   then (let Just (_,Node { nodeType = ndsrc}) = scanForNode (nodeGraph gr) (fst src) (snd src) fnid
+                                                                         in case Map.lookup var (nodeOutput ndsrc) of
+                                                                           Just val -> Left val)
+                                                                   else Right tp)
+                                                             else Right tp
+                                  ) var_set
+      return (var_mp,Map.fromList args)
+    _ -> return (Map.empty,Map.empty)
