@@ -5,6 +5,7 @@ module DecisionTree
        ,boolDecision
        ,caseDecision
        ,switchDecision
+       ,traverseDecisionTree
        ,accumDecisionTree
        ,decisionTreeEq
        ,decisionTreeElems)
@@ -43,12 +44,17 @@ instance Foldable DecisionTree where
                                    (foldMap (foldMap f . snd) cases)
 
 instance Traversable DecisionTree where
-  traverse f (GroundNode x) = GroundNode <$> f x
-  traverse f (BoolNode c ifT ifF) = BoolNode c <$> traverse f ifT <*> traverse f ifF
-  traverse f (CaseNode Nothing cases)
-    = CaseNode Nothing <$> traverse (\(val,dt) -> fmap (\ndt -> (val,ndt)) (traverse f dt)) cases
-  traverse f (CaseNode (Just def) cases)
-    = CaseNode <$> (Just <$> traverse f def) <*> traverse (\(val,dt) -> fmap (\ndt -> (val,ndt)) (traverse f dt)) cases
+  traverse f = traverseDecisionTree (\_ x -> GroundNode <$> f x)
+
+traverseDecisionTree :: Applicative f => (SMTExpr Bool -> a -> f (DecisionTree b)) -> DecisionTree a -> f (DecisionTree b)
+traverseDecisionTree = traverse' []
+  where
+    traverse' cond f (GroundNode x) = f (app and' cond) x
+    traverse' cond f (BoolNode c ifT ifF) = BoolNode c <$> traverse' (c:cond) f ifT <*> traverse' (not' c:cond) f ifF
+    traverse' cond f (CaseNode Nothing cases)
+      = CaseNode Nothing <$> traverse (\(val,dt) -> fmap (\ndt -> (val,ndt)) (traverse' (val:cond) f dt)) cases
+    traverse' cond f (CaseNode (Just def) cases)
+      = CaseNode <$> (Just <$> traverse' ((fmap (not' . fst) cases)++cond) f def) <*> traverse (\(val,dt) -> fmap (\ndt -> (val,ndt)) (traverse' (val:cond) f dt)) cases
 
 boolDecision :: SMTExpr Bool -> DecisionTree a -> DecisionTree a -> DecisionTree a
 boolDecision = BoolNode
