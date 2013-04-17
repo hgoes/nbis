@@ -50,11 +50,11 @@ ptrIndexCast structs tp1 ref@((tp2,idx):rest) = case indexType structs tp2 idx o
 ptrIndexCast _ tp ref = ptrIndexCast' tp ref
 
 ptrIndexCast' :: TypeDesc -> PtrIndex -> PtrIndex
-ptrIndexCast' tp [] = [(PointerType tp,[])]
-ptrIndexCast' tp ((_,[]):rest) = (PointerType tp,[]):rest
-ptrIndexCast' tp1 ((PointerType tp2,idx):rest)
-  | tp1 == tp2 = (PointerType tp1,idx):rest
-  | otherwise = (PointerType tp1,[]):(PointerType tp2,idx):rest
+ptrIndexCast' tp [] = [(tp,[])]
+ptrIndexCast' tp ((_,[]):rest) = (tp,[]):rest
+ptrIndexCast' tp1 ((tp2,idx):rest)
+  | tp1 == tp2 = (tp1,idx):rest
+  | otherwise = (tp1,[]):(tp2,idx):rest
 
 ptrIndexIndex :: [DynNum] -> PtrIndex -> PtrIndex
 ptrIndexIndex idx' ((tp,idx):rest) = (tp,mergeIdx idx idx'):rest
@@ -77,8 +77,11 @@ ptrIndexEq ((tp1,idx1):r1) ((tp2,idx2):r2)
 
 ptrIndexGetAccessor :: Map String [TypeDesc] -> PtrIndex -> ObjAccessor ptr
 ptrIndexGetAccessor _ [] = ObjAccessor id
-ptrIndexGetAccessor structs ((tp,idx):rest) 
-  = indexObject structs tp idx (ptrIndexGetAccessor structs rest)
+ptrIndexGetAccessor structs all@((tp,idx):rest)
+  = trace (show all) $ indexObject structs (PointerType tp) idx (ptrIndexGetAccessor structs rest)
+
+ptrIndexGetType :: Map String [TypeDesc] -> PtrIndex -> TypeDesc
+ptrIndexGetType structs ((tp,idx):_) = indexType structs (PointerType tp) idx
 
 idxCompare :: [DynNum]
               -> [DynNum]
@@ -155,7 +158,6 @@ allocaObject :: Map String [TypeDesc] -- ^ All structs in the program
                 -> TypeDesc -- ^ The type to be allocated
                 -> Either Integer (SMTExpr (BitVector BVUntyped)) -- ^ How many copies should be allocated?
                 -> SMT (Object ptr)
-allocaObject structs tp (Left 1) = fmap Bounded $ allocaBounded structs tp
 allocaObject structs tp (Left sz) = do
   objs <- sequence $ genericReplicate sz (allocaBounded structs tp)
   return $ Bounded $ StaticArrayObject objs
