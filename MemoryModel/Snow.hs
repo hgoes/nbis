@@ -159,7 +159,7 @@ updateLocation structs cond ptrs objs next
                                                     (nobj,_,_) = access (\obj' -> let (nobj',errs') = storePtr ptr obj'
                                                                                  in (nobj',(),errs')
                                                                         ) obj
-                                                in trace ("Object "++show obj_p++" updated to "++show ptr) (succ cnext,
+                                                in (succ cnext,
                                                     Map.insert cnext nobj cobjs,
                                                     Map.insert obj_p cnext cups)
                                  ) (next,objs,Map.empty) dt

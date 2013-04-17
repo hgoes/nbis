@@ -11,6 +11,7 @@ import MemoryModel
 data Object ptr 
   = Bounded (BoundedObject ptr)
   | Unbounded (UnboundedObject ptr)
+  deriving Show
 
 data UnboundedObject ptr
   = DynArrayObject { dynArrayIndexSize :: Integer
@@ -21,6 +22,7 @@ data UnboundedObject ptr
                        , dynFlatArrayBound :: SMTExpr (SMTExpr (BitVector BVUntyped))
                        , dynFlatArray :: [SMTExpr (SMTArray (SMTExpr (BitVector BVUntyped)) (BitVector BVUntyped))]
                        }
+  deriving Show
 
 data BoundedObject ptr
   = WordObject (SMTExpr (BitVector BVUntyped))
@@ -78,7 +80,7 @@ ptrIndexEq ((tp1,idx1):r1) ((tp2,idx2):r2)
 ptrIndexGetAccessor :: Map String [TypeDesc] -> PtrIndex -> ObjAccessor ptr
 ptrIndexGetAccessor _ [] = ObjAccessor id
 ptrIndexGetAccessor structs all@((tp,idx):rest)
-  = trace (show all) $ indexObject structs (PointerType tp) idx (ptrIndexGetAccessor structs rest)
+  = indexObject structs (PointerType tp) idx (ptrIndexGetAccessor structs rest)
 
 ptrIndexGetType :: Map String [TypeDesc] -> PtrIndex -> TypeDesc
 ptrIndexGetType structs ((tp,idx):_) = indexType structs (PointerType tp) idx
@@ -132,7 +134,6 @@ indexObject structs (StructType desc) (Left i:idx) (ObjAccessor access)
                              Bounded (StructObject objs)
                                -> let (nobjs,res,errs) = changeAt i (indexBounded structs tp idx f) objs
                                   in (Bounded (StructObject nobjs),res,errs)
-                             _ -> error $ "Can't index "++show obj'++" as a struct"
                          ) obj)
 indexObject _ tp idx _ = error $ "indexObject not implemented for "++show tp++" "++show idx
 
