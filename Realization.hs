@@ -95,7 +95,8 @@ argToExpr :: Enum ptr => Operand -> Realization ptr (Val ptr)
 argToExpr expr = case operandDesc expr of
   ODNull -> do
     ptr <- reNewPtr
-    reMemInstr (MINull (operandType expr) ptr)
+    let PointerType tp = operandType expr
+    reMemInstr (MINull tp ptr)
     return $ PointerValue ptr
   ODInt v -> return $ ConstValue v (bitWidth (operandType expr))
   ODInstr instr _ -> do
