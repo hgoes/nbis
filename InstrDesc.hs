@@ -287,6 +287,13 @@ getInstrsDeps = snd . foldl (\(loc,mp) instr -> (case getInstrTarget instr of
       IAlloca _ sz -> case sz of
         Nothing -> mp
         Just sz' -> getOperandDeps loc mp sz'
+    getInstrDeps loc mp (IStore val ptr) = getOperandDeps loc (getOperandDeps loc mp val) ptr
+    getInstrDeps loc mp (ITerminator term) = case term of
+      IBrCond cond _ _ -> getOperandDeps loc mp cond
+      ISwitch val _ cases -> getOperandDeps loc (foldl (\cmp (c,_) -> getOperandDeps loc cmp c) mp cases) val
+      ICall _ fun args -> getOperandDeps loc (foldl (getOperandDeps loc) mp args) fun
+      IMalloc _ _ sz _ -> getOperandDeps loc mp sz
+      _ -> mp
 
     getOperandDeps loc mp op = case operandDesc op of
       ODInstr instr _ -> if Set.member instr loc
