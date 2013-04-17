@@ -213,14 +213,18 @@ foldInstrs f = foldl (\x1 (blk,sblks)
                                      ) (0,x1) sblks
                      )
 
-getDefiningBlocks :: [(Ptr BasicBlock,[[InstrDesc Operand]])] -> Map (Ptr Instruction) (Ptr BasicBlock,Integer)
-getDefiningBlocks
+getDefiningBlocks :: (String -> Bool) -> [(Ptr BasicBlock,[[InstrDesc Operand]])] -> Map (Ptr Instruction) (Ptr BasicBlock,Integer)
+getDefiningBlocks isIntr
   = foldl (\mp1 (blk,sblks)
            -> foldl (\mp2 (instrs,sblk)
                      -> foldl (\mp3 instr -> case instr of
                                   IAssign trg _ -> Map.insert trg (blk,sblk) mp3
-                                  ITerminator (ICall trg _ _) -> Map.insert trg (blk,sblk+1) mp3
+                                  ITerminator (ICall trg fun _) -> case operandDesc fun of
+                                    ODFunction _ fname _ -> if isIntr fname
+                                                            then Map.insert trg (blk,sblk) mp3
+                                                            else Map.insert trg (blk,sblk+1) mp3
                                   ITerminator (IMalloc trg _ _ _) -> Map.insert trg (blk,sblk) mp3
+                                  _ -> mp3
                               ) mp2 instrs
                     ) mp1 (zip sblks [0..])
           ) Map.empty
