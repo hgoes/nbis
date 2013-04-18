@@ -274,6 +274,7 @@ reifyOperand ptr = do
                            valueDump expr
                            error "Unknown constant expr"
                 ) (castDown ptr)
+          ,fmap (\(udef::Ptr UndefValue) -> return ODUndef) (castDown ptr)
           ]
   return $ Operand { operandType = rtp
                    , operandDesc = desc

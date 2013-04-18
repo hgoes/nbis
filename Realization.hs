@@ -124,7 +124,8 @@ argToExpr expr = case operandDesc expr of
                     ) idx
     ptr' <- reNewPtr
     reMemInstr (MIIndex val_idx val_ptr ptr')
-    return $ PointerValue ptr'    
+    return $ PointerValue ptr'
+  ODUndef -> return (ConstValue 0 (bitWidth (operandType expr)))
   _ -> reError $ "Implement argToExpr for "++show expr
 
 realizeInstructions :: Enum ptr => [InstrDesc Operand] 
