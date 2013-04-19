@@ -118,6 +118,7 @@ data FunctionDescr gr = FunctionDescr
                         , funDescrNodeMap :: Map (Ptr BasicBlock,Integer) Gr.Node
                         , funDescrSCC :: [[Gr.Node]]
                         , funDescrDefines :: Map (Ptr Instruction) (Ptr BasicBlock,Integer)
+                        , funDescrRealizationOrder :: [(Ptr BasicBlock,Integer)]
                         }
 
 data UnrollGraph gr m ptr
@@ -130,7 +131,7 @@ data UnrollGraph gr m ptr
                 , startNode :: Gr.Node
                 , nextNode :: Gr.Node
                 , nextPointer :: ptr
-                , queuedNodes :: [QueueEntry ptr]
+                , queuedNodes :: [(String,[QueueEntry ptr])]
                 , delayedNodes :: [DelayedReturn]
                 }
 
@@ -463,30 +464,25 @@ targetNode read_from from to = do
 incrementGraph :: (Gr.DynGraph gr,Enum ptr,MemoryModel m ptr)
                   => Unrollment gr m ptr ()
 incrementGraph = do
+  entr <- dequeueNode
+  -- Determine the target node
+  (nd,new) <- targetNode (incomingReadNode entr) (incomingNode entr) (queuedNode entr)
+  -- Connect the nodes
+  connectNodes (incomingNode entr)
+    (incomingReadNode entr)
+    (incomingEdge entr) nd
+  -- Add an edge to the node graph
+  modify $ \gr -> gr { nodeGraph = Gr.insEdge (incomingNode entr,nd,
+                                               incomingEdge entr)
+                                   (nodeGraph gr) }
+  -- Update delayed nodes
   gr <- get
-  case queuedNodes gr of
-    [] -> error "incrementGraph: Nothing more to realize."
-    (x:xs) -> do
-      -- Remove element from queue 
-      put $ gr { queuedNodes = xs }
-      -- and determine the target node
-      (nd,new) <- targetNode (incomingReadNode x) (incomingNode x) (queuedNode x)
-      -- Connect the nodes
-      connectNodes (incomingNode x) 
-        (incomingReadNode x)
-        (incomingEdge x) nd
-      -- Add an edge to the node graph
-      modify $ \gr -> gr { nodeGraph = Gr.insEdge (incomingNode x,nd,
-                                                   incomingEdge x)
-                                       (nodeGraph gr) }
-      -- Update delayed nodes
-      gr <- get
-      let (qs1,ndl) = updateDelayed gr (incomingNode x) nd (delayedNodes gr)
-          qs2 = if new then nodeSuccessors gr nd
-                else []
-      put $ gr { queuedNodes = (queuedNodes gr) ++ 
-                               qs1 ++ qs2
-               , delayedNodes = ndl }
+  let (qs1,ndl) = updateDelayed gr (incomingNode entr) nd (delayedNodes gr)
+      qs2 = if new then nodeSuccessors gr nd
+            else []
+  put $ gr { delayedNodes = ndl }
+  mapM_ queueNode qs1
+  mapM_ queueNode qs2
 
 unrollGraphComplete :: UnrollGraph gr m ptr -> Bool
 unrollGraphComplete gr = case queuedNodes gr of
@@ -505,6 +501,11 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m ptr a) = do
                              defs = getDefiningBlocks (\name -> case intrinsics name :: Maybe (Ptr Instruction -> [(Val Int,TypeDesc)] -> Realization Int ()) of
                                                           Nothing -> False
                                                           Just _ -> True) blks
+                             order = case blks of
+                               (start_blk,_):_ -> case Map.lookup (start_blk,0) pmp of
+                                 Just start_node -> case Gr.dff [start_node] pgr of
+                                   [order_tree] -> reverse $ fmap (\nd -> let Just (blk,sblk,_) = Gr.lab pgr nd in (blk,sblk)) $ Gr.postorder order_tree
+                               [] -> []
                          in FunctionDescr { funDescrArgs = sig
                                           , funDescrReturnType = rtp
                                           , funDescrBlocks = blks
@@ -515,6 +516,7 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m ptr a) = do
                                                                      _ -> True
                                                                  ) (Gr.scc pgr)
                                           , funDescrDefines = defs
+                                          , funDescrRealizationOrder = order
                                           }
                      ) funs
   mem0 <- memNew (undefined::ptr) tps structs
@@ -540,7 +542,7 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m ptr a) = do
   evalStateT (do
                  nd_start <- makeNode Nothing Nothing (IdStart { startFunction = init })
                  modify $ \gr -> gr { startNode = nd_start 
-                                    , queuedNodes = nodeSuccessors gr nd_start }
+                                    , queuedNodes = [(init,nodeSuccessors gr nd_start)] }
                  f) gr0
   
   {-(nd,gr1) <- makeNode gr0 Nothing (IdStart { startFunction = init })
@@ -699,3 +701,59 @@ gatherInputs read_from from nid = do
                                   ) var_set
       return (var_mp,Map.fromList args)
     _ -> return (Map.empty,Map.empty)
+
+getRealizationOrder :: FunctionDescr gr -> (Ptr BasicBlock,Integer) -> (Ptr BasicBlock,Integer) -> Ordering
+getRealizationOrder f b1 b2
+  | b1 == b2 = EQ
+  | otherwise = order' (funDescrRealizationOrder f)
+  where
+    order' [] = EQ
+    order' (x:xs) = if b1==x
+                    then GT
+                    else (if b2==x
+                          then LT
+                          else order' xs)
+
+nodeIdFunction :: NodeId -> String
+nodeIdFunction (IdStart f) = f
+nodeIdFunction (IdEnd f) = f
+nodeIdFunction (IdBlock { idFunction = f }) = f
+
+insertWithOrder :: Eq b => (a -> b) -> [b] -> a -> [a] -> [a]
+insertWithOrder f order el [] = [el]
+insertWithOrder f order el (x:xs) = updateOrder' order
+  where
+    updateOrder' [] = x:insertWithOrder f order el xs
+    updateOrder' (y:ys)
+      | y==f el    = el:x:xs
+      | y==f x     = x:insertWithOrder f (y:ys) el xs
+      | otherwise = updateOrder' ys
+
+queueNode :: QueueEntry ptr -> Unrollment gr m ptr ()
+queueNode entr = do
+  gr <- get
+  let Just fdescr = Map.lookup (nodeIdFunction $ queuedNode entr) (allFunctions gr)
+      nqueue = insert' (funDescrRealizationOrder fdescr) (queuedNodes gr)
+  put $ gr { queuedNodes = nqueue }
+  where
+    insert' ord [] = [(nodeIdFunction $ queuedNode entr,[entr])]
+    insert' ord ((f,entrs):qs) = if nodeIdFunction (queuedNode entr) == f
+                                 then (f,insertWithOrder (\e -> case queuedNode e of
+                                                             IdBlock { idBlock = blk
+                                                                     , idSubblock = sblk
+                                                                     } -> (blk,sblk)
+                                                             _ -> (nullPtr,0)) ord entr entrs):qs
+                                 else (f,entrs):insert' ord qs
+
+dequeueNode :: Unrollment gr m ptr (QueueEntry ptr)
+dequeueNode = do
+  gr <- get
+  let (el,nqueue) = dequeue (queuedNodes gr)
+  put $ gr { queuedNodes = nqueue }
+  return el
+  where
+    dequeue [] = error "Nothing to dequeue"
+    dequeue ((f,[]):xs) = error "Empty queue bucket"
+    dequeue ((f,el:els):xs) = case els of
+      [] -> (el,xs)
+      _ -> (el,xs++[(f,els)])
