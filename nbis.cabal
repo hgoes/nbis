@@ -16,4 +16,4 @@ Executable nbis
     MemoryModel.Untyped
     MemoryModel.Typed
     MemoryModel.Plain
-  Build-Depends:	base,bindings-llvm,containers,mtl,smtlib2,fgl
+  Build-Depends:	base,bindings-llvm,containers,mtl,smtlib2,fgl,tagged

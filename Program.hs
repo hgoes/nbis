@@ -19,6 +19,8 @@ import Foreign.Ptr
 import Foreign.C.String
 import Foreign.Marshal.Array
 import Data.Maybe (catMaybes)
+import Control.Concurrent.MVar
+import Data.Proxy
 
 import LLVM.FFI.Instruction
 import LLVM.FFI.BasicBlock
@@ -35,12 +37,15 @@ import LLVM.FFI.APInt
 import LLVM.FFI.OOP
 import LLVM.FFI.User
 import LLVM.FFI.Pass
+import LLVM.FFI.Pass.Haskell
 import LLVM.FFI.PassManager
 import LLVM.FFI.SetVector
 import LLVM.FFI.StringRef
 import LLVM.FFI.Transforms.Scalar
 import LLVM.FFI.Transforms.IPO
 import LLVM.FFI.ArrayRef
+import LLVM.FFI.Loop
+import LLVM.FFI.CPP
 
 type ProgDesc = (Map String ([(Ptr Argument, TypeDesc)],
                              TypeDesc,
@@ -71,36 +76,70 @@ getUsedTypes mod = do
   deleteFindUsedTypes pass
   return (all_tps,Map.fromList $ catMaybes structs)
 
+data LoopDesc = LoopDesc [Ptr BasicBlock] [LoopDesc] deriving Show
+
+reifyLoop :: Ptr Loop -> IO LoopDesc
+reifyLoop loop = do
+  blks <- loopGetBlocks loop >>= vectorToList
+  subs <- loopGetSubLoops loop >>= vectorToList >>= mapM reifyLoop
+  return $ LoopDesc blks subs
+
 data APass = forall p. PassC p => APass (IO (Ptr p))
 
-passes :: [APass]
-passes = [APass createPromoteMemoryToRegisterPass
-         ,APass createConstantPropagationPass
-         ,APass createIndVarSimplifyPass
-         ,APass createLoopSimplifyPass
-         ,APass createCFGSimplificationPass
-         ,APass createLICMPass
-         ,APass createLoopRotatePass
-         ,APass createLoopUnrollPass
-         ,APass (do
-                    m <- newCString "main"
-                    arr <- newArray [m]
-                    export_list <- newArrayRef arr 1
-                    --export_list <- newArrayRefEmpty
-                    createInternalizePass export_list)
-         ,APass (createFunctionInliningPass 100)
-         ]
+passes :: MVar (Map (Ptr Function) [LoopDesc]) -> [APass]
+passes var
+  = [APass createPromoteMemoryToRegisterPass
+    ,APass createConstantPropagationPass
+    ,APass createIndVarSimplifyPass
+    ,APass createLoopSimplifyPass
+    ,APass createCFGSimplificationPass
+    ,APass createLICMPass
+    ,APass createLoopRotatePass
+    ,APass createLoopUnrollPass
+    ,APass (do
+               m <- newCString "main"
+               arr <- newArray [m]
+               export_list <- newArrayRef arr 1
+               --export_list <- newArrayRefEmpty
+               createInternalizePass export_list)
+    ,APass (createFunctionInliningPass 100)
+    ,APass (newHaskellModulePass
+            (\self au -> do
+                analysisUsageAddRequired au (Proxy::Proxy LoopInfo))
+            (\self mod -> do
+                funs <- getFunctionList mod >>= ipListToList
+                loop_mp <- mapM 
+                           (\fun -> do
+                               isDecl <- globalValueIsDeclaration fun
+                               loops <- if isDecl
+                                        then return []
+                                        else (do
+                                                 resolver <- passGetResolver self
+                                                 pass <- analysisResolverFindImplPassFun resolver self (Proxy::Proxy LoopInfo) fun
+                                                 analysis <- passGetAnalysis pass
+                                                 base <- loopInfoGetBase analysis
+                                                 begin <- loopInfoBaseBegin base
+                                                 end <- loopInfoBaseEnd base
+                                                 loop_list <- vectorIteratorToList begin end
+                                                 mapM reifyLoop loop_list)
+                               return (fun,loops)
+                           ) funs
+                putMVar var (Map.fromList loop_mp)
+                return False))
+    ]
 
-applyOptimizations :: Ptr Module -> IO ()
+applyOptimizations :: Ptr Module -> IO (Map (Ptr Function) [LoopDesc])
 applyOptimizations mod = do
+  var <- newEmptyMVar
   pm <- newPassManager
   mapM (\(APass c) -> do
            pass <- c
-           passManagerAdd pm pass) passes
+           passManagerAdd pm pass) (passes var)
   passManagerRun pm mod
   deletePassManager pm
+  res <- takeMVar var
   moduleDump mod
-  return ()
+  return res
 
 getTargetLibraryInfo :: Ptr Module -> IO (Ptr TargetLibraryInfo)
 getTargetLibraryInfo mod = do
@@ -128,7 +167,7 @@ getProgram file = do
   diag <- newSMDiagnostic
   ctx <- newLLVMContext
   mod <- parseIR buf diag ctx
-  applyOptimizations mod
+  applyOptimizations mod >>= print
   tli <- getTargetLibraryInfo mod
   dl <- getDataLayout mod
   funs <- getFunctionList mod >>= 
