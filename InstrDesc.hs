@@ -69,7 +69,7 @@ data OperandDesc a
   deriving (Show,Eq,Ord)
 
 reifyInstr :: Ptr TargetLibraryInfo
-#if HS_LLVM_VERSION >= 303
+#if HS_LLVM_VERSION >= 302
               -> Ptr DataLayout
 #else
               -> Ptr TargetData
@@ -85,14 +85,14 @@ reifyInstr tl dl ptr
               return $ IAssign ptr $ IBinaryOperator opcode op1 op2
           ) (castDown ptr)
     ,fmap (\call -> do
-#if HS_LLVM_VERSION >= 303
+#if HS_LLVM_VERSION >= 302
               isMalloc <- isMallocLikeFn call tl False
 #else
               isMalloc <- isMallocLikeFn call
 #endif
               if isMalloc
                 then (do
-#if HS_LLVM_VERSION >= 303
+#if HS_LLVM_VERSION >= 302
                          tp <- getMallocAllocatedType call tl
 #else
                          tp <- getMallocAllocatedType call
@@ -100,7 +100,7 @@ reifyInstr tl dl ptr
                          rtp <- if tp==nullPtr
                                 then return Nothing
                                 else fmap Just (reifyType tp)
-#if HS_LLVM_VERSION >= 303
+#if HS_LLVM_VERSION >= 302
                          sz <- getMallocArraySize call dl tl False
 #else
                          sz <- getMallocArraySize call dl False

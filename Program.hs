@@ -147,7 +147,7 @@ getTargetLibraryInfo mod = do
   modulePassRunOnModule tli mod
   return tli
 
-#if HS_LLVM_VERSION >= 303
+#if HS_LLVM_VERSION >= 302
 getDataLayout :: Ptr Module -> IO (Ptr DataLayout)
 getDataLayout mod = do
   dl <- newDataLayoutFromModule mod
