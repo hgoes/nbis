@@ -49,7 +49,8 @@ import LLVM.FFI.CPP
 
 type ProgDesc = (Map String ([(Ptr Argument, TypeDesc)],
                              TypeDesc,
-                             [(Ptr BasicBlock, [[InstrDesc Operand]])]),
+                             [(Ptr BasicBlock, [[InstrDesc Operand]])],
+                             [LoopDesc]),
                  Map (Ptr GlobalVariable) (TypeDesc, Maybe MemContent),
                  Set TypeDesc,
                  Map String [TypeDesc])
@@ -76,17 +77,17 @@ getUsedTypes mod = do
   deleteFindUsedTypes pass
   return (all_tps,Map.fromList $ catMaybes structs)
 
-data LoopDesc = LoopDesc [Ptr BasicBlock] [LoopDesc] deriving Show
+data LoopDesc = LoopDesc (Ptr Loop) [Ptr BasicBlock] [LoopDesc] deriving Show
 
 reifyLoop :: Ptr Loop -> IO LoopDesc
 reifyLoop loop = do
   blks <- loopGetBlocks loop >>= vectorToList
   subs <- loopGetSubLoops loop >>= vectorToList >>= mapM reifyLoop
-  return $ LoopDesc blks subs
+  return $ LoopDesc loop blks subs
 
 data APass = forall p. PassC p => APass (IO (Ptr p))
 
-passes :: MVar (Map (Ptr Function) [LoopDesc]) -> [APass]
+passes :: MVar (Map String [LoopDesc]) -> [APass]
 passes var
   = [APass createPromoteMemoryToRegisterPass
     ,APass createConstantPropagationPass
@@ -110,6 +111,7 @@ passes var
                 funs <- getFunctionList mod >>= ipListToList
                 loop_mp <- mapM 
                            (\fun -> do
+                               fname <- getNameString fun
                                isDecl <- globalValueIsDeclaration fun
                                loops <- if isDecl
                                         then return []
@@ -122,13 +124,13 @@ passes var
                                                  end <- loopInfoBaseEnd base
                                                  loop_list <- vectorIteratorToList begin end
                                                  mapM reifyLoop loop_list)
-                               return (fun,loops)
+                               return (fname,loops)
                            ) funs
                 putMVar var (Map.fromList loop_mp)
                 return False))
     ]
 
-applyOptimizations :: Ptr Module -> IO (Map (Ptr Function) [LoopDesc])
+applyOptimizations :: Ptr Module -> IO (Map String [LoopDesc])
 applyOptimizations mod = do
   var <- newEmptyMVar
   pm <- newPassManager
@@ -167,7 +169,7 @@ getProgram file = do
   diag <- newSMDiagnostic
   ctx <- newLLVMContext
   mod <- parseIR buf diag ctx
-  applyOptimizations mod >>= print
+  loop_mp <- applyOptimizations mod
   tli <- getTargetLibraryInfo mod
   dl <- getDataLayout mod
   funs <- getFunctionList mod >>= 
@@ -188,7 +190,7 @@ getProgram file = do
                                               ipListToList >>=
                                               mapM (reifyInstr tli dl)
                                     return (blk,mkSubBlocks [] instrs))
-                   return (fname,(zip args argtps,rtp,blks))) >>=
+                   return (fname,(zip args argtps,rtp,blks,loop_mp!fname))) >>=
           return . Map.fromList
   globs <- getGlobalList mod >>= 
            ipListToList >>= 
@@ -217,7 +219,7 @@ getConstant val
               val <- constantIntGetValue ci
               w <- apIntGetBitWidth val
               rval <- apIntGetSExtValue val
-              return $ MemCell w (toInteger rval)
+              return $ MemCell (toInteger w) (toInteger rval)
           ) (castDown val)
     ,fmap (\carr -> do
               sz <- getNumOperands (carr::Ptr ConstantArray)
@@ -251,13 +253,13 @@ getConstant val
 
 mergePrograms :: ProgDesc -> ProgDesc -> ProgDesc
 mergePrograms (p1,g1,tp1,s1) (p2,g2,tp2,s2) 
-  = (Map.unionWithKey (\name (args1,tp1,blks1) (args2,tp2,blks2)
+  = (Map.unionWithKey (\name (args1,tp1,blks1,loops1) (args2,tp2,blks2,loops2)
                        -> if fmap snd args1 /= fmap snd args2 || tp1 /= tp2
                           then error $ "Conflicting signatures for function "++show name++" detected"
                           else (if P.null blks1
-                                then (args2,tp2,blks2)
+                                then (args2,tp2,blks2,loops2)
                                 else (if P.null blks2
-                                      then (args1,tp1,blks1)
+                                      then (args1,tp1,blks1,loops1)
                                       else error $ "Conflicting definitions for function "++show name++" found"))) p1 p2,
      Map.union g1 g2,
      Set.union tp1 tp2,

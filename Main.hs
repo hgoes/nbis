@@ -21,13 +21,13 @@ import MemoryModel.Snow
 import Language.SMTLib2
 import Data.Typeable
 import Control.Monad.Trans
-import Data.List as List (genericLength,genericReplicate,genericSplitAt,zip4,zipWith4,zipWith5,null,lookup,find,genericIndex,elem)
+import Data.List as List (genericLength,genericReplicate,genericSplitAt,zip4,zipWith4,zipWith5,null,lookup,find,genericIndex)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Debug.Trace
-import Prelude hiding (foldl,concat,mapM_,any,foldr,mapM,foldl1,all)
+import Prelude hiding (foldl,concat,mapM_,any,foldr,mapM,foldl1,all,elem)
 import Data.Foldable
 import Data.Traversable
 import System.Exit
@@ -46,6 +46,7 @@ import Control.Monad.RWS (runRWST)
 import LLVM.FFI.BasicBlock
 import LLVM.FFI.Value
 import LLVM.FFI.Instruction (Instruction)
+import LLVM.FFI.Loop (Loop)
 import LLVM.FFI.Constant
 
 (!) :: (Show k,Ord k) => Map k a -> k -> a
@@ -119,6 +120,7 @@ data FunctionDescr gr = FunctionDescr
                         , funDescrSCC :: [[Gr.Node]]
                         , funDescrDefines :: Map (Ptr Instruction) (Ptr BasicBlock,Integer)
                         , funDescrRealizationOrder :: [(Ptr BasicBlock,Integer)]
+                        , funDescrLoops :: [LoopDesc]
                         }
 
 data UnrollGraph gr m ptr
@@ -131,7 +133,7 @@ data UnrollGraph gr m ptr
                 , startNode :: Gr.Node
                 , nextNode :: Gr.Node
                 , nextPointer :: ptr
-                , queuedNodes :: [(String,[QueueEntry ptr])]
+                , queuedNodes :: [(String,[(Ptr Loop,[QueueEntry ptr])])]
                 , delayedNodes :: [DelayedReturn]
                 }
 
@@ -494,9 +496,9 @@ unrollProgram :: (Gr.DynGraph gr,Integral ptr,MemoryModel m ptr)
                 -> Unrollment gr m ptr a 
                 -> SMT a
 unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m ptr a) = do
-  let (init_args,_,init_blks) = funs!init
+  let (init_args,_,init_blks,_) = funs!init
       globs_mp = fmap (\(tp,_) -> tp) globs
-      allfuns = fmap (\(sig,rtp,blks) 
+      allfuns = fmap (\(sig,rtp,blks,loops)
                       -> let (pgr,pmp) = programAsGraph blks
                              defs = getDefiningBlocks (\name -> case intrinsics name :: Maybe (Ptr Instruction -> [(Val Int,TypeDesc)] -> Realization Int ()) of
                                                           Nothing -> False
@@ -517,6 +519,7 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m ptr a) = do
                                                                  ) (Gr.scc pgr)
                                           , funDescrDefines = defs
                                           , funDescrRealizationOrder = order
+                                          , funDescrLoops = loops
                                           }
                      ) funs
   mem0 <- memNew (undefined::ptr) tps structs
@@ -541,8 +544,9 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m ptr a) = do
                         }
   evalStateT (do
                  nd_start <- makeNode Nothing Nothing (IdStart { startFunction = init })
-                 modify $ \gr -> gr { startNode = nd_start 
-                                    , queuedNodes = [(init,nodeSuccessors gr nd_start)] }
+                 modify $ \gr -> gr { startNode = nd_start }
+                 gr' <- get
+                 mapM_ queueNode (nodeSuccessors gr' nd_start)
                  f) gr0
   
   {-(nd,gr1) <- makeNode gr0 Nothing (IdStart { startFunction = init })
@@ -682,7 +686,7 @@ gatherInputs read_from from nid = do
           var_set = getInstrsDeps instrs
           var_mp = Map.mapWithKey (\var tp -> case Map.lookup var defines of
                                       Just src -> case Map.lookup src nd_mp of
-                                        Just nd_src -> case List.find (List.elem nd_src) sccs of
+                                        Just nd_src -> case List.find (elem nd_src) sccs of
                                           -- The source node is not part of any loop
                                           Nothing -> let Just (_,Node { nodeType = ndsrc}) = scanForNode (nodeGraph gr) (fst src) (snd src) fnid
                                                      in case Map.lookup var (nodeOutput ndsrc) of
@@ -691,7 +695,7 @@ gatherInputs read_from from nid = do
                                           Just comp -> case nid of
                                             IdBlock { idBlock = blk
                                                     , idSubblock = sblk } -> case Map.lookup (blk,sblk) nd_mp of
-                                              Just nd_trg -> if List.elem nd_trg comp -- Are target and source in the same component?
+                                              Just nd_trg -> if elem nd_trg comp -- Are target and source in the same component?
                                                              then (if isLoopCenter nd_src comp fun_gr || isLoopCenter nd_trg comp fun_gr -- Is either of them the loop center?
                                                                    then (let Just (_,Node { nodeType = ndsrc}) = scanForNode (nodeGraph gr) (fst src) (snd src) fnid
                                                                          in case Map.lookup var (nodeOutput ndsrc) of
@@ -733,17 +737,28 @@ queueNode :: QueueEntry ptr -> Unrollment gr m ptr ()
 queueNode entr = do
   gr <- get
   let Just fdescr = Map.lookup (nodeIdFunction $ queuedNode entr) (allFunctions gr)
-      nqueue = insert' (funDescrRealizationOrder fdescr) (queuedNodes gr)
+      loop_ptr = case queuedNode entr of
+        IdBlock { idBlock = blk } -> case findLoopForBlock blk (funDescrLoops fdescr) of
+          Nothing -> nullPtr
+          Just (LoopDesc ptr _ _) -> ptr
+        _ -> nullPtr
+      nqueue = insert' (funDescrRealizationOrder fdescr) loop_ptr (queuedNodes gr)
   put $ gr { queuedNodes = nqueue }
   where
-    insert' ord [] = [(nodeIdFunction $ queuedNode entr,[entr])]
-    insert' ord ((f,entrs):qs) = if nodeIdFunction (queuedNode entr) == f
-                                 then (f,insertWithOrder (\e -> case queuedNode e of
-                                                             IdBlock { idBlock = blk
-                                                                     , idSubblock = sblk
-                                                                     } -> (blk,sblk)
-                                                             _ -> (nullPtr,0)) ord entr entrs):qs
-                                 else (f,entrs):insert' ord qs
+    insert' ord loop_ptr [] = [(nodeIdFunction $ queuedNode entr,[(loop_ptr,[entr])])]
+    insert' ord loop_ptr ((f,entrs):qs)
+      = if nodeIdFunction (queuedNode entr) == f
+        then (f,insert'' ord loop_ptr entrs):qs
+        else (f,entrs):insert' ord loop_ptr qs
+    insert'' ord loop_ptr [] = [(loop_ptr,[entr])]
+    insert'' ord loop_ptr ((loop_ptr',entrs):qs)
+      = if loop_ptr==loop_ptr'
+        then (loop_ptr',insertWithOrder (\e -> case queuedNode e of
+                                            IdBlock { idBlock = blk
+                                                    , idSubblock = sblk
+                                                    } -> (blk,sblk)
+                                            _ -> (nullPtr,0)) ord entr entrs):qs
+        else (loop_ptr',entrs):insert'' ord loop_ptr qs
 
 dequeueNode :: Unrollment gr m ptr (QueueEntry ptr)
 dequeueNode = do
@@ -754,6 +769,18 @@ dequeueNode = do
   where
     dequeue [] = error "Nothing to dequeue"
     dequeue ((f,[]):xs) = error "Empty queue bucket"
-    dequeue ((f,el:els):xs) = case els of
-      [] -> (el,xs)
-      _ -> (el,xs++[(f,els)])
+    dequeue ((f,(l,[]):_):_) = error "Empty queue bucket"
+    dequeue ((f,(l,el:els):ys):xs) = case els of
+      [] -> case ys of
+        [] -> (el,xs)
+        _ -> (el,xs++[(f,ys)])
+      _ -> (el,xs++[(f,ys++[(l,els)])])
+
+findLoopForBlock :: Ptr BasicBlock -> [LoopDesc] -> Maybe LoopDesc
+findLoopForBlock blk [] = Nothing
+findLoopForBlock blk (desc@(LoopDesc _ blks subs):loops)
+  = if blk `elem` blks
+    then (case findLoopForBlock blk subs of
+             Nothing -> Just desc
+             Just res -> Just res)
+    else findLoopForBlock blk loops
