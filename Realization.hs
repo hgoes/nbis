@@ -281,6 +281,14 @@ realizeInstruction (IAssign trg expr) = do
           return $ PointerValue ptr
         (ifT',ifF') -> do
           return $ valSwitch [(ifT',cond'),(ifF',not' cond')]
+    IMalloc (Just tp) sz True -> do
+      rsz <- argToExpr sz
+      let size = case rsz of
+            ConstValue bv _ -> Left bv
+            DirectValue bv -> Right bv
+      ptr <- reNewPtr
+      reMemInstr (MIAlloc tp size ptr)
+      return (PointerValue ptr)
     _ -> reEnvError $ "Unimplemented assign instruction: "++show expr
   rePutVar trg rval
   return Nothing
@@ -302,15 +310,6 @@ realizeInstruction (ITerminator (ICall trg f args)) = case operandDesc f of
         re <- ask
         return $ Just $ Jump (CondElse (reBlock re,reSubblock re + 1))
       Nothing -> return $ Just $ Call fn (fmap fst args') trg
-realizeInstruction (ITerminator (IMalloc trg (Just tp) sz True)) = do
-  rsz <- argToExpr sz
-  let size = case rsz of
-        ConstValue bv _ -> Left bv
-        DirectValue bv -> Right bv
-  ptr <- reNewPtr
-  reMemInstr (MIAlloc tp size ptr)
-  rePutVar trg (PointerValue ptr)
-  return Nothing
 realizeInstruction instr = reError $ "Implement realizeInstruction for "++show instr
 
 intrinsics :: Enum ptr => String -> Maybe (Ptr Instruction -> [(Val ptr,TypeDesc)] -> Realization ptr ())

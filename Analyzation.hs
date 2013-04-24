@@ -86,7 +86,6 @@ getVariableOrigins mp blk sblk instr
   = case instr of
     IAssign trg _ -> Map.insert trg (blk,sblk) mp
     ITerminator (ICall trg _ _) -> Map.insert trg (blk,sblk) mp
-    ITerminator (IMalloc trg _ _ _) -> Map.insert trg (blk,sblk) mp
     _ -> mp
 
 getSuccessors :: (Map (Ptr BasicBlock,Integer) (Set (Ptr BasicBlock,Integer)),Map (Ptr BasicBlock,Integer) (Set (Ptr BasicBlock,Integer))) -> Ptr BasicBlock -> Integer -> InstrDesc Operand
@@ -97,7 +96,6 @@ getSuccessors mp blk sblk instr
     ITerminator (IBrCond _ t1 t2) -> jump blk sblk (Set.fromList [(t1,0),(t2,0)]) mp      
     ITerminator (ISwitch _ def cases) -> jump blk sblk (Set.fromList $ (def,0):(fmap (\(_,trg) -> (trg,0)) cases)) mp
     ITerminator (ICall _ _ _) -> jump blk sblk (Set.singleton (blk,sblk+1)) mp
-    ITerminator (IMalloc _ _ _ _) -> jump blk sblk (Set.singleton (blk,sblk+1)) mp
     _ -> mp
     where
       jump blk sblk trgs (pred,succ) = (foldl (\pred' (blk',sblk') -> Map.insertWith Set.union (blk',sblk') (Set.singleton (blk,sblk)) pred') pred trgs,
@@ -171,10 +169,10 @@ getInputOutput origins succ (local,mp) blk sblk instr
                             IAlloca _ sz -> case sz of
                               Nothing -> mp
                               Just sz' -> addExpr sz' mp
+                            IMalloc _ sz _ -> addExpr sz mp
                         )
     IStore e ptr -> (local,addExpr e $ addExpr ptr mp)
     ITerminator (ICall _ _ args) -> (Set.empty,foldr addExpr mp args)
-    ITerminator (IMalloc _ _ sz _) -> (Set.empty,addExpr sz mp)
     _ -> error $ "Implement getInputOutput for "++show instr
     where
       addExpr :: Operand -> (Map (Ptr BasicBlock,Integer) (Map (Ptr Instruction) TypeDesc),
@@ -223,7 +221,6 @@ getDefiningBlocks isIntr
                                     ODFunction _ fname _ -> if isIntr fname
                                                             then Map.insert trg (blk,sblk) mp3
                                                             else Map.insert trg (blk,sblk+1) mp3
-                                  ITerminator (IMalloc trg _ _ _) -> Map.insert trg (blk,sblk) mp3
                                   _ -> mp3
                               ) mp2 instrs
                     ) mp1 (zip sblks [0..])

@@ -39,6 +39,7 @@ data AssignDesc a
   | ITrunc TypeDesc a
   | IZExt TypeDesc a
   | IAlloca TypeDesc (Maybe a)
+  | IMalloc (Maybe TypeDesc) a Bool
   deriving (Show,Eq,Ord)
 
 data TerminatorDesc a
@@ -48,7 +49,6 @@ data TerminatorDesc a
   | IBrCond a (Ptr BasicBlock) (Ptr BasicBlock)
   | ISwitch a (Ptr BasicBlock) [(a,Ptr BasicBlock)]
   | ICall (Ptr Instruction) a [a]
-  | IMalloc (Ptr Instruction) (Maybe TypeDesc) a Bool
   deriving (Show,Eq,Ord)
 
 data Operand = Operand { operandType :: TypeDesc
@@ -112,7 +112,7 @@ reifyInstr tl dl ptr
                                     else (do
                                              x <- reifyOperand sz
                                              return (x,True))
-                         return $ ITerminator $ IMalloc ptr rtp rsz c)
+                         return $ IAssign ptr $ IMalloc rtp rsz c)
                 else (do
                          cobj <- callInstGetCalledValue call >>= reifyOperand
                          nargs <- callInstGetNumArgOperands call
@@ -221,19 +221,19 @@ getInstrType structs (IAssign _ desc) = case desc of
   ITrunc to _ -> to
   IZExt to _ -> to
   IAlloca tp _ -> PointerType tp
+  IMalloc (Just tp) _ _ -> PointerType tp
+  IMalloc Nothing _ _ -> PointerType (IntegerType 8)
 getInstrType _ (IStore _ _) = VoidType
 getInstrType _ (ITerminator desc) = case desc of
   ICall _ f _ -> case operandType f of
     PointerType (FunctionType rtp _ _) -> rtp
     tp -> error $ "Invalid type for call argument: "++show tp
-  IMalloc _ (Just tp) _ _ -> PointerType tp
   _ -> VoidType
 
 getInstrTarget :: InstrDesc Operand -> Maybe (Ptr Instruction)
 getInstrTarget (IAssign x _) = Just x
 getInstrTarget (ITerminator desc) = case desc of
   ICall trg _ _ -> Just trg
-  IMalloc trg _ _ _ -> Just trg
   _ -> Nothing
 getInstrTarget (IStore _ _) = Nothing
 
@@ -307,12 +307,12 @@ getInstrsDeps = snd . foldl (\(loc,mp) instr -> (case getInstrTarget instr of
       IAlloca _ sz -> case sz of
         Nothing -> mp
         Just sz' -> getOperandDeps loc mp sz'
+      IMalloc _ sz _ -> getOperandDeps loc mp sz
     getInstrDeps loc mp (IStore val ptr) = getOperandDeps loc (getOperandDeps loc mp val) ptr
     getInstrDeps loc mp (ITerminator term) = case term of
       IBrCond cond _ _ -> getOperandDeps loc mp cond
       ISwitch val _ cases -> getOperandDeps loc (foldl (\cmp (c,_) -> getOperandDeps loc cmp c) mp cases) val
       ICall _ fun args -> getOperandDeps loc (foldl (getOperandDeps loc) mp args) fun
-      IMalloc _ _ sz _ -> getOperandDeps loc mp sz
       _ -> mp
 
     getOperandDeps loc mp op = case operandDesc op of

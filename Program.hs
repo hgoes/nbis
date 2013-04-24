@@ -106,8 +106,10 @@ passes var
     ,APass (createFunctionInliningPass 100)
     ,APass (newHaskellModulePass
             (\self au -> do
+                print "CONF"
                 analysisUsageAddRequired au (Proxy::Proxy LoopInfo))
             (\self mod -> do
+                print "RUN"
                 funs <- getFunctionList mod >>= ipListToList
                 loop_mp <- mapM 
                            (\fun -> do
@@ -169,7 +171,9 @@ getProgram file = do
   diag <- newSMDiagnostic
   ctx <- newLLVMContext
   mod <- parseIR buf diag ctx
+  print "Running optimizations..."
   loop_mp <- applyOptimizations mod
+  print "done."
   tli <- getTargetLibraryInfo mod
   dl <- getDataLayout mod
   funs <- getFunctionList mod >>= 
@@ -212,7 +216,6 @@ getProgram file = do
     mkSubBlocks :: [InstrDesc Operand] -> [InstrDesc Operand] -> [[InstrDesc Operand]]
     mkSubBlocks cur (i:is) = case i of
       ITerminator (ICall _ _ _) -> (cur++[i]):mkSubBlocks [] is
-      ITerminator (IMalloc _ _ _ _) -> mkSubBlocks (cur++[i]) is
       ITerminator _ -> [cur++[i]]
       _ -> mkSubBlocks (cur++[i]) is
 
