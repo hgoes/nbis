@@ -217,7 +217,7 @@ realizeInstruction (IAssign trg name expr) = do
           ptr <- reNewPtr
           reMemInstr (MISelect [ (cond,ptr') | (PointerValue ptr',cond) <- nargs ] ptr)
           return (PointerValue ptr)
-        _ -> return $ valSwitch nargs
+        _ -> lift $ valCopy (genName "Phi") $ valSwitch nargs
     ILoad arg -> do
       PointerValue ptr <- argToExpr arg
       re <- get
