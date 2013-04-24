@@ -213,9 +213,9 @@ foldInstrs f = foldl (\x1 (blk,sblks)
                                      ) (0,x1) sblks
                      )
 
-getDefiningBlocks :: (String -> Bool) -> [(Ptr BasicBlock,[[InstrDesc Operand]])] -> Map (Ptr Instruction) (Ptr BasicBlock,Integer)
+getDefiningBlocks :: (String -> Bool) -> [(Ptr BasicBlock,Maybe String,[[InstrDesc Operand]])] -> Map (Ptr Instruction) (Ptr BasicBlock,Integer)
 getDefiningBlocks isIntr
-  = foldl (\mp1 (blk,sblks)
+  = foldl (\mp1 (blk,_,sblks)
            -> foldl (\mp2 (instrs,sblk)
                      -> foldl (\mp3 instr -> case instr of
                                   IAssign trg _ -> Map.insert trg (blk,sblk) mp3
@@ -234,19 +234,19 @@ getPhis = foldl (\mp instr -> case instr of
                     IAssign trg (IPhi blks) -> Map.insert trg blks mp
                     _ -> mp) Map.empty
 
-programAsGraph :: Gr.DynGraph gr => [(Ptr BasicBlock,[[InstrDesc Operand]])]
-                  -> (gr (Ptr BasicBlock,Integer,[InstrDesc Operand]) (),Map (Ptr BasicBlock,Integer) Gr.Node)
+programAsGraph :: Gr.DynGraph gr => [(Ptr BasicBlock,Maybe String,[[InstrDesc Operand]])]
+                  -> (gr (Ptr BasicBlock,Maybe String,Integer,[InstrDesc Operand]) (),Map (Ptr BasicBlock,Integer) Gr.Node)
 programAsGraph prog = createEdges $ createNodes (Gr.empty,Map.empty) prog
   where
     createNodes res [] = res
-    createNodes res ((blk,sblks):rest)
+    createNodes res ((blk,blk_name,sblks):rest)
       = createNodes (foldl (\(cgr,cmp) (instrs,sblk)
                             -> let [nnode] = Gr.newNodes 1 cgr
-                               in (Gr.insNode (nnode,(blk,sblk,instrs)) cgr,Map.insert (blk,sblk) nnode cmp)
+                               in (Gr.insNode (nnode,(blk,blk_name,sblk,instrs)) cgr,Map.insert (blk,sblk) nnode cmp)
                            ) res (zip sblks [0..])
                     ) rest
 
-    createEdges (gr,mp) = (Gr.ufold (\(_,node,(blk,sblk,instrs),_) cgr
+    createEdges (gr,mp) = (Gr.ufold (\(_,node,(blk,blk_name,sblk,instrs),_) cgr
                                      -> case last instrs of
                                        ITerminator term -> case term of
                                          IRetVoid -> cgr

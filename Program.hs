@@ -49,7 +49,7 @@ import LLVM.FFI.CPP
 
 type ProgDesc = (Map String ([(Ptr Argument, TypeDesc)],
                              TypeDesc,
-                             [(Ptr BasicBlock, [[InstrDesc Operand]])],
+                             [(Ptr BasicBlock, Maybe String, [[InstrDesc Operand]])],
                              [LoopDesc]),
                  Map (Ptr GlobalVariable) (TypeDesc, Maybe MemContent),
                  Set TypeDesc,
@@ -186,10 +186,14 @@ getProgram file = do
                    blks <- getBasicBlockList fun >>= 
                            ipListToList >>=
                            mapM (\blk -> do
+                                    blkHasName <- hasName blk
+                                    blkName <- if blkHasName
+                                               then fmap Just (getNameString blk)
+                                               else return Nothing
                                     instrs <- getInstList blk >>=
                                               ipListToList >>=
                                               mapM (reifyInstr tli dl)
-                                    return (blk,mkSubBlocks [] instrs))
+                                    return (blk,blkName,mkSubBlocks [] instrs))
                    return (fname,(zip args argtps,rtp,blks,loop_mp!fname))) >>=
           return . Map.fromList
   globs <- getGlobalList mod >>= 

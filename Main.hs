@@ -114,8 +114,8 @@ data NodeType ptr
 data FunctionDescr gr = FunctionDescr
                         { funDescrArgs :: [(Ptr Argument,TypeDesc)]
                         , funDescrReturnType :: TypeDesc
-                        , funDescrBlocks :: [(Ptr BasicBlock,[[InstrDesc Operand]])]
-                        , funDescrGraph :: gr (Ptr BasicBlock,Integer,[InstrDesc Operand]) ()
+                        , funDescrBlocks :: [(Ptr BasicBlock,Maybe String,[[InstrDesc Operand]])]
+                        , funDescrGraph :: gr (Ptr BasicBlock,Maybe String,Integer,[InstrDesc Operand]) ()
                         , funDescrNodeMap :: Map (Ptr BasicBlock,Integer) Gr.Node
                         , funDescrSCC :: [[Gr.Node]]
                         , funDescrDefines :: Map (Ptr Instruction) (Ptr BasicBlock,Integer)
@@ -191,7 +191,7 @@ nodeSuccessors gr nd = case Gr.lab (nodeGraph gr) nd of
   Just st -> case nodeType st of
     RealizedStart fun _ _
       -> let blks = funDescrBlocks $ (allFunctions gr)!fun
-             start_blk = fst $ head blks
+             (start_blk,_,_) = head blks
          in [QueueEntry { queuedNode = IdBlock fun start_blk 0 
                         , incomingNode = nd
                         , incomingReadNode = nd
@@ -302,10 +302,10 @@ makeNode read_from from nid = do
     IdBlock fun blk sblk -> do
       gr <- get
       let blks = funDescrBlocks $ (allFunctions gr)!fun
-          subs = case List.find (\(name,_)
+          subs = case List.find (\(name,_,_)
                                  -> name == blk
                                 ) blks of
-                   Just (_,s) -> s
+                   Just (_,_,s) -> s
                    Nothing -> error $ "Failed to find subblock "++show blk++" of function "++fun
           instrs = subs `genericIndex` sblk
           Just fnid = from
@@ -504,9 +504,9 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m ptr a) = do
                                                           Nothing -> False
                                                           Just _ -> True) blks
                              order = case blks of
-                               (start_blk,_):_ -> case Map.lookup (start_blk,0) pmp of
+                               (start_blk,_,_):_ -> case Map.lookup (start_blk,0) pmp of
                                  Just start_node -> case Gr.dff [start_node] pgr of
-                                   [order_tree] -> reverse $ fmap (\nd -> let Just (blk,sblk,_) = Gr.lab pgr nd in (blk,sblk)) $ Gr.postorder order_tree
+                                   [order_tree] -> reverse $ fmap (\nd -> let Just (blk,_,sblk,_) = Gr.lab pgr nd in (blk,sblk)) $ Gr.postorder order_tree
                                [] -> []
                          in FunctionDescr { funDescrArgs = sig
                                           , funDescrReturnType = rtp
@@ -674,8 +674,8 @@ gatherInputs read_from from nid = do
                         , funDescrGraph = fun_gr
                         , funDescrSCC = sccs
                         } = (allFunctions gr)!fun
-          subs = case List.find (\(name,_) -> name==blk) blks of
-            Just (_,s) -> s
+          subs = case List.find (\(name,_,_) -> name==blk) blks of
+            Just (_,_,s) -> s
           instrs = subs `genericIndex` sblk
           Just fnid = read_from
           Just fnode = Gr.lab (nodeGraph gr) fnid
