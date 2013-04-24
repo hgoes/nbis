@@ -21,7 +21,7 @@ import Data.Foldable
 import Prelude hiding (foldl)
 
 data InstrDesc a
-  = IAssign (Ptr Instruction) (AssignDesc a)
+  = IAssign (Ptr Instruction) (Maybe String) (AssignDesc a)
   | IStore a a
   | ITerminator (TerminatorDesc a)
   deriving (Show,Eq,Ord)
@@ -77,124 +77,129 @@ reifyInstr :: Ptr TargetLibraryInfo
               -> Ptr Instruction
               -> IO (InstrDesc Operand)
 reifyInstr tl dl ptr
-  = mkSwitch
-    [fmap (\binop -> do
-              opcode <- binOpGetOpCode binop
-              op1 <- getOperand binop 0 >>= reifyOperand
-              op2 <- getOperand binop 1 >>= reifyOperand
-              return $ IAssign ptr $ IBinaryOperator opcode op1 op2
-          ) (castDown ptr)
-    ,fmap (\call -> do
+  = do
+    has_name <- hasName ptr
+    name <- if has_name
+            then fmap Just (getNameString ptr)
+            else return Nothing
+    mkSwitch
+      [fmap (\binop -> do
+                opcode <- binOpGetOpCode binop
+                op1 <- getOperand binop 0 >>= reifyOperand
+                op2 <- getOperand binop 1 >>= reifyOperand
+                return $ IAssign ptr name $ IBinaryOperator opcode op1 op2
+            ) (castDown ptr)
+      ,fmap (\call -> do
 #if HS_LLVM_VERSION >= 302
-              isMalloc <- isMallocLikeFn call tl False
+                isMalloc <- isMallocLikeFn call tl False
 #else
-              isMalloc <- isMallocLikeFn call
+                isMalloc <- isMallocLikeFn call
 #endif
-              if isMalloc
-                then (do
+                if isMalloc
+                  then (do
 #if HS_LLVM_VERSION >= 302
-                         tp <- getMallocAllocatedType call tl
+                           tp <- getMallocAllocatedType call tl
 #else
-                         tp <- getMallocAllocatedType call
+                           tp <- getMallocAllocatedType call
 #endif
-                         rtp <- if tp==nullPtr
-                                then return Nothing
-                                else fmap Just (reifyType tp)
+                           rtp <- if tp==nullPtr
+                                  then return Nothing
+                                  else fmap Just (reifyType tp)
 #if HS_LLVM_VERSION >= 302
-                         sz <- getMallocArraySize call dl tl False
+                           sz <- getMallocArraySize call dl tl False
 #else
-                         sz <- getMallocArraySize call dl False
+                           sz <- getMallocArraySize call dl False
 #endif
-                         (rsz,c) <- if sz==nullPtr
-                                    then (do
-                                             x <- callInstGetArgOperand call 0 >>= reifyOperand
-                                             return (x,False))
-                                    else (do
-                                             x <- reifyOperand sz
-                                             return (x,True))
-                         return $ IAssign ptr $ IMalloc rtp rsz c)
-                else (do
-                         cobj <- callInstGetCalledValue call >>= reifyOperand
-                         nargs <- callInstGetNumArgOperands call
-                         args <- mapM (\i -> callInstGetArgOperand call i >>= reifyOperand) [0..(nargs-1)]
-                         return $ ITerminator $ ICall ptr cobj args)
-          ) (castDown ptr)
-    ,fmap (\cmp -> do
-              op <- getICmpOp cmp
-              op1 <- getOperand cmp 0 >>= reifyOperand
-              op2 <- getOperand cmp 1 >>= reifyOperand
-              return $ IAssign ptr $ IICmp op op1 op2
-          ) (castDown ptr)
-    ,fmap (\br -> do
-              isC <- branchInstIsConditional br
-              if isC
-                then (do
-                         cond <- branchInstGetCondition br >>= reifyOperand
-                         succ1 <- terminatorInstGetSuccessor br 0
-                         succ2 <- terminatorInstGetSuccessor br 1
-                         return $ ITerminator $ IBrCond cond succ1 succ2)
-                else (do
-                         succ <- terminatorInstGetSuccessor br 0
-                         return $ ITerminator $ IBr succ)
-          ) (castDown ptr)
-    ,fmap (\ret -> do
-              val <- returnInstGetReturnValue ret
-              if val == nullPtr
-                then return $ ITerminator $ IRetVoid
-                else (do
-                         val' <- reifyOperand val
-                         return $ ITerminator $ IRet val')
-          ) (castDown ptr)
-    ,fmap (\phi -> do
-              sz <- phiNodeGetNumIncomingValues phi
-              blks <- mapM (\i -> do
-                               val <- phiNodeGetIncomingValue phi i >>= reifyOperand
-                               blk <- phiNodeGetIncomingBlock phi i
-                               return (blk,val)
-                           ) [0..(sz-1)]
-              return $ IAssign ptr (IPhi blks)
-          ) (castDown ptr)
-    ,fmap (\store -> do
-              val <- storeInstGetValueOperand store >>= reifyOperand
-              ptr <- storeInstGetPointerOperand store >>= reifyOperand
-              return $ IStore val ptr
-          ) (castDown ptr)
-    ,fmap (\load -> do
-              op <- getOperand (load::Ptr LoadInst) 0 >>= reifyOperand
-              return $ IAssign ptr (ILoad op)
-          ) (castDown ptr)
-    ,fmap (\gep -> do
-              ptr' <- getElementPtrInstGetPointerOperand gep >>= reifyOperand
-              --begin <- getElementPtrInstIdxBegin gep
-              --end <- getElementPtrInstIdxEnd gep
-              --idx <- useToList begin end >>= mapM reifyOperand
-              sz <- getElementPtrInstGetNumIndices gep
-              idx <- mapM (\i -> getOperand gep i >>= reifyOperand) [1..sz]
-              --print sz
-              return $ IAssign ptr (IGetElementPtr ptr' idx)
-          ) (castDown ptr)
-    ,fmap (\zext -> do
-              op <- getOperand (zext::Ptr ZExtInst) 0 >>= reifyOperand
-              tp <- getType zext >>= reifyType
-              return $ IAssign ptr (IZExt tp op)
-          ) (castDown ptr)
-    ,fmap (\trunc -> do
-              op <- getOperand (trunc::Ptr TruncInst) 0 >>= reifyOperand
-              tp <- getType trunc >>= reifyType
-              return $ IAssign ptr (ITrunc tp op)
-          ) (castDown ptr)
-    ,fmap (\bcast -> do
-              op <- getOperand (bcast::Ptr BitCastInst) 0 >>= reifyOperand
-              PointerType tp <- getType bcast >>= reifyType
-              return $ IAssign ptr (IBitCast tp op)
-          ) (castDown ptr)
-    ,fmap (\sel -> do
-              cond <- selectInstGetCondition sel >>= reifyOperand
-              ifT <- selectInstGetTrueValue sel >>= reifyOperand
-              ifF <- selectInstGetFalseValue sel >>= reifyOperand
-              return $ IAssign ptr (ISelect cond ifT ifF)
-          ) (castDown ptr)
-    ]
+                           (rsz,c) <- if sz==nullPtr
+                                      then (do
+                                               x <- callInstGetArgOperand call 0 >>= reifyOperand
+                                               return (x,False))
+                                      else (do
+                                               x <- reifyOperand sz
+                                               return (x,True))
+                           return $ IAssign ptr name $ IMalloc rtp rsz c)
+                  else (do
+                           cobj <- callInstGetCalledValue call >>= reifyOperand
+                           nargs <- callInstGetNumArgOperands call
+                           args <- mapM (\i -> callInstGetArgOperand call i >>= reifyOperand) [0..(nargs-1)]
+                           return $ ITerminator $ ICall ptr cobj args)
+            ) (castDown ptr)
+      ,fmap (\cmp -> do
+                op <- getICmpOp cmp
+                op1 <- getOperand cmp 0 >>= reifyOperand
+                op2 <- getOperand cmp 1 >>= reifyOperand
+                return $ IAssign ptr name $ IICmp op op1 op2
+            ) (castDown ptr)
+      ,fmap (\br -> do
+                isC <- branchInstIsConditional br
+                if isC
+                  then (do
+                           cond <- branchInstGetCondition br >>= reifyOperand
+                           succ1 <- terminatorInstGetSuccessor br 0
+                           succ2 <- terminatorInstGetSuccessor br 1
+                           return $ ITerminator $ IBrCond cond succ1 succ2)
+                  else (do
+                           succ <- terminatorInstGetSuccessor br 0
+                           return $ ITerminator $ IBr succ)
+            ) (castDown ptr)
+      ,fmap (\ret -> do
+                val <- returnInstGetReturnValue ret
+                if val == nullPtr
+                  then return $ ITerminator $ IRetVoid
+                  else (do
+                           val' <- reifyOperand val
+                           return $ ITerminator $ IRet val')
+            ) (castDown ptr)
+      ,fmap (\phi -> do
+                sz <- phiNodeGetNumIncomingValues phi
+                blks <- mapM (\i -> do
+                                 val <- phiNodeGetIncomingValue phi i >>= reifyOperand
+                                 blk <- phiNodeGetIncomingBlock phi i
+                                 return (blk,val)
+                             ) [0..(sz-1)]
+                return $ IAssign ptr name (IPhi blks)
+            ) (castDown ptr)
+      ,fmap (\store -> do
+                val <- storeInstGetValueOperand store >>= reifyOperand
+                ptr <- storeInstGetPointerOperand store >>= reifyOperand
+                return $ IStore val ptr
+            ) (castDown ptr)
+      ,fmap (\load -> do
+                op <- getOperand (load::Ptr LoadInst) 0 >>= reifyOperand
+                return $ IAssign ptr name (ILoad op)
+            ) (castDown ptr)
+      ,fmap (\gep -> do
+                ptr' <- getElementPtrInstGetPointerOperand gep >>= reifyOperand
+                --begin <- getElementPtrInstIdxBegin gep
+                --end <- getElementPtrInstIdxEnd gep
+                --idx <- useToList begin end >>= mapM reifyOperand
+                sz <- getElementPtrInstGetNumIndices gep
+                idx <- mapM (\i -> getOperand gep i >>= reifyOperand) [1..sz]
+                --print sz
+                return $ IAssign ptr name (IGetElementPtr ptr' idx)
+            ) (castDown ptr)
+      ,fmap (\zext -> do
+                op <- getOperand (zext::Ptr ZExtInst) 0 >>= reifyOperand
+                tp <- getType zext >>= reifyType
+                return $ IAssign ptr name (IZExt tp op)
+            ) (castDown ptr)
+      ,fmap (\trunc -> do
+                op <- getOperand (trunc::Ptr TruncInst) 0 >>= reifyOperand
+                tp <- getType trunc >>= reifyType
+                return $ IAssign ptr name (ITrunc tp op)
+            ) (castDown ptr)
+      ,fmap (\bcast -> do
+                op <- getOperand (bcast::Ptr BitCastInst) 0 >>= reifyOperand
+                PointerType tp <- getType bcast >>= reifyType
+                return $ IAssign ptr name (IBitCast tp op)
+            ) (castDown ptr)
+      ,fmap (\sel -> do
+                cond <- selectInstGetCondition sel >>= reifyOperand
+                ifT <- selectInstGetTrueValue sel >>= reifyOperand
+                ifF <- selectInstGetFalseValue sel >>= reifyOperand
+                return $ IAssign ptr name (ISelect cond ifT ifF)
+            ) (castDown ptr)
+      ]
   where
     mkSwitch ((Just act):_) = act
     mkSwitch (Nothing:rest) = mkSwitch rest
@@ -203,7 +208,7 @@ reifyInstr tl dl ptr
       error "Unknown instruction."
 
 getInstrType :: Map String [TypeDesc] -> InstrDesc Operand -> TypeDesc
-getInstrType structs (IAssign _ desc) = case desc of
+getInstrType structs (IAssign _ _ desc) = case desc of
   IBinaryOperator _ l _ -> operandType l
   IFCmp _ _ _ -> IntegerType 1
   IICmp _ _ _ -> IntegerType 1
@@ -231,7 +236,7 @@ getInstrType _ (ITerminator desc) = case desc of
   _ -> VoidType
 
 getInstrTarget :: InstrDesc Operand -> Maybe (Ptr Instruction)
-getInstrTarget (IAssign x _) = Just x
+getInstrTarget (IAssign x _ _) = Just x
 getInstrTarget (ITerminator desc) = case desc of
   ICall trg _ _ -> Just trg
   _ -> Nothing
@@ -292,7 +297,7 @@ getInstrsDeps = snd . foldl (\(loc,mp) instr -> (case getInstrTarget instr of
                                                     Just t -> Set.insert t loc,getInstrDeps loc mp instr)
                             ) (Set.empty,Map.empty)
   where
-    getInstrDeps loc mp (IAssign _ expr) = case expr of
+    getInstrDeps loc mp (IAssign _ _ expr) = case expr of
       IBinaryOperator _ l r -> getOperandDeps loc (getOperandDeps loc mp l) r
       IFCmp _ l r -> getOperandDeps loc (getOperandDeps loc mp l) r
       IICmp _ l r -> getOperandDeps loc (getOperandDeps loc mp l) r

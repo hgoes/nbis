@@ -170,17 +170,20 @@ realizeInstruction (ITerminator (ISwitch val def args)) = do
                           return (CondIf (to,0) res cond)
                       ) (CondElse (def,0)) args'
       return $ Just $ Jump jumps
-realizeInstruction (IAssign trg expr) = do
+realizeInstruction (IAssign trg name expr) = do
+  let genName v = case name of
+        Just name' -> "assign_"++name'
+        Nothing -> "assign"++v
   rval <- case expr of
     IBinaryOperator op lhs rhs -> do
       lhs' <- argToExpr lhs
       rhs' <- argToExpr rhs
-      lift $ valCopy "assignBinOp" $ valBinOp op lhs' rhs'
+      lift $ valCopy (genName "BinOp") $ valBinOp op lhs' rhs'
     IICmp op lhs rhs -> case operandType lhs of
       PointerType _ -> do
         lhs' <- fmap asPointer $ argToExpr lhs
         rhs' <- fmap asPointer $ argToExpr rhs
-        cond <- lift $ varNamed "ptrCompare"
+        cond <- lift $ varNamed (genName "PtrCompare")
         reMemInstr (MICompare lhs' rhs' cond)
         case op of
           I_EQ -> return $ ConditionValue cond 1
@@ -190,7 +193,7 @@ realizeInstruction (IAssign trg expr) = do
       _ -> do
         lhs' <- argToExpr lhs
         rhs' <- argToExpr rhs
-        lift $ valCopy "assignICmp" $ valIntComp op lhs' rhs'
+        lift $ valCopy (genName "ICmp") $ valIntComp op lhs' rhs'
     IGetElementPtr ptr idx -> do
       PointerValue ptr' <- argToExpr ptr
       idx' <- mapM (\arg -> do
@@ -224,7 +227,7 @@ realizeInstruction (IAssign trg expr) = do
           reMemInstr (MILoadPtr ptr ptr2)
           return $ PointerValue ptr2
         PointerType tp -> do
-          loadRes <- lift $ varNamedAnn "loadRes" ((typeWidth tp)*8)
+          loadRes <- lift $ varNamedAnn (genName "LoadRes") ((typeWidth tp)*8)
           reMemInstr (MILoad ptr loadRes)
           return $ DirectValue loadRes
     IBitCast tp_to arg -> do
@@ -243,14 +246,14 @@ realizeInstruction (IAssign trg expr) = do
                  nv = bvconcat (ite (bvslt v (constantAnn (BitVector 0) w::SMTExpr (BitVector BVUntyped)))
                                 (constantAnn (BitVector (-1)) d::SMTExpr (BitVector BVUntyped))
                                 (constantAnn (BitVector 0) (fromIntegral d))) v
-             in lift $ valCopy "assignSExt" $ DirectValue nv
+             in lift $ valCopy (genName "SExt") $ DirectValue nv
     ITrunc tp arg -> do
       let w = bitWidth tp
       arg' <- argToExpr arg
       case arg' of
         ConstValue bv _ -> return $ ConstValue bv w
         ConditionValue v _ -> return $ ConditionValue v w
-        _ -> lift $ valCopy "assignTrunc" $ DirectValue (bvextract' 0 w (valValue arg'))
+        _ -> lift $ valCopy (genName "Trunc") $ DirectValue (bvextract' 0 w (valValue arg'))
     IZExt tp arg -> do
       arg' <- argToExpr arg
       case arg' of
@@ -258,7 +261,7 @@ realizeInstruction (IAssign trg expr) = do
         _ -> let v = valValue arg'
                  d = (bitWidth tp) - (bitWidth (operandType arg))
                  nv = bvconcat (constantAnn (BitVector 0) d::SMTExpr (BitVector BVUntyped)) v
-             in lift $ valCopy "assignZExt" $ DirectValue nv
+             in lift $ valCopy (genName "ZExt") $ DirectValue nv
     IAlloca tp sz -> do
       size' <- case sz of
         Nothing -> return (ConstValue 1 32)

@@ -84,7 +84,7 @@ getVariableOrigins :: Map (Ptr Instruction) (Ptr BasicBlock,Integer) -> Ptr Basi
                       -> Map (Ptr Instruction) (Ptr BasicBlock,Integer)
 getVariableOrigins mp blk sblk instr
   = case instr of
-    IAssign trg _ -> Map.insert trg (blk,sblk) mp
+    IAssign trg _ _ -> Map.insert trg (blk,sblk) mp
     ITerminator (ICall trg _ _) -> Map.insert trg (blk,sblk) mp
     _ -> mp
 
@@ -104,9 +104,9 @@ getSuccessors mp blk sblk instr
 getPhis' :: Map (Ptr BasicBlock,Integer) (Map (Ptr Instruction) (TypeDesc,Set (Ptr BasicBlock))) -> Ptr BasicBlock -> Integer -> InstrDesc Operand
            -> Map (Ptr BasicBlock,Integer) (Map (Ptr Instruction) (TypeDesc,Set (Ptr BasicBlock)))
 getPhis' mp blk sblk instr = case instr of
-  IAssign trg (IPhi froms) -> let ((_,e1):_) = froms
-                              in Map.insertWith Map.union (blk,sblk) 
-                                 (Map.singleton trg (operandType e1,Set.fromList $ fmap fst froms)) mp
+  IAssign trg _ (IPhi froms) -> let ((_,e1):_) = froms
+                                in Map.insertWith Map.union (blk,sblk)
+                                   (Map.singleton trg (operandType e1,Set.fromList $ fmap fst froms)) mp
   _ -> mp
 
 intermediateBlocks :: (Ptr BasicBlock,Integer) -> (Ptr BasicBlock,Integer) -> Map (Ptr BasicBlock,Integer) (Set (Ptr BasicBlock,Integer)) -> Set (Ptr BasicBlock,Integer)
@@ -149,28 +149,28 @@ getInputOutput origins succ (local,mp) blk sblk instr
     ITerminator (IBr _) -> (Set.empty,mp)
     ITerminator (IBrCond cond _ _) -> (Set.empty,addExpr cond mp)
     ITerminator (ISwitch val _ cases) -> (Set.empty,addExpr val $ foldr addExpr mp (fmap fst cases))
-    IAssign trg expr -> (Set.insert trg local,case expr of
-                            IBinaryOperator _ lhs rhs -> addExpr lhs $
-                                                         addExpr rhs mp
-                            IFCmp _ lhs rhs -> addExpr lhs $
-                                               addExpr rhs mp
-                            IICmp _ lhs rhs -> addExpr lhs $
-                                               addExpr rhs mp
-                            IGetElementPtr ptr idx -> addExpr ptr $ foldr addExpr mp idx
-                            IPhi cases -> foldr addExpr mp (fmap snd cases)
-                            ISelect x y z -> addExpr x $ 
-                                             addExpr y $
-                                             addExpr z mp
-                            ILoad ptr -> addExpr ptr mp
-                            IBitCast _ p -> addExpr p mp
-                            ISExt _ p -> addExpr p mp
-                            ITrunc _ p -> addExpr p mp
-                            IZExt _ p -> addExpr p mp
-                            IAlloca _ sz -> case sz of
-                              Nothing -> mp
-                              Just sz' -> addExpr sz' mp
-                            IMalloc _ sz _ -> addExpr sz mp
-                        )
+    IAssign trg _ expr -> (Set.insert trg local,case expr of
+                              IBinaryOperator _ lhs rhs -> addExpr lhs $
+                                                           addExpr rhs mp
+                              IFCmp _ lhs rhs -> addExpr lhs $
+                                                 addExpr rhs mp
+                              IICmp _ lhs rhs -> addExpr lhs $
+                                                 addExpr rhs mp
+                              IGetElementPtr ptr idx -> addExpr ptr $ foldr addExpr mp idx
+                              IPhi cases -> foldr addExpr mp (fmap snd cases)
+                              ISelect x y z -> addExpr x $
+                                               addExpr y $
+                                               addExpr z mp
+                              ILoad ptr -> addExpr ptr mp
+                              IBitCast _ p -> addExpr p mp
+                              ISExt _ p -> addExpr p mp
+                              ITrunc _ p -> addExpr p mp
+                              IZExt _ p -> addExpr p mp
+                              IAlloca _ sz -> case sz of
+                                Nothing -> mp
+                                Just sz' -> addExpr sz' mp
+                              IMalloc _ sz _ -> addExpr sz mp
+                          )
     IStore e ptr -> (local,addExpr e $ addExpr ptr mp)
     ITerminator (ICall _ _ args) -> (Set.empty,foldr addExpr mp args)
     _ -> error $ "Implement getInputOutput for "++show instr
@@ -216,7 +216,7 @@ getDefiningBlocks isIntr
   = foldl (\mp1 (blk,_,sblks)
            -> foldl (\mp2 (instrs,sblk)
                      -> foldl (\mp3 instr -> case instr of
-                                  IAssign trg _ -> Map.insert trg (blk,sblk) mp3
+                                  IAssign trg _ _ -> Map.insert trg (blk,sblk) mp3
                                   ITerminator (ICall trg fun _) -> case operandDesc fun of
                                     ODFunction _ fname _ -> if isIntr fname
                                                             then Map.insert trg (blk,sblk) mp3
@@ -228,7 +228,7 @@ getDefiningBlocks isIntr
 
 getPhis :: [InstrDesc a] -> Map (Ptr Instruction) [(Ptr BasicBlock,a)]
 getPhis = foldl (\mp instr -> case instr of
-                    IAssign trg (IPhi blks) -> Map.insert trg blks mp
+                    IAssign trg _ (IPhi blks) -> Map.insert trg blks mp
                     _ -> mp) Map.empty
 
 programAsGraph :: Gr.DynGraph gr => [(Ptr BasicBlock,Maybe String,[[InstrDesc Operand]])]
