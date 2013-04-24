@@ -175,7 +175,7 @@ realizeInstruction (IAssign trg expr) = do
     IBinaryOperator op lhs rhs -> do
       lhs' <- argToExpr lhs
       rhs' <- argToExpr rhs
-      return $ valBinOp op lhs' rhs'
+      lift $ valCopy "assignBinOp" $ valBinOp op lhs' rhs'
     IICmp op lhs rhs -> case operandType lhs of
       PointerType _ -> do
         lhs' <- fmap asPointer $ argToExpr lhs
@@ -190,7 +190,7 @@ realizeInstruction (IAssign trg expr) = do
       _ -> do
         lhs' <- argToExpr lhs
         rhs' <- argToExpr rhs
-        return $ valIntComp op lhs' rhs'
+        lift $ valCopy "assignICmp" $ valIntComp op lhs' rhs'
     IGetElementPtr ptr idx -> do
       PointerValue ptr' <- argToExpr ptr
       idx' <- mapM (\arg -> do
@@ -243,14 +243,14 @@ realizeInstruction (IAssign trg expr) = do
                  nv = bvconcat (ite (bvslt v (constantAnn (BitVector 0) w::SMTExpr (BitVector BVUntyped)))
                                 (constantAnn (BitVector (-1)) d::SMTExpr (BitVector BVUntyped))
                                 (constantAnn (BitVector 0) (fromIntegral d))) v
-             in return $ DirectValue nv
+             in lift $ valCopy "assignSExt" $ DirectValue nv
     ITrunc tp arg -> do
       let w = bitWidth tp
       arg' <- argToExpr arg
       case arg' of
         ConstValue bv _ -> return $ ConstValue bv w
         ConditionValue v _ -> return $ ConditionValue v w
-        _ -> return $ DirectValue (bvextract' 0 w (valValue arg'))
+        _ -> lift $ valCopy "assignTrunc" $ DirectValue (bvextract' 0 w (valValue arg'))
     IZExt tp arg -> do
       arg' <- argToExpr arg
       case arg' of
@@ -258,7 +258,7 @@ realizeInstruction (IAssign trg expr) = do
         _ -> let v = valValue arg'
                  d = (bitWidth tp) - (bitWidth (operandType arg))
                  nv = bvconcat (constantAnn (BitVector 0) d::SMTExpr (BitVector BVUntyped)) v
-             in return $ DirectValue nv
+             in lift $ valCopy "assignZExt" $ DirectValue nv
     IAlloca tp sz -> do
       size' <- case sz of
         Nothing -> return (ConstValue 1 32)

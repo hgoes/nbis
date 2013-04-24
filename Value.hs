@@ -126,3 +126,14 @@ valBinOp op lhs rhs
           Mul -> bvmul
           _ -> error $ "nbis: Unsupported binary operator "++show op
     in DirectValue (rop lhs' rhs')
+
+valCopy :: String -> Val m -> SMT (Val m)
+valCopy name (DirectValue val) = do
+  nval <- varNamedAnn name (extractAnnotation val)
+  assert $ nval .==. val
+  return (DirectValue nval)
+valCopy name (ConditionValue c w) = do
+  nc <- varNamed name
+  assert $ nc .==. c
+  return (ConditionValue nc w)
+valCopy _ v = return v
