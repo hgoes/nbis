@@ -169,14 +169,14 @@ instance Show (Transition m) where
     Just v -> showString "retval"
   showsPrec p (TDeliver to _) = id
 
-newValue :: Enum ptr => TypeDesc -> Unrollment gr m ptr (Val ptr)
-newValue (PointerType tp) = do
+newValue :: Enum ptr => String -> TypeDesc -> Unrollment gr m ptr (Val ptr)
+newValue _ (PointerType tp) = do
   st <- get
   let ptr = nextPointer st
   put $ st { nextPointer = succ ptr }
   return $ PointerValue ptr
-newValue tp = do
-  v <- lift $ varNamedAnn "inputVar" (fromIntegral $ bitWidth tp)
+newValue name tp = do
+  v <- lift $ varNamedAnn name (fromIntegral $ bitWidth tp)
   return (DirectValue v)
 
 isForwardJump :: String -> String -> [(String,a)] -> Bool
@@ -271,7 +271,7 @@ makeNode read_from from nid = do
       gr <- get
       let FunctionDescr { funDescrArgs = args } = (allFunctions gr)!fun
       args' <- mapM (\(name,tp) -> do
-                        val <- newValue tp 
+                        val <- newValue ("funarg_"++fun) tp
                         return (name,val)) args
       act <- case from of
         Nothing -> return $ constant True -- Don't use an activation variable for the first node
@@ -287,7 +287,7 @@ makeNode read_from from nid = do
       rv <- case rtp of
         VoidType -> return Nothing
         _ -> do
-          v <- newValue rtp
+          v <- newValue ("return_"++fun) rtp
           return (Just v)
       -- Set the pointer of the function start node
       modify (\gr -> case Gr.match fnode (nodeGraph gr) of
@@ -323,9 +323,10 @@ makeNode read_from from nid = do
       let inps_def = Map.mapMaybe (\v -> case v of
                                       Left val -> Just val
                                       Right _ -> Nothing) inps
-      inps_new <- mapM newValue $ Map.mapMaybe (\v -> case v of
-                                                   Right tp -> Just tp
-                                                   Left _ -> Nothing) inps
+      inps_new <- mapM (newValue "dyn_input") $
+                  Map.mapMaybe (\v -> case v of
+                                   Right tp -> Just tp
+                                   Left _ -> Nothing) inps
       let inps = Map.union inps_def inps_new
           allPhis = foldl (\s s' -> Set.union s (Set.fromList $ fmap fst s')) Set.empty (getPhis instrs)
       phis <- fmap Map.fromList $
