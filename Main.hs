@@ -100,6 +100,7 @@ data NodeType ptr
                 , nodeReturns :: Maybe (Val ptr) }
   | RealizedBlock { nodeFunctionNode :: Gr.Node
                   , nodeBlock :: Ptr BasicBlock
+                  , nodeBlockName :: Maybe String
                   , nodeSubblock :: Integer
                   , nodeInput :: Map (Ptr Instruction) (Val ptr)
                   , nodePhis :: Map (Ptr BasicBlock) (SMTExpr Bool)
@@ -350,6 +351,7 @@ makeNode read_from from nid = do
       put $ gr { nextPointer = reNextPtr nst }
       return (RealizedBlock { nodeFunctionNode = ffid
                             , nodeBlock = blk
+                            , nodeBlockName = name
                             , nodeSubblock = sblk
                             , nodeInput = inps_new
                             , nodePhis = phis
@@ -414,7 +416,14 @@ connectNodes from read_from trans to = do
               (Just r1,Just r2) -> [(r2,r1)]
           Call f args del -> case nodeType nd_to of
             RealizedStart _ args' _ -> zipWith (\(_,arg_i) arg_o -> (arg_i,arg_o)) args' args
-  nproxy <- lift $ varNamed "proxy"
+  nproxy <- lift $ varNamed ("proxy_"++(case nodeType nd_to of
+                                           RealizedStart { nodeStartName = fun } -> fun
+                                           RealizedEnd { } -> "end"
+                                           RealizedBlock { nodeBlock = blk
+                                                         , nodeBlockName = blkname
+                                                         } -> case blkname of
+                                             Nothing -> show blk
+                                             Just name' -> name'))
   lift $ assert $ nodeActivationProxy nd_to .==. (cond .||. nproxy)
   let (ptr_eqs,val_eqs) = foldr (\pair (ptr_eqs,val_eqs) -> case pair of
                                     (PointerValue p1,PointerValue p2) -> ((p1,p2):ptr_eqs,val_eqs)
