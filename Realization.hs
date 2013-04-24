@@ -283,7 +283,7 @@ realizeInstruction (IAssign trg name expr) = do
           reMemInstr (MISelect [(cond',ifT'),(not' cond',ifF')] ptr)
           return $ PointerValue ptr
         (ifT',ifF') -> do
-          return $ valSwitch [(ifT',cond'),(ifF',not' cond')]
+          lift $ valCopy (genName "Switch") $ valSwitch [(ifT',cond'),(ifF',not' cond')]
     IMalloc (Just tp) sz True -> do
       rsz <- argToExpr sz
       let size = case rsz of
