@@ -266,21 +266,17 @@ makeNode :: (Gr.DynGraph gr,Enum ptr,MemoryModel m ptr)
             -> NodeId 
             -> Unrollment gr m ptr Gr.Node
 makeNode read_from from nid = do
-  let act_name = case nid of
-        IdStart fun -> "start_"++fun
-        IdEnd fun -> "end_"++fun
-        IdBlock fun blk sblk -> "act_"++fun++"_"++show blk++"_"++show sblk
-  act <- case from of
-    Nothing -> return $ constant True -- Don't use an activation variable for the first node
-    Just _ -> lift $ varNamed act_name
-  (node_type,prog) <- case nid of
+  (node_type,act,prog) <- case nid of
     IdStart fun -> do
       gr <- get
       let FunctionDescr { funDescrArgs = args } = (allFunctions gr)!fun
       args' <- mapM (\(name,tp) -> do
                         val <- newValue tp 
                         return (name,val)) args
-      return (RealizedStart fun args' Nothing,[])
+      act <- case from of
+        Nothing -> return $ constant True -- Don't use an activation variable for the first node
+        Just _ -> lift $ varNamed $ "start_"++fun
+      return (RealizedStart fun args' Nothing,act,[])
     IdEnd fun -> do
       gr <- get
       let FunctionDescr { funDescrArgs = args
@@ -298,14 +294,15 @@ makeNode read_from from nid = do
                  (Just (inc,_,nd@Node { nodeType = RealizedStart fun args Nothing },outc),gr')
                    -> gr { nodeGraph = (inc,fnode,nd { nodeType = RealizedStart fun args (Just $ nextNode gr) },outc) Gr.& gr' }
              )
-      return (RealizedEnd fnode rv,[])
+      act <- lift $ varNamed $ "end_"++fun
+      return (RealizedEnd fnode rv,act,[])
     IdBlock fun blk sblk -> do
       gr <- get
       let blks = funDescrBlocks $ (allFunctions gr)!fun
-          subs = case List.find (\(name,_,_)
-                                 -> name == blk
-                                ) blks of
-                   Just (_,_,s) -> s
+          (name,subs) = case List.find (\(name,_,_)
+                                        -> name == blk
+                                       ) blks of
+                   Just (_,n,s) -> (n,s)
                    Nothing -> error $ "Failed to find subblock "++show blk++" of function "++fun
           instrs = subs `genericIndex` sblk
           Just fnid = from
@@ -319,6 +316,9 @@ makeNode read_from from nid = do
                   -> fn
             RealizedBlock { nodeFunctionNode = n } -> n
           Just (Node { nodeType = RealizedStart _ fun_args _ }) = Gr.lab (nodeGraph gr) ffid
+      act <- lift $ varNamed (case name of
+                                 Nothing -> "act_"++fun++"_"++show blk++"_"++show sblk
+                                 Just rname -> "act_"++rname++"_"++show sblk)
       (inps,args) <- gatherInputs read_from from nid
       let inps_def = Map.mapMaybe (\v -> case v of
                                       Left val -> Just val
@@ -357,7 +357,7 @@ makeNode read_from from nid = do
                             , nodeMemProgram = reMemInstrs outp
                             , nodeWatchpoints = reWatchpoints outp
                             , nodeGuards = reGuards outp
-                            },reMemInstrs outp)
+                            },act,reMemInstrs outp)
   ngr <- get
   let node_graph' = Gr.insNode (nextNode ngr,
                                 Node { nodeActivation = act
