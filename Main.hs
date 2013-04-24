@@ -324,9 +324,11 @@ makeNode read_from from nid = do
       let inps_def = Map.mapMaybe (\v -> case v of
                                       Left val -> Just val
                                       Right _ -> Nothing) inps
-      inps_new <- mapM (newValue "dyn_input") $
+      inps_new <- mapM (\(tp,name) -> newValue ("inp_"++name) tp) $
                   Map.mapMaybe (\v -> case v of
-                                   Right tp -> Just tp
+                                   Right (tp,name) -> Just (tp,case name of
+                                                               Nothing -> "dyn"
+                                                               Just name' -> name')
                                    Left _ -> Nothing) inps
       let inps = Map.union inps_def inps_new
           allPhis = foldl (\s s' -> Set.union s (Set.fromList $ fmap fst s')) Set.empty (getPhis instrs)
@@ -673,7 +675,8 @@ scanForNode gr blk sblk nd = trace ("Scanning for "++show blk++"."++show sblk) $
               [] -> Nothing
               (res:_) -> Just res
 
-gatherInputs :: Gr.Graph gr => Maybe Gr.Node -> Maybe Gr.Node -> NodeId -> Unrollment gr m ptr (Map (Ptr Instruction) (Either (Val ptr) TypeDesc),Map (Ptr Argument) (Val ptr))
+gatherInputs :: Gr.Graph gr => Maybe Gr.Node -> Maybe Gr.Node -> NodeId
+                -> Unrollment gr m ptr (Map (Ptr Instruction) (Either (Val ptr) (TypeDesc,Maybe String)),Map (Ptr Argument) (Val ptr))
 gatherInputs read_from from nid = do
   case nid of
     IdBlock fun blk sblk -> do

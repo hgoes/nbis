@@ -99,7 +99,7 @@ argToExpr expr = case operandDesc expr of
     reMemInstr (MINull tp ptr)
     return $ PointerValue ptr
   ODInt v -> return $ ConstValue v (bitWidth (operandType expr))
-  ODInstr instr _ -> do
+  ODInstr instr _ _ -> do
     re <- get
     case Map.lookup instr (reLocals re) of
       Nothing -> reEnvError $ "Couldn't find local variable "++show instr

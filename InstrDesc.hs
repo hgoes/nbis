@@ -60,7 +60,7 @@ data OperandDesc a
   = ODUndef
   | ODNull
   | ODInt Integer
-  | ODInstr (Ptr Instruction) (Ptr BasicBlock)
+  | ODInstr (Ptr Instruction) (Ptr BasicBlock) (Maybe String)
   | ODFunction TypeDesc String [TypeDesc]
   | ODMetaData (Ptr MDNode)
   | ODGlobal (Ptr GlobalVariable)
@@ -249,7 +249,11 @@ reifyOperand ptr = do
   desc <- mkSwitch 
           [fmap (\i -> do
                     parent <- instructionGetParent i
-                    return $ ODInstr i parent
+                    hasN <- hasName i
+                    name <- if hasN
+                            then fmap Just (getNameString i)
+                            else return Nothing
+                    return $ ODInstr i parent name
                 ) (castDown ptr)
           ,fmap (\f -> do
                     ftp <- functionGetFunctionType f
@@ -291,7 +295,7 @@ reifyOperand ptr = do
         valueDump ptr
         error "Unknown operand"
 
-getInstrsDeps :: [InstrDesc Operand] -> Map (Ptr Instruction) TypeDesc
+getInstrsDeps :: [InstrDesc Operand] -> Map (Ptr Instruction) (TypeDesc,Maybe String)
 getInstrsDeps = snd . foldl (\(loc,mp) instr -> (case getInstrTarget instr of
                                                     Nothing -> loc
                                                     Just t -> Set.insert t loc,getInstrDeps loc mp instr)
@@ -321,8 +325,8 @@ getInstrsDeps = snd . foldl (\(loc,mp) instr -> (case getInstrTarget instr of
       _ -> mp
 
     getOperandDeps loc mp op = case operandDesc op of
-      ODInstr instr _ -> if Set.member instr loc
-                         then mp
-                         else Map.insert instr (operandType op) mp
+      ODInstr instr _ name -> if Set.member instr loc
+                              then mp
+                              else Map.insert instr (operandType op,name) mp
       ODGetElementPtr ptr idx -> getOperandDeps loc (foldl (getOperandDeps loc) mp idx) ptr
       _ -> mp

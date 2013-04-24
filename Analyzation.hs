@@ -182,7 +182,7 @@ getInputOutput origins succ (local,mp) blk sblk instr
                      Map (Ptr BasicBlock,Integer) (Map (Ptr Argument) TypeDesc),
                      Map (Ptr BasicBlock,Integer) (Map (Ptr Instruction) TypeDesc))
       addExpr e mp@(inp,args,outp) = case operandDesc e of
-        ODInstr name _ 
+        ODInstr name _ _
           -> if Set.member name local
              then mp
              else case Map.lookup name origins of
