@@ -165,8 +165,8 @@ getDataLayout mod = do
   return dl
 #endif
 
-getProgram :: String -> IO ProgDesc
-getProgram file = do
+getProgram :: (String -> Bool) -> String -> IO ProgDesc
+getProgram is_intr file = do
   Just buf <- getFileMemoryBufferSimple file
   diag <- newSMDiagnostic
   ctx <- newLLVMContext
@@ -215,7 +215,11 @@ getProgram file = do
   where
     mkSubBlocks :: [InstrDesc Operand] -> [InstrDesc Operand] -> [[InstrDesc Operand]]
     mkSubBlocks cur (i:is) = case i of
-      ITerminator (ICall _ _ _) -> (cur++[i]):mkSubBlocks [] is
+      ITerminator (ICall _ fn _) -> case operandDesc fn of
+        ODFunction _ fname _ -> if is_intr fname
+                                then mkSubBlocks (cur++[i]) is
+                                else (cur++[i]):mkSubBlocks [] is
+        _ -> (cur++[i]):mkSubBlocks [] is
       ITerminator _ -> [cur++[i]]
       _ -> mkSubBlocks (cur++[i]) is
 

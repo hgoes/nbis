@@ -518,9 +518,7 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m ptr a) = do
       globs_mp = fmap (\(tp,_) -> tp) globs
       allfuns = fmap (\(sig,rtp,blks,loops)
                       -> let (pgr,pmp) = programAsGraph blks
-                             defs = getDefiningBlocks (\name -> case intrinsics name :: Maybe (Ptr Instruction -> [(Val Int,TypeDesc)] -> Realization Int ()) of
-                                                          Nothing -> False
-                                                          Just _ -> True) blks
+                             defs = getDefiningBlocks isIntrinsic blks
                              order = case blks of
                                (start_blk,_,_):_ -> case Map.lookup (start_blk,0) pmp of
                                  Just start_node -> case Gr.dff [start_node] pgr of
@@ -623,7 +621,7 @@ main = do
   when (showHelp opts) $ do
     putStrLn nbisInfo
     exitSuccess
-  progs <- mapM getProgram (files opts)
+  progs <- mapM (getProgram isIntrinsic) (files opts)
   let program = foldl1 mergePrograms progs
   withSMTSolver (case solver opts of
                     Nothing -> "~/debug-smt.sh output-" ++ (entryPoint opts) ++ ".smt"

@@ -310,10 +310,14 @@ realizeInstruction (ITerminator (ICall trg f args)) = case operandDesc f of
     case intrinsics fn of
       Just intr -> do
         intr trg args'
-        re <- ask
-        return $ Just $ Jump (CondElse (reBlock re,reSubblock re + 1))
+        return Nothing
       Nothing -> return $ Just $ Call fn (fmap fst args') trg
 realizeInstruction instr = reError $ "Implement realizeInstruction for "++show instr
+
+isIntrinsic :: String -> Bool
+isIntrinsic name = case intrinsics name :: Maybe (Ptr Instruction -> [(Val Int,TypeDesc)] -> Realization Int ()) of
+  Nothing -> False
+  Just _ -> True
 
 intrinsics :: Enum ptr => String -> Maybe (Ptr Instruction -> [(Val ptr,TypeDesc)] -> Realization ptr ())
 intrinsics "llvm.memcpy.p0i8.p0i8.i64" = Just intr_memcpy
