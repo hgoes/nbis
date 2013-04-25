@@ -481,6 +481,9 @@ incrementGraph = do
   entr <- dequeueNode
   -- Determine the target node
   (nd,new) <- targetNode (incomingReadNode entr) (incomingNode entr) (queuedNode entr)
+  if new
+    then queueRotate
+    else return ()
   -- Connect the nodes
   connectNodes (incomingNode entr)
     (incomingReadNode entr)
@@ -786,8 +789,17 @@ dequeueNode = do
     dequeue ((f,(l,el:els):ys):xs) = case els of
       [] -> case ys of
         [] -> (el,xs)
-        _ -> (el,xs++[(f,ys)])
-      _ -> (el,xs++[(f,ys++[(l,els)])])
+        _ -> (el,(f,ys):xs)
+      _ -> (el,(f,(l,els):ys):xs)
+
+queueRotate :: Unrollment gr m ptr ()
+queueRotate = do
+  gr <- get
+  let nqueue = case queuedNodes gr of
+        (f,(l,els):ys):xs -> xs++[(f,ys++[(l,els)])]
+        [] -> []
+        _ -> error "Invalid queue when rotating"
+  put $ gr { queuedNodes = nqueue }
 
 findLoopForBlock :: Ptr BasicBlock -> [LoopDesc] -> Maybe LoopDesc
 findLoopForBlock blk [] = Nothing
