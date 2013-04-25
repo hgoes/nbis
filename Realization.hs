@@ -184,12 +184,13 @@ realizeInstruction (IAssign trg name expr) = do
         lhs' <- fmap asPointer $ argToExpr lhs
         rhs' <- fmap asPointer $ argToExpr rhs
         cond <- lift $ varNamed (genName "PtrCompare")
-        reMemInstr (MICompare lhs' rhs' cond)
-        case op of
-          I_EQ -> return $ ConditionValue cond 1
-          I_NE -> return $ ConditionValue (not' cond) 1
+        rcond <- case op of
+          I_EQ -> return cond
+          I_NE -> return $ not' cond
           _ -> reError $ "Comparing pointers using "++show op++
                " unsupported (only (in-)equality allowed)"
+        reMemInstr (MICompare lhs' rhs' rcond)
+        return $ ConditionValue cond 1
       _ -> do
         lhs' <- argToExpr lhs
         rhs' <- argToExpr rhs
