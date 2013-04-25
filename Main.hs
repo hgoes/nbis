@@ -90,7 +90,10 @@ instance Show (Node m) where
     RealizedStart fun _ _ -> "start "++fun
     RealizedEnd _ _ -> "end"
     RealizedBlock { nodeBlock = blk
-                  , nodeSubblock = sblk } -> show blk++"."++show sblk
+                  , nodeBlockName = name
+                  , nodeSubblock = sblk } -> case name of
+      Nothing -> show blk++"."++show sblk
+      Just n -> n++"."++show sblk
 
 data NodeType ptr
   = RealizedStart { nodeStartName :: String
