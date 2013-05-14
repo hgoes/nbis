@@ -122,3 +122,17 @@ indexType structs (PointerType tp) (_:idx) = indexType' tp idx
         in indexType' (List.genericIndex tps i) is
     indexType' (ArrayType _ tp) (_:is)
       = indexType' tp is
+
+typeWidth :: TypeDesc -> Integer
+typeWidth (IntegerType w)
+  | w `mod` 8 == 0 = w `div` 8
+  | otherwise = error $ "typeWidth called for "++show w
+typeWidth (ArrayType n tp) = n*(typeWidth tp)
+typeWidth (StructType (Right tps)) = sum (fmap typeWidth tps)
+typeWidth tp = error $ "No typeWidth for "++show tp
+
+bitWidth :: TypeDesc -> Integer
+bitWidth (IntegerType w) = w
+bitWidth (ArrayType n tp) = n*(bitWidth tp)
+bitWidth (StructType (Right tps)) = sum (fmap bitWidth tps)
+bitWidth tp = error $ "No bitWidth for "++show tp

@@ -8,36 +8,34 @@ import Data.Typeable
 import Data.Bits as Bits
 import LLVM.FFI.Instruction
 
-data Val ptr = ConstValue { asConst :: Integer
-                          , constWidth :: Integer }
-             | DirectValue { asValue :: SMTExpr (BitVector BVUntyped) }
-             | PointerValue { asPointer :: ptr }
-             | ConditionValue { asCondition :: SMTExpr Bool
-                              , conditionWidth :: Integer }
-             | ConstCondition { asConstCondition :: Bool }
-             deriving (Typeable)
+data Val = ConstValue { asConst :: Integer
+                      , constWidth :: Integer }
+         | DirectValue { asValue :: SMTExpr (BitVector BVUntyped) }
+         | ConditionValue { asCondition :: SMTExpr Bool
+                          , conditionWidth :: Integer }
+         | ConstCondition { asConstCondition :: Bool }
+         deriving (Typeable)
 
-instance Show (Val ptr) where
+instance Show Val where
   show (ConstValue c _) = show c
   show (DirectValue dv) = show dv
-  show (PointerValue _) = "<pointer>"
   show (ConditionValue c _) = show c
   show (ConstCondition c) = show c
 
-valValue :: Val ptr -> SMTExpr (BitVector BVUntyped)
+valValue :: Val -> SMTExpr (BitVector BVUntyped)
 valValue (ConstValue x w) = constantAnn (BitVector x) w
 valValue (DirectValue x) = x
 valValue (ConditionValue x w) = ite x (constantAnn (BitVector 1) (fromIntegral w)) (constantAnn (BitVector 0) (fromIntegral w))
 valValue (ConstCondition x) = constantAnn (BitVector $ if x then 1 else 0) 1
 
-valCond :: Val ptr -> SMTExpr Bool
+valCond :: Val -> SMTExpr Bool
 valCond (ConstValue x 1) = constant $ x==1
 valCond (ConstValue _  _) = error "A constant of bit-length > 1 is used in a condition"
 valCond (DirectValue x) = x .==. (constantAnn (BitVector 1) 1)
 valCond (ConditionValue x _) = x
 valCond (ConstCondition x) = constant x
 
-valEq :: Val ptr -> Val ptr -> SMTExpr Bool
+valEq :: Val -> Val -> SMTExpr Bool
 valEq (ConstValue x _) (ConstValue y _) = constant $ x==y
 valEq (ConstValue x w) (DirectValue y) = y .==. constantAnn (BitVector x) w
 valEq (DirectValue x) (ConstValue y w) = x .==. constantAnn (BitVector y) w
@@ -57,14 +55,14 @@ valEq (ConstCondition x) (ConstCondition y) = constant (x == y)
 valEq (ConstCondition x) (ConditionValue y _) = if x then y else not' y
 valEq (ConditionValue x _) (ConstCondition y) = if y then x else not' x
 
-valSwitch :: [(Val m,SMTExpr Bool)] -> Val m
+valSwitch :: [(Val,SMTExpr Bool)] -> Val
 valSwitch [(val,cond)] = val
 valSwitch ((val,cond):rest) 
   = case (val,valSwitch rest) of
   (ConditionValue v1 w,ConditionValue v2 _) -> ConditionValue (ite cond v1 v2) w
   (x,xs) -> DirectValue (ite cond (valValue x) (valValue xs))
 
-valIntComp :: ICmpOp -> Val m -> Val m -> Val m
+valIntComp :: ICmpOp -> Val -> Val -> Val
 valIntComp op (ConstValue lhs _) (ConstValue rhs _)
   = ConstCondition $ case op of
   I_EQ -> lhs == rhs
@@ -92,7 +90,7 @@ valIntComp op lhs rhs
                           I_SLT -> bvslt lhs' rhs'
                           I_SLE -> bvsle lhs' rhs') 1
 
-valBinOp ::  BinOpType -> Val m -> Val m -> Val m
+valBinOp ::  BinOpType -> Val -> Val -> Val
 valBinOp op (ConstValue lhs w) (ConstValue rhs _)
   = ConstValue (case op of
                    Xor -> Bits.xor lhs rhs
@@ -127,7 +125,7 @@ valBinOp op lhs rhs
           _ -> error $ "nbis: Unsupported binary operator "++show op
     in DirectValue (rop lhs' rhs')
 
-valCopy :: String -> Val m -> SMT (Val m)
+valCopy :: String -> Val -> SMT Val
 valCopy name (DirectValue val) = do
   nval <- varNamedAnn name (extractAnnotation val)
   assert $ nval .==. val

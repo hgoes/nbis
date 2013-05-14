@@ -3,8 +3,8 @@ module Main where
 import Distribution.Simple
 import Distribution.Simple.LocalBuildInfo
 import Distribution.Simple.PackageIndex
-import Distribution.InstalledPackageInfo
-import Distribution.PackageDescription hiding (description)
+import Distribution.InstalledPackageInfo as IPI
+import Distribution.PackageDescription as PD hiding (description)
 
 import Text.Regex
 
@@ -16,22 +16,23 @@ adaptHooks hooks = hooks { confHook = \pd flags -> do
                                   vers_regex = mkRegex "%LLVM_VERSION=(.*)%"
                                   Just [vstr] = matchRegex vers_regex (description llvm_pkg)
                                   version = read vstr
-                                  lbi' = adaptLocalBuildInfo version lbi
+                                  lbi' = adaptLocalBuildInfo version (IPI.ldOptions llvm_pkg) lbi
                               return lbi'
                          }
 
-adaptLocalBuildInfo :: Version -> LocalBuildInfo -> LocalBuildInfo
-adaptLocalBuildInfo llvm_v lbi
+adaptLocalBuildInfo :: Version -> [String] -> LocalBuildInfo -> LocalBuildInfo
+adaptLocalBuildInfo llvm_v ldopts lbi
   = lbi { localPkgDescr = (localPkgDescr lbi)
-                          { executables = fmap (\exe -> exe { buildInfo = adaptBuildInfo llvm_v (buildInfo exe)
+                          { executables = fmap (\exe -> exe { buildInfo = adaptBuildInfo llvm_v ldopts (buildInfo exe)
                                                             }) (executables $ localPkgDescr lbi)
                           }
         }
 
-adaptBuildInfo :: Version -> BuildInfo -> BuildInfo
-adaptBuildInfo llvm_v bi = bi { cppOptions = ["-DHS_LLVM_VERSION="++versionToDefine llvm_v]++
-                                             cppOptions bi
-                              }
+adaptBuildInfo :: Version -> [String] -> BuildInfo -> BuildInfo
+adaptBuildInfo llvm_v ld_opts bi = bi { cppOptions = ["-DHS_LLVM_VERSION="++versionToDefine llvm_v]++
+                                                     cppOptions bi
+                                      , PD.ldOptions = ld_opts++(PD.ldOptions bi)
+                                      }
 
 versionToDefine :: Version -> String
 versionToDefine v = branch (versionBranch v)

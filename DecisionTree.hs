@@ -18,6 +18,7 @@ import Data.Traversable
 import Control.Applicative
 import Data.Monoid
 import Prelude hiding (concat)
+import Data.Maybe (catMaybes)
 
 data DecisionTree a
   = BoolNode (SMTExpr Bool) (DecisionTree a) (DecisionTree a)
@@ -44,17 +45,40 @@ instance Foldable DecisionTree where
                                    (foldMap (foldMap f . snd) cases)
 
 instance Traversable DecisionTree where
-  traverse f = traverseDecisionTree (\_ x -> GroundNode <$> f x)
+  traverse f dt = let Just res = traverseDecisionTree (constant True) (\_ x -> Just (GroundNode <$> f x)) dt
+                  in res
 
-traverseDecisionTree :: Applicative f => (SMTExpr Bool -> a -> f (DecisionTree b)) -> DecisionTree a -> f (DecisionTree b)
-traverseDecisionTree = traverse' []
+traverseDecisionTree :: Applicative f => SMTExpr Bool 
+                        -> (SMTExpr Bool -> a -> Maybe (f (DecisionTree b)))
+                        -> DecisionTree a
+                        -> Maybe (f (DecisionTree b))
+traverseDecisionTree c = traverse' [c]
   where
+    traverse' :: Applicative f => [SMTExpr Bool] -> (SMTExpr Bool -> a -> Maybe (f (DecisionTree b)))
+                 -> DecisionTree a
+                 -> Maybe (f (DecisionTree b))
     traverse' cond f (GroundNode x) = f (app and' cond) x
-    traverse' cond f (BoolNode c ifT ifF) = BoolNode c <$> traverse' (c:cond) f ifT <*> traverse' (not' c:cond) f ifF
+    traverse' cond f (BoolNode c ifT ifF) = case traverse' (c:cond) f ifT of
+      Nothing -> traverse' (not' c:cond) f ifF
+      Just ifT' -> case traverse' (not' c:cond) f ifF of
+        Nothing -> Just ifT'
+        Just ifF' -> Just (BoolNode c <$> ifT' <*> ifF')
     traverse' cond f (CaseNode Nothing cases)
-      = CaseNode Nothing <$> traverse (\(val,dt) -> fmap (\ndt -> (val,ndt)) (traverse' (val:cond) f dt)) cases
+      = case catMaybes (fmap (\(c,dt) -> case traverse' (c:cond) f dt of
+                                 Nothing -> Nothing
+                                 Just ndt -> Just (fmap (\dt' -> (c,dt')) ndt)
+                             ) cases) of
+      [] -> Nothing
+      cases' -> Just (CaseNode Nothing <$> sequenceA cases')
     traverse' cond f (CaseNode (Just def) cases)
-      = CaseNode <$> (Just <$> traverse' ((fmap (not' . fst) cases)++cond) f def) <*> traverse (\(val,dt) -> fmap (\ndt -> (val,ndt)) (traverse' (val:cond) f dt)) cases
+      = case catMaybes (fmap (\(c,dt) -> case traverse' (c:cond) f dt of
+                                 Nothing -> Nothing
+                                 Just ndt -> Just (fmap (\dt' -> (c,dt')) ndt)
+                             ) cases) of
+      [] -> traverse' ((fmap (\(c,_) -> not' c) cases) ++ cond) f def
+      cases' -> case traverse' ((fmap (\(c,_) -> not' c) cases) ++ cond) f def of
+        Nothing -> Just (CaseNode Nothing <$> sequenceA cases')
+        Just def' -> Just (CaseNode <$> (Just <$> def') <*> sequenceA cases')
 
 boolDecision :: SMTExpr Bool -> DecisionTree a -> DecisionTree a -> DecisionTree a
 boolDecision = BoolNode
@@ -112,6 +136,16 @@ decisionTreeEq f x y = case mkEq f x y of
         Left False -> Right $ cmp .&&. e1
         Right e2 -> Right $ ite cmp e1 e2
 
+accumDecisionTree :: SMTExpr Bool -> (SMTExpr Bool -> a -> b) -> DecisionTree a -> [b]
+accumDecisionTree cond f = accum' f [cond]
+  where
+    accum' f cur (GroundNode x) = [f (app and' cur) x]
+    accum' f cur (BoolNode cond x y) = let x' = accum' f (cond:cur) x
+                                           y' = accum' f ((not' cond):cur) y
+                                       in x'++y'
+    accum' f cur (CaseNode Nothing cases) = concat $ fmap (\(cond,c) -> accum' f (cond:cur) c) cases
+
+{-
 accumDecisionTree :: SMTType b => (SMTExpr Bool -> a -> (SMTExpr b,c)) -> DecisionTree a -> (SMTExpr b,[c])
 accumDecisionTree f = accum' f []
   where
@@ -127,7 +161,7 @@ accumDecisionTree f = accum' f []
     mkCompare f cur Nothing done [(cmp,tree)] = accum' f (cmp:cur) tree
     mkCompare f cur def done ((cmp,tree):rest) = let (e,acc) = accum' f (cmp:cur) tree
                                                      (e',acc') = mkCompare f cur def ((not' cmp):done) rest
-                                                 in (ite cmp e e',acc++acc')
+                                                 in (ite cmp e e',acc++acc') -}
 
 decisionTreeElems :: DecisionTree a -> [a]
 decisionTreeElems (GroundNode x) = [x]

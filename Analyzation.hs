@@ -2,9 +2,9 @@ module Analyzation where
 
 import Data.Map as Map hiding (foldl,foldr)
 import Data.Set as Set hiding (foldl,foldr)
-import Prelude hiding (foldl,foldr,concat,all,any)
+import Prelude hiding (foldl,foldr,concat,all,any,elem)
 import Data.Foldable
-import Data.List as List (mapAccumL,lookup,elem)
+import Data.List as List (mapAccumL,lookup)
 import InstrDesc
 import TypeDesc
 import LLVM.FFI.Instruction
@@ -75,7 +75,7 @@ isLoopCenter nd comp gr = returnsOnlyTo nd Set.empty
   where
     returnsOnlyTo cur seen = all (\succ -> if succ==nd
                                            then True
-                                           else (if List.elem succ comp
+                                           else (if elem succ comp
                                                  then (if Set.member succ seen
                                                        then False
                                                        else returnsOnlyTo succ (Set.insert cur seen))
@@ -84,3 +84,47 @@ isLoopCenter nd comp gr = returnsOnlyTo nd Set.empty
 
 isSelfLoop :: Gr.Graph gr => Gr.Node -> gr a b -> Bool
 isSelfLoop nd gr = any (==nd) (Gr.suc gr nd)
+
+getReachability :: Gr.DynGraph gr => gr a b -> gr (a,Map Gr.Node (Set [Gr.Node])) b
+getReachability gr = getReachability' (Gr.nmap (\x -> (x,Map.empty)) gr) [(t,Map.singleton f (Set.singleton [])) | (f,t) <- Gr.edges gr]
+  where
+    getReachability' gr [] = gr
+    getReachability' gr ((x,new):xs)
+      = let (Just (inc,_,(el,reach),out),gr') = Gr.match x gr
+            reach' = Map.unionWith Set.union reach new
+            hasnew = size' reach /= size' reach'
+            nxs = if hasnew
+                  then fmap (\(_,s) -> (s,fmap (Set.map (x:) . Set.filter (not . elem s)) reach')
+                            ) out ++ xs
+                  else xs
+            ngr = (inc,x,(el,reach'),out) Gr.& gr'
+        in getReachability' ngr nxs
+    size' mp = foldl (\i s -> i+Set.size s) 0 mp
+
+hasLoopWithout :: Gr.Graph gr => (a -> Map Gr.Node (Set [Gr.Node])) -> Gr.Node -> Gr.Node -> gr a b -> Bool
+hasLoopWithout f without nd gr = case Map.lookup nd (f cont) of
+  Nothing -> False
+  Just paths -> any (\path -> not $ without `elem` path) paths
+  where
+    Just cont = Gr.lab gr nd
+
+data VariableInfo = VariableInfo
+                    { variablesTransient :: Set (Ptr Instruction)
+                    }
+
+getVariableInfo :: Gr.DynGraph gr => (a -> [InstrDesc Operand]) -> (Ptr Instruction -> Gr.Node) -> gr (a,Map Gr.Node (Set [Gr.Node])) b -> gr (a,Map Gr.Node (Set [Gr.Node]),VariableInfo) b
+getVariableInfo f g gr = updateGraph (Gr.nmap (\(nd,reach) -> (nd,reach,VariableInfo Set.empty)) gr) (Gr.nodes gr)
+  where
+    updateGraph gr [] = gr
+    updateGraph gr (nd:nds)
+      = let Just (x,reach,info) = Gr.lab gr nd
+            instrs = f x
+            deps = Map.keys $ getInstrsDeps instrs
+            ngr = foldl (\gr1 dep
+                         -> let Just paths = Map.lookup (g dep) reach
+                            in foldl (foldl (\gr3 nd -> let (Just (inc,_,(i,reach',info'),out),gr4) = Gr.match nd gr3
+                                                        in (inc,nd,(i,reach',info' { variablesTransient = Set.insert dep (variablesTransient info') }),out) Gr.& gr4
+                                            )
+                                     ) gr1 paths
+                        ) gr deps
+        in updateGraph ngr nds

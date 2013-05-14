@@ -1,8 +1,6 @@
 {-# LANGUAGE TypeFamilies,FlexibleContexts,MultiParamTypeClasses #-}
 module MemoryModel where
 
-import ConditionList
-
 import Language.SMTLib2
 import Data.Typeable
 import Data.Unit
@@ -10,6 +8,9 @@ import Data.List (genericSplitAt,genericReplicate)
 import Data.Set as Set
 import Data.Map as Map
 import TypeDesc
+import Foreign.Ptr
+import LLVM.FFI.BasicBlock
+import Data.Proxy
 
 data MemContent = MemCell Integer Integer
                 | MemArray [MemContent]
@@ -24,46 +25,31 @@ data ErrorDesc = Custom
 
 type DynNum = Either Integer (SMTExpr (BitVector BVUntyped))
 
-data MemoryInstruction p
-  = MINull TypeDesc p
-  | MIAlloc TypeDesc DynNum p
-  | MILoad p (SMTExpr (BitVector BVUntyped))
-  | MILoadPtr p p
-  | MIStore (SMTExpr (BitVector BVUntyped)) p
-  | MIStorePtr p p
-  | MICompare p p (SMTExpr Bool)
-  | MISelect [(SMTExpr Bool,p)] p
-  | MICast TypeDesc TypeDesc p p
-  | MIIndex [DynNum] p p
-  | MICopy DynNum p p
-  | MIGlobal TypeDesc MemContent p
+data MemoryInstruction m p
+  = MINull m TypeDesc p m
+  | MIAlloc m TypeDesc DynNum p m
+  | MILoad m p (SMTExpr (BitVector BVUntyped))
+  | MILoadPtr m p p m
+  | MIStore m (SMTExpr (BitVector BVUntyped)) p m
+  | MIStorePtr m p p m
+  | MICompare m p p (SMTExpr Bool)
+  | MISelect m [(SMTExpr Bool,p)] p m
+  | MICast m TypeDesc TypeDesc p p m
+  | MIIndex m [DynNum] p p m
+  | MICopy m DynNum p p m
   deriving (Show,Eq)
 
-type MemoryProgram p = [MemoryInstruction p]
+type MemoryProgram m p = [MemoryInstruction m p]
 
-class MemoryModel m ptr where
-  memNew :: ptr -> Set TypeDesc -> Map String [TypeDesc] -> SMT m
-  addGlobal :: m -> ptr -> TypeDesc -> MemContent -> SMT m
-  addProgram :: m -> Int -> MemoryProgram ptr -> SMT m
-  connectPrograms :: m -> SMTExpr Bool -> Int -> Int -> [(ptr,ptr)] -> SMT m
+class MemoryModel m mloc ptr where
+  memNew :: Proxy mloc -> Set TypeDesc -> Map String [TypeDesc] -> [(ptr,TypeDesc,Maybe MemContent)] -> SMT m
+  addProgram :: m -> SMTExpr Bool -> mloc -> MemoryProgram mloc ptr -> SMT m
+  connectLocation :: m -> SMTExpr Bool -> mloc -> mloc -> [(ptr,ptr)] -> SMT m
+  debugMem :: m -> Proxy mloc -> Proxy ptr -> String
 
 flattenMemContent :: MemContent -> [(Integer,Integer)]
 flattenMemContent (MemCell w v) = [(w,v)]
 flattenMemContent (MemArray xs) = concat $ fmap flattenMemContent xs
-
-typeWidth :: TypeDesc -> Integer
-typeWidth (IntegerType w)
-  | w `mod` 8 == 0 = w `div` 8
-  | otherwise = error $ "typeWidth called for "++show w
-typeWidth (ArrayType n tp) = n*(typeWidth tp)
-typeWidth (StructType (Right tps)) = sum (fmap typeWidth tps)
-typeWidth tp = error $ "No typeWidth for "++show tp
-
-bitWidth :: TypeDesc -> Integer
-bitWidth (IntegerType w) = w
-bitWidth (ArrayType n tp) = n*(bitWidth tp)
-bitWidth (StructType (Right tps)) = sum (fmap bitWidth tps)
-bitWidth tp = error $ "No bitWidth for "++show tp
 
 getOffset :: (TypeDesc -> Integer) -> TypeDesc -> [Integer] -> Integer
 getOffset width tp idx = getOffset' tp idx 0

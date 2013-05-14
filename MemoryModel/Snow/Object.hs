@@ -4,6 +4,7 @@ module MemoryModel.Snow.Object where
 import Language.SMTLib2
 import Data.Map as Map
 import Data.List as List
+import Debug.Trace
 
 import TypeDesc
 import MemoryModel
@@ -11,7 +12,7 @@ import MemoryModel
 data Object ptr 
   = Bounded (BoundedObject ptr)
   | Unbounded (UnboundedObject ptr)
-  deriving Show
+  deriving (Show,Eq)
 
 data UnboundedObject ptr
   = DynArrayObject { dynArrayIndexSize :: Integer
@@ -22,7 +23,7 @@ data UnboundedObject ptr
                        , dynFlatArrayBound :: SMTExpr (SMTExpr (BitVector BVUntyped))
                        , dynFlatArray :: [SMTExpr (SMTArray (SMTExpr (BitVector BVUntyped)) (BitVector BVUntyped))]
                        }
-  deriving Show
+  deriving (Show,Eq)
 
 data BoundedObject ptr
   = WordObject (SMTExpr (BitVector BVUntyped))
@@ -31,7 +32,7 @@ data BoundedObject ptr
   | ValidPointer ptr
   | NullPointer
   | AnyPointer
-  deriving Show
+  deriving (Show,Eq)
 
 data ObjAccessor ptr = ObjAccessor (forall a. (Object ptr -> (Object ptr,a,[(ErrorDesc,SMTExpr Bool)])) 
                                     -> Object ptr 
@@ -77,10 +78,10 @@ ptrIndexEq ((tp1,idx1):r1) ((tp2,idx2):r2)
                                Left True -> Right c1
                                Right c2 -> Right (c1 .&&. c2)
 
-ptrIndexGetAccessor :: Map String [TypeDesc] -> PtrIndex -> ObjAccessor ptr
+ptrIndexGetAccessor :: Show ptr => Map String [TypeDesc] -> PtrIndex -> ObjAccessor ptr
 ptrIndexGetAccessor _ [] = ObjAccessor id
-ptrIndexGetAccessor structs all@((tp,idx):rest)
-  = indexObject structs (PointerType tp) idx (ptrIndexGetAccessor structs rest)
+ptrIndexGetAccessor structs all@((tp,idx):rest) 
+  = trace (show all) $ indexObject structs (PointerType tp) idx (ptrIndexGetAccessor structs rest)
 
 ptrIndexGetType :: Map String [TypeDesc] -> PtrIndex -> TypeDesc
 ptrIndexGetType structs ((tp,idx):_) = indexType structs (PointerType tp) idx
@@ -105,7 +106,7 @@ changeAt 0 f (x:xs) = let (x',y,z) = f x
 changeAt n f (x:xs) = let (xs',y,z) = changeAt (n-1) f xs
                       in (x:xs',y,z)
 
-indexObject :: Map String [TypeDesc] -> TypeDesc 
+indexObject :: Show ptr => Map String [TypeDesc] -> TypeDesc 
                -> [DynNum]
                -> ObjAccessor ptr -> ObjAccessor ptr
 indexObject _ _ [] access = access
@@ -137,7 +138,7 @@ indexObject structs (StructType desc) (Left i:idx) (ObjAccessor access)
                          ) obj)
 indexObject _ tp idx _ = error $ "indexObject not implemented for "++show tp++" "++show idx
 
-indexBounded :: Map String [TypeDesc] -> TypeDesc -> [DynNum]
+indexBounded :: Show ptr => Map String [TypeDesc] -> TypeDesc -> [DynNum]
                 -> (Object ptr -> (Object ptr,a,[(ErrorDesc,SMTExpr Bool)]))
                 -> BoundedObject ptr -> (BoundedObject ptr,a,[(ErrorDesc,SMTExpr Bool)])
 indexBounded _ _ [] f obj = let (Bounded nobj,res,errs) = f (Bounded obj)
@@ -153,7 +154,7 @@ indexBounded structs (StructType descr) (Left i:idx) f (StructObject objs)
 indexBounded structs (ArrayType _ tp) (Left i:idx) f (StaticArrayObject objs)
   = let (nobjs,res,errs) = changeAt i (indexBounded structs tp idx f) objs
     in (StaticArrayObject nobjs,res,errs)
-indexBounded _ tp idx _ obj = error $ "indexBounded unimplemented for "++show tp++" "++show idx++" in Snow memory model"
+indexBounded _ tp idx _ obj = error $ "indexBounded unimplemented for "++show tp++" "++show idx++" ("++show obj++") in Snow memory model"
 
 allocaObject :: Map String [TypeDesc] -- ^ All structs in the program
                 -> TypeDesc -- ^ The type to be allocated
@@ -213,12 +214,12 @@ loadPtr :: Object ptr -> (Maybe ptr,[(ErrorDesc,SMTExpr Bool)])
 loadPtr (Bounded (ValidPointer p)) = (Just p,[])
 loadPtr (Bounded NullPointer) = (Nothing,[])
 
-storeObject :: SMTExpr (BitVector BVUntyped) -> Object ptr -> (Object ptr,[(ErrorDesc,SMTExpr Bool)])
+storeObject :: Show ptr => SMTExpr (BitVector BVUntyped) -> Object ptr -> (Object ptr,[(ErrorDesc,SMTExpr Bool)])
 storeObject bv (Bounded obj) 
   = let (noff,nobj,errs) = storeObject' 0 bv obj
     in (Bounded nobj,errs)
 
-storeObject' :: Integer 
+storeObject' :: Show ptr => Integer 
                 -> SMTExpr (BitVector BVUntyped) 
                 -> BoundedObject ptr 
                 -> (Integer,BoundedObject ptr,[(ErrorDesc,SMTExpr Bool)])
@@ -242,8 +243,9 @@ storeObject' off bv (StructObject objs)
 storeObject' off bv (StaticArrayObject objs)
   = let (noff,nobjs,errs) = storeObjects' off bv objs
     in (noff,StaticArrayObject nobjs,errs)
+storeObject' _ _ obj = error $ "storeObject' not implemented for "++show obj
             
-storeObjects' :: Integer -> SMTExpr (BitVector BVUntyped) 
+storeObjects' :: Show ptr => Integer -> SMTExpr (BitVector BVUntyped) 
                  -> [BoundedObject ptr]
                  -> (Integer,[BoundedObject ptr],[(ErrorDesc,SMTExpr Bool)])
 storeObjects' off bv [] = (off,[],[])
@@ -253,7 +255,7 @@ storeObjects' off bv (obj:objs)
                     (noff',nobjs,errs') = storeObjects' noff bv objs
                 in (noff',nobj:nobjs,errs++errs')
 
-storePtr :: ptr -> Object ptr -> (Object ptr,[(ErrorDesc,SMTExpr Bool)])
+storePtr :: Show ptr => ptr -> Object ptr -> (Object ptr,[(ErrorDesc,SMTExpr Bool)])
 storePtr ptr (Bounded obj) = let (nobj,errs) = storePtr' ptr obj
                              in (Bounded nobj,errs)
 

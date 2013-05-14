@@ -110,7 +110,7 @@ passes var
                 analysisUsageAddRequired au (Proxy::Proxy LoopInfo))
             (\self mod -> do
                 print "RUN"
-                funs <- getFunctionList mod >>= ipListToList
+                funs <- moduleGetFunctionList mod >>= ipListToList
                 loop_mp <- mapM 
                            (\fun -> do
                                fname <- getNameString fun
@@ -176,7 +176,7 @@ getProgram is_intr file = do
   print "done."
   tli <- getTargetLibraryInfo mod
   dl <- getDataLayout mod
-  funs <- getFunctionList mod >>= 
+  funs <- moduleGetFunctionList mod >>= 
           ipListToList >>=
           mapM (\fun -> do
                    fname <- getNameString fun
@@ -200,7 +200,7 @@ getProgram is_intr file = do
                                     return (blk,blkName,mkSubBlocks [] instrs))
                    return (fname,(zip args argtps,rtp,blks,loop_mp!fname))) >>=
           return . Map.fromList
-  globs <- getGlobalList mod >>= 
+  globs <- moduleGetGlobalList mod >>= 
            ipListToList >>= 
            mapM (\g -> do
                     init <- globalVariableGetInitializer g
