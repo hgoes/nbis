@@ -47,6 +47,32 @@ class MemoryModel m mloc ptr where
   connectLocation :: m -> SMTExpr Bool -> mloc -> mloc -> [(ptr,ptr)] -> SMT m
   debugMem :: m -> Proxy mloc -> Proxy ptr -> String
 
+memInstrSrc :: MemoryInstruction m p -> m
+memInstrSrc (MINull m _ _ _) = m
+memInstrSrc (MIAlloc m _ _ _ _) = m
+memInstrSrc (MILoad m _ _) = m
+memInstrSrc (MILoadPtr m _ _ _) = m
+memInstrSrc (MIStore m _ _ _) = m
+memInstrSrc (MIStorePtr m _ _ _) = m
+memInstrSrc (MICompare m _ _ _) = m
+memInstrSrc (MISelect m _ _ _) = m
+memInstrSrc (MICast m _ _ _ _ _) = m
+memInstrSrc (MIIndex m _ _ _ _) = m
+memInstrSrc (MICopy m _ _ _ _) = m
+
+memInstrTrg :: MemoryInstruction m p -> Maybe m
+memInstrTrg (MINull _ _ _ m) = Just m
+memInstrTrg (MIAlloc _ _ _ _ m) = Just m
+memInstrTrg (MILoad _ _ _) = Nothing
+memInstrTrg (MILoadPtr _ _ _ m) = Just m
+memInstrTrg (MIStore _ _ _ m) = Just m
+memInstrTrg (MIStorePtr _ _ _ m) = Just m
+memInstrTrg (MICompare _ _ _ _) = Nothing
+memInstrTrg (MISelect _ _ _ m) = Just m
+memInstrTrg (MICast _ _ _ _ _ m) = Just m
+memInstrTrg (MIIndex _ _ _ _ m) = Just m
+memInstrTrg (MICopy _ _ _ _ m) = Just m
+
 flattenMemContent :: MemContent -> [(Integer,Integer)]
 flattenMemContent (MemCell w v) = [(w,v)]
 flattenMemContent (MemArray xs) = concat $ fmap flattenMemContent xs
