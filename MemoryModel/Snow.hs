@@ -171,6 +171,21 @@ connectLocationUpdate mp loc = case Map.lookup loc mp of
   Nothing -> [(loc,constant True)]
   Just locs -> (loc,constant True):locs
 
+initUpdates :: Map String [TypeDesc]
+                -> Integer
+                -> MemoryInstruction mloc ptr
+                -> SMT ([(Integer,[(SMTExpr Bool,Object ptr)])],
+                        [(ptr,[(SMTExpr Bool,Maybe (Integer,PtrIndex))])],
+                        Integer)
+initUpdates structs next_obj instr = case instr of
+  MINull mfrom tp ptr mto -> return ([],[(ptr,[(constant True,Nothing)])],next_obj)
+  MIAlloc mfrom tp num ptr mto -> do
+    obj <- allocaObject structs tp num
+    return ([(next_obj,[(constant True,obj)])],
+            [(ptr,[(constant True,Just (next_obj,[(tp,[])]))])],
+            succ next_obj)
+  _ -> return ([],[],next_obj)
+
 updatePointer :: (Show ptr,Eq mloc,Ord ptr)
                  => Map String [TypeDesc]                             -- ^ All struct types
                  -> mloc                                              -- ^ The location to be updated
@@ -292,11 +307,75 @@ updatePointer structs loc all_ptrs all_objs new_ptr new_conds instr = case instr
                                            | (cond',src) <- new_conds ])])
     | otherwise -> return ([],[])
   MICast mfrom tp_from tp_to ptr_from ptr_to mto
-    | mfrom==loc -> return ([],[(ptr_to,[ case src of
-                                             Nothing -> (c,Nothing)
-                                             Just (obj_p,idx) -> (c,Just (obj_p,ptrIndexCast structs tp_to idx))
-                                        | (c,src) <- new_conds ])])
+    | mfrom==loc && ptr_from==new_ptr 
+      -> return ([],[(ptr_to,[ case src of
+                                  Nothing -> (c,Nothing)
+                                  Just (obj_p,idx) -> (c,Just (obj_p,ptrIndexCast structs tp_to idx))
+                             | (c,src) <- new_conds ])])
     | otherwise -> return ([],[])
+  MIIndex mfrom idx ptr_from ptr_to mto
+    | mfrom==loc && ptr_from==new_ptr
+      -> return ([],[(ptr_to,[ case src of
+                                  Nothing -> (c,Nothing)
+                                  Just (obj_p,idx') -> (c,Just (obj_p,ptrIndexIndex idx idx'))
+                             | (c,src) <- new_conds ])])
+    | otherwise -> return ([],[])
+  _ -> return ([],[])
+
+updateObject :: (Eq mloc,Ord ptr,Show ptr)
+                => Map String [TypeDesc]
+                -> mloc
+                -> Map ptr [(SMTExpr Bool,Maybe (Integer,PtrIndex))]
+                -> Integer
+                -> [(SMTExpr Bool,Object ptr)]
+                -> MemoryInstruction mloc ptr
+                -> SMT (Maybe (ptr,[(SMTExpr Bool,Maybe (Integer,PtrIndex))]))
+updateObject structs loc all_ptrs new_obj new_conds instr = case instr of
+  MILoad mfrom ptr res
+    | mfrom==loc -> case Map.lookup ptr all_ptrs of
+      Just srcs -> do
+        let sz = extractAnnotation res
+        mapM_ (\(cond,src) -> case src of
+                  Nothing -> return ()
+                  Just (obj_p,idx) -> if obj_p==new_obj
+                                      then mapM_ (\(cond',obj) -> do
+                                                     let ObjAccessor access = ptrIndexGetAccessor structs idx
+                                                         (_,loaded,errs) = access 
+                                                                           (\obj' -> let (res,errs) = loadObject sz obj'
+                                                                                     in (obj',res,errs)
+                                                                           ) obj
+                                                     assert $ (cond .&&. cond') .=>. (res .==. loaded)
+                                                 ) new_conds
+                                      else return ()
+              ) srcs
+        return Nothing
+    | otherwise -> return Nothing
+  MILoadPtr mfrom ptr_from ptr_to mto
+    | mfrom==loc -> case Map.lookup ptr_from all_ptrs of
+      Just srcs -> do
+        let nptr = [ case src of
+                        Nothing -> []
+                        Just (obj_p,idx) -> if obj_p==new_obj
+                                            then [ case loaded of
+                                                      Nothing -> [(cond .&&. cond',Nothing)]
+                                                      Just p -> case Map.lookup p all_ptrs of
+                                                        Just dests -> [ (and' `app` [cond,cond',cond''],dest) 
+                                                                      | (cond'',dest) <- dests ]
+                                                 | (cond',obj) <- new_conds
+                                                 , let ObjAccessor access = ptrIndexGetAccessor structs idx
+                                                       (_,loaded,errs) = access
+                                                                         (\obj' -> let (res,errs) = loadPtr obj'
+                                                                                   in (obj',res,errs)
+                                                                         ) obj
+                                                 ]
+                                            else []
+                   | (cond,src) <- srcs
+                   ]
+        case concat $ concat nptr of
+          [] -> return Nothing
+          xs -> return (Just (ptr_to,xs))
+    | otherwise -> return Nothing
+  _ -> return Nothing
 
 updateLocation' :: (Eq ptr,Ord ptr,Show ptr,Eq mloc,Ord mloc,Show mloc)
                   => Map String [TypeDesc]
