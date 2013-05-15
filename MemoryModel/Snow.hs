@@ -171,32 +171,34 @@ connectLocationUpdate mp loc = case Map.lookup loc mp of
   Nothing -> [(loc,constant True)]
   Just locs -> (loc,constant True):locs
 
+type ObjectUpdate ptr = (Integer,[(SMTExpr Bool,Object ptr)])
+type PointerUpdate ptr = (ptr,[(SMTExpr Bool,Maybe (Integer,PtrIndex))])
+
 initUpdates :: Map String [TypeDesc]
                 -> Integer
                 -> MemoryInstruction mloc ptr
-                -> SMT ([(Integer,[(SMTExpr Bool,Object ptr)])],
-                        [(ptr,[(SMTExpr Bool,Maybe (Integer,PtrIndex))])],
+                -> SMT (Maybe (ObjectUpdate ptr),
+                        Maybe (PointerUpdate ptr),
                         Integer)
 initUpdates structs next_obj instr = case instr of
-  MINull mfrom tp ptr mto -> return ([],[(ptr,[(constant True,Nothing)])],next_obj)
+  MINull mfrom tp ptr mto -> return (Nothing,Just (ptr,[(constant True,Nothing)]),next_obj)
   MIAlloc mfrom tp num ptr mto -> do
     obj <- allocaObject structs tp num
-    return ([(next_obj,[(constant True,obj)])],
-            [(ptr,[(constant True,Just (next_obj,[(tp,[])]))])],
+    return (Just (next_obj,[(constant True,obj)]),
+            Just (ptr,[(constant True,Just (next_obj,[(tp,[])]))]),
             succ next_obj)
-  _ -> return ([],[],next_obj)
+  _ -> return (Nothing,Nothing,next_obj)
 
 updatePointer :: (Show ptr,Eq mloc,Ord ptr)
                  => Map String [TypeDesc]                             -- ^ All struct types
                  -> mloc                                              -- ^ The location to be updated
                  -> Map ptr [(SMTExpr Bool,Maybe (Integer,PtrIndex))] -- ^ All the pointers at the location (needed for pointer comparisons)
                  -> Map Integer [(SMTExpr Bool,Object ptr)]           -- ^ All objects at the location
-                 -> ptr                                               -- ^ The pointer to be updated
-                 -> [(SMTExpr Bool,Maybe (Integer,PtrIndex))]         -- ^ The new assignments of this pointer
+                 -> PointerUpdate ptr                                 -- ^ The pointer update to be applied
                  -> MemoryInstruction mloc ptr
-                 -> SMT ([(Integer,[(SMTExpr Bool,Object ptr)])],
-                         [(ptr,[(SMTExpr Bool,Maybe (Integer,PtrIndex))])])
-updatePointer structs loc all_ptrs all_objs new_ptr new_conds instr = case instr of
+                 -> SMT ([ObjectUpdate ptr],
+                         [PointerUpdate ptr])
+updatePointer structs loc all_ptrs all_objs (new_ptr,new_conds) instr = case instr of
   MILoad mfrom ptr res
     | mfrom==loc && ptr==new_ptr -> do
       let sz = extractAnnotation res
@@ -326,11 +328,10 @@ updateObject :: (Eq mloc,Ord ptr,Show ptr)
                 => Map String [TypeDesc]
                 -> mloc
                 -> Map ptr [(SMTExpr Bool,Maybe (Integer,PtrIndex))]
-                -> Integer
-                -> [(SMTExpr Bool,Object ptr)]
+                -> ObjectUpdate ptr
                 -> MemoryInstruction mloc ptr
-                -> SMT (Maybe (ptr,[(SMTExpr Bool,Maybe (Integer,PtrIndex))]))
-updateObject structs loc all_ptrs new_obj new_conds instr = case instr of
+                -> SMT (Maybe (PointerUpdate ptr))
+updateObject structs loc all_ptrs (new_obj,new_conds) instr = case instr of
   MILoad mfrom ptr res
     | mfrom==loc -> case Map.lookup ptr all_ptrs of
       Just srcs -> do
