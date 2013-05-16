@@ -109,7 +109,23 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
   debugMem mem _ _ = snowDebug mem
 
 applyUpdates :: (Ord ptr,Ord mloc,Show mloc,Show ptr) => [PointerUpdate mloc ptr] -> [ObjectUpdate mloc ptr] -> [MemoryInstruction mloc ptr] -> SnowMemory mloc ptr -> SMT (SnowMemory mloc ptr)
-applyUpdates ptr_upds obj_upds instrs mem = applyUpdates' ptr_upds obj_upds [] instrs mem
+applyUpdates [] [] _ mem = return mem
+applyUpdates ptr_upds obj_upds instrs mem = do
+  trace (unlines $ listHeader "Pointer updates: " (fmap show ptr_upds)) (return ())
+  trace (unlines $ listHeader "Object updates: " (fmap show obj_upds)) (return ())
+  let mem1 = foldl (\cmem (loc,ptr,assign)
+                    -> cmem { snowLocations = Map.insertWith mappend loc
+                                              (SnowLocation { snowObjects = Map.empty
+                                                            , snowPointer = Map.singleton ptr assign
+                                                            }) (snowLocations cmem)
+                            }) mem ptr_upds
+      mem2 = foldl (\cmem (loc,obj_p,assign)
+                     -> cmem { snowLocations = Map.insertWith mappend loc
+                                               (SnowLocation { snowObjects = Map.singleton obj_p assign
+                                                             , snowPointer = Map.empty
+                                                             }) (snowLocations cmem)
+                             }) mem1 obj_upds
+  applyUpdates' ptr_upds obj_upds [] instrs mem2
   --mem1 <- foldlM (\cmem obj_upd -> applyObjectUpdate obj_upd cmem) mem (concat $ fmap (connectObjectUpdate (snowLocationConnections mem)) obj_upds)
   --mem2 <- foldlM (\cmem ptr_upd -> applyPointerUpdate ptr_upd cmem) mem1 (concat $ fmap (connectPointerUpdate (snowLocationConnections mem1) (snowPointerConnections mem1)) ptr_upds)
   --return mem2
@@ -123,11 +139,9 @@ applyUpdates' ptr_upds obj_upds done (i:is) mem = do
                            , snowPointer = y }) -> (x,y)
         Nothing -> (Map.empty,Map.empty)
   r1 <- foldlM (\(cobj_up,cptr_up) ptr_upd -> do
-                   (obj_upd',ptr_upd') <- updatePointer (snowStructs mem) loc_ptrs loc_objs ptr_upd i
+                   (obj_upd',ptr_upd') <- updatePointer' (snowStructs mem) loc_ptrs loc_objs ptr_upd i
                    return (obj_upd'++cobj_up,
-                           case ptr_upd' of
-                             Nothing -> cptr_up
-                             Just up -> up:cptr_up)
+                           ptr_upd'++cptr_up)
                ) ([],[]) ptr_upds
   (nobj_upd,nptr_upd) <- foldlM (\(cobj_up,cptr_up) obj_upd -> do
                                     (obj_upd',ptr_upd') <- updateObject (snowStructs mem) loc_ptrs loc_objs obj_upd i
@@ -138,7 +152,7 @@ applyUpdates' ptr_upds obj_upds done (i:is) mem = do
                                 ) r1 obj_upds
   let nobj_upd' = concat $ fmap (connectObjectUpdate (snowLocationConnections mem)) nobj_upd
       nptr_upd' = concat $ fmap (connectPointerUpdate (snowLocationConnections mem) (snowPointerConnections mem)) nptr_upd
-  mem1 <- applyUpdates nptr_upd' nobj_upd' done mem
+  mem1 <- applyUpdates nptr_upd' nobj_upd' (done++[i]) mem
   applyUpdates' (ptr_upds++nptr_upd') (obj_upds++nobj_upd') (done++[i]) is mem1
 
 connectPointerUpdate :: (Ord ptr,Ord mloc)
@@ -184,6 +198,25 @@ initUpdates structs next_obj instr = case instr of
             Just (mto,ptr,[(constant True,Just (next_obj,[(tp,[])]))]),
             succ next_obj)
   _ -> return (Nothing,Nothing,next_obj)
+
+updatePointer' :: (Show ptr,Show mloc,Eq mloc,Ord ptr)
+                  => Map String [TypeDesc]
+                  -> Map ptr [(SMTExpr Bool,Maybe (Integer,PtrIndex))]
+                  -> Map Integer [(SMTExpr Bool,Object ptr)]
+                  -> PointerUpdate mloc ptr
+                  -> MemoryInstruction mloc ptr
+                  -> SMT ([ObjectUpdate mloc ptr],
+                          [PointerUpdate mloc ptr])
+updatePointer' structs all_ptrs all_objs (loc,new_ptr,new_conds) instr = do
+  (obj_upds,ptr_upd) <- updatePointer structs all_ptrs all_objs (loc,new_ptr,new_conds) instr
+  return (obj_upds,(case ptr_upd of
+                       Nothing -> []
+                       Just x -> [x])++
+                   (if memInstrSrc instr==loc
+                    then (case memInstrTrg instr of
+                             Nothing -> []
+                             Just trg -> [(trg,new_ptr,new_conds)])
+                    else []))
 
 updatePointer :: (Show ptr,Show mloc,Eq mloc,Ord ptr)
                  => Map String [TypeDesc]                             -- ^ All struct types
@@ -326,7 +359,7 @@ updatePointer structs all_ptrs all_objs (loc,new_ptr,new_conds) instr = case ins
     | otherwise -> return ([],Nothing)
   _ -> return ([],Nothing)
 
-updateObject :: (Eq mloc,Ord ptr,Show ptr)
+updateObject :: (Eq mloc,Ord ptr,Show ptr,Show mloc)
                 => Map String [TypeDesc]
                 -> Map ptr [(SMTExpr Bool,Maybe (Integer,PtrIndex))]
                 -> Map Integer [(SMTExpr Bool,Object ptr)]
@@ -354,9 +387,11 @@ updateObject structs all_ptrs all_objs (loc,new_obj,new_conds) instr = case inst
         return ([],Nothing)
     | otherwise -> return ([],Nothing)
   MILoadPtr mfrom ptr_from ptr_to mto
-    | mfrom==loc -> case Map.lookup ptr_from all_ptrs of
-      Just srcs -> do
-        let nptr = [ case src of
+    | mfrom==loc -> do
+        let srcs = case Map.lookup ptr_from all_ptrs of
+              Nothing -> []
+              Just x -> x
+            nptr = [ case src of
                         Nothing -> []
                         Just (obj_p,idx) -> if obj_p==new_obj
                                             then [ case loaded of
@@ -397,11 +432,11 @@ updateObject structs all_ptrs all_objs (loc,new_obj,new_conds) instr = case inst
                                   , let ObjAccessor access = ptrIndexGetAccessor structs idx ])],Nothing)
       Nothing -> return ([(mto,new_obj,new_conds)],Nothing)
     | otherwise -> return ([],Nothing)
-  _ -> return $ if memInstrSrc instr == loc
-                then (case memInstrTrg instr of
-                         Nothing -> ([],Nothing)
-                         Just trg -> ([(trg,new_obj,new_conds)],Nothing))
-                else ([],Nothing)
+  _ -> if memInstrSrc instr==loc
+       then (case memInstrTrg instr of
+                Nothing -> return ([],Nothing)
+                Just trg -> return ([(trg,new_obj,new_conds)],Nothing))
+       else return ([],Nothing)
 
 snowDebugLocation :: Show ptr => String -> SnowLocation ptr -> [String]
 snowDebugLocation loc_name cont
@@ -416,11 +451,11 @@ snowDebugLocation loc_name cont
               [show cond++" ~> "++show ptr'
               | (cond,ptr') <- cases ]
             | (ptr,cases) <- Map.toList (snowPointer cont) ])
-  where
-    listHeader :: String -> [String] -> [String]
-    listHeader x [] = []
-    listHeader x (y:ys) = let l = (length x)+1
-                          in (x++" "++y):(fmap ((replicate l ' ')++) ys)
+
+listHeader :: String -> [String] -> [String]
+listHeader x [] = []
+listHeader x (y:ys) = let l = (length x)+1
+                      in (x++" "++y):(fmap ((replicate l ' ')++) ys)
 
 snowDebug :: (Show ptr,Show mloc) => SnowMemory mloc ptr -> String
 snowDebug mem = unlines $ concat
