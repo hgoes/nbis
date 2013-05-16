@@ -369,7 +369,7 @@ makeNode read_from from nid = do
                     (nodeGraph ngr)
   nmem <- lift $ addProgram (globalMemory ngr) act mloc_in prog
   (p1,p2) <- getProxies
-  trace (debugMem nmem p1 p2) (return ())
+  --trace (debugMem nmem p1 p2) (return ())
   put $ ngr { nodeGraph = node_graph'
             , nextNode = succ (nextNode ngr)
             , nextLocation = succ mloc_out
@@ -684,10 +684,13 @@ main = do
                    incrementGraph
                    ngr <- get
                    res <- lift $ checkGraph ngr
-                   liftIO $ writeFile ("graph"++show i++".dot") (renderNodeGraph ngr)
+                   --liftIO $ writeFile ("graph"++show i++".dot") (renderNodeGraph ngr)
                    case res of
                      Nothing -> check (i+1) depth
                      Just (err,watch) -> do
+                       (p1,p2) <- getProxies
+                       liftIO $ writeFile ("graph"++show i++".dot") (renderNodeGraph ngr)
+                       liftIO $ putStrLn $ debugMem (globalMemory gr) p1 p2
                        liftIO $ putStrLn $ "Error "++show err++" found."
                        mapM_ (\str -> liftIO $ putStrLn str) watch
                        return ())

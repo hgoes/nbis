@@ -105,14 +105,18 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
                    }
         ptr_upd = [ (loc_to,ptr,assign) | (ptr,assign) <- Map.toList $ snowPointer cloc ]
         obj_upd = [ (loc_to,obj,assign) | (obj,assign) <- Map.toList $ snowObjects cloc ]
-    applyUpdates ptr_upd obj_upd (snowProgram mem1) mem1
+        
+        obj_upd' = concat $ fmap (connectObjectUpdate (snowLocationConnections mem1)) obj_upd
+        ptr_upd' = concat $ fmap (connectPointerUpdate (snowLocationConnections mem1) (snowPointerConnections mem1)) ptr_upd
+
+    applyUpdates ptr_upd' obj_upd' (snowProgram mem1) mem1
   debugMem mem _ _ = snowDebug mem
 
 applyUpdates :: (Ord ptr,Ord mloc,Show mloc,Show ptr) => [PointerUpdate mloc ptr] -> [ObjectUpdate mloc ptr] -> [MemoryInstruction mloc ptr] -> SnowMemory mloc ptr -> SMT (SnowMemory mloc ptr)
 applyUpdates [] [] _ mem = return mem
 applyUpdates ptr_upds obj_upds instrs mem = do
-  trace (unlines $ listHeader "Pointer updates: " (fmap show ptr_upds)) (return ())
-  trace (unlines $ listHeader "Object updates: " (fmap show obj_upds)) (return ())
+  --trace (unlines $ listHeader "Pointer updates: " (fmap show ptr_upds)) (return ())
+  --trace (unlines $ listHeader "Object updates: " (fmap show obj_upds)) (return ())
   let mem1 = foldl (\cmem (loc,ptr,assign)
                     -> cmem { snowLocations = Map.insertWith mappend loc
                                               (SnowLocation { snowObjects = Map.empty
@@ -323,6 +327,7 @@ updatePointer structs all_ptrs all_objs (loc,new_ptr,new_conds) instr = case ins
     | otherwise -> return ([],Nothing)
     where
       compare' a1 a2 = do
+        comment $ "Compare "++show p1++" and "++show p2
         sequence_ [ assert $ (c1 .&&. c2) .=>. 
                     (case (ptr1,ptr2) of
                         (Nothing,Nothing) -> res
@@ -424,6 +429,24 @@ updateObject structs all_ptrs all_objs (loc,new_obj,new_conds) instr = case inst
                                            ,(cond .&&. cond',nobj)]
                                          | (cond',obj) <- new_conds
                                          , let (nobj,_,errs) = access (\obj' -> let (res,errs) = storeObject val obj'
+                                                                                in (res,(),errs)
+                                                                      ) obj
+                                         ]
+                                    else [ (cond .&&. cond',obj) | (cond',obj) <- new_conds ]
+                                  | (cond,Just (obj_p,idx)) <- trgs
+                                  , let ObjAccessor access = ptrIndexGetAccessor structs idx ])],Nothing)
+      Nothing -> return ([(mto,new_obj,new_conds)],Nothing)
+    | otherwise -> return ([],Nothing)
+  MIStorePtr mfrom ptr_from ptr_to mto
+    | mfrom==loc -> case Map.lookup ptr_to all_ptrs of
+      Just trgs -> return
+                   ([(mto,new_obj,concat
+                                  [ if obj_p==new_obj
+                                    then concat
+                                         [ [((not' cond) .&&. cond',obj)
+                                           ,(cond .&&. cond',nobj)]
+                                         | (cond',obj) <- new_conds
+                                         , let (nobj,_,errs) = access (\obj' -> let (res,errs) = storePtr ptr_from obj'
                                                                                 in (res,(),errs)
                                                                       ) obj
                                          ]
