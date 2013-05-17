@@ -10,7 +10,7 @@ Cabal-Version:	>= 1.2
 
 Executable nbis
   Main-Is:		Main.hs
-  Extensions:           CPP,ScopedTypeVariables
+  Extensions:           CPP,ScopedTypeVariables,GADTs
   Other-Modules:
     MemoryModel
     MemoryModel.Untyped

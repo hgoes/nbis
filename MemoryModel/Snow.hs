@@ -19,6 +19,7 @@ import Data.Maybe (catMaybes)
 import Data.Monoid
 import qualified Data.List as List
 import Debug.Trace
+import Simplifier
 
 import MemoryModel.Snow.Object
 
@@ -43,8 +44,8 @@ data SnowLocation ptr
 instance (Ord ptr,Show ptr) => Monoid (SnowLocation ptr) where
   mempty = SnowLocation { snowObjects = Map.empty
                         , snowPointer = Map.empty }
-  mappend l1 l2 = SnowLocation { snowObjects = Map.unionWith (++) (snowObjects l1) (snowObjects l2)
-                               , snowPointer = Map.unionWith (++) (snowPointer l1) (snowPointer l2)
+  mappend l1 l2 = SnowLocation { snowObjects = Map.unionWith (\x y -> simplifyCondList $ mergeCondList x y) (snowObjects l1) (snowObjects l2)
+                               , snowPointer = Map.unionWith (\x y -> simplifyCondList $ mergeCondList x y) (snowPointer l1) (snowPointer l2)
                                }
 
 mkGlobal :: MemContent -> SMT (Object ptr)
@@ -115,8 +116,8 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
 applyUpdates :: (Ord ptr,Ord mloc,Show mloc,Show ptr) => [PointerUpdate mloc ptr] -> [ObjectUpdate mloc ptr] -> [MemoryInstruction mloc ptr] -> SnowMemory mloc ptr -> SMT (SnowMemory mloc ptr)
 applyUpdates [] [] _ mem = return mem
 applyUpdates ptr_upds obj_upds instrs mem = do
-  --trace (unlines $ listHeader "Pointer updates: " (fmap show ptr_upds)) (return ())
-  --trace (unlines $ listHeader "Object updates: " (fmap show obj_upds)) (return ())
+  trace (unlines $ listHeader "Pointer updates: " (fmap show ptr_upds)) (return ())
+  trace (unlines $ listHeader "Object updates: " (fmap show obj_upds)) (return ())
   let mem1 = foldl (\cmem (loc,ptr,assign)
                     -> cmem { snowLocations = Map.insertWith mappend loc
                                               (SnowLocation { snowObjects = Map.empty
@@ -485,3 +486,19 @@ snowDebug mem = unlines $ concat
                 [ snowDebugLocation (show loc) cont
                 | (loc,cont) <- Map.toList (snowLocations mem)
                 ]
+
+simplifyCondList :: [(SMTExpr Bool,a)] -> [(SMTExpr Bool,a)]
+simplifyCondList [] = []
+simplifyCondList ((c,x):xs) = let c' = simplifier c
+                              in (if isFalse c'
+                                  then simplifyCondList xs
+                                  else (c',x):simplifyCondList xs)
+
+mergeCondList :: Eq a => [(SMTExpr Bool,a)] -> [(SMTExpr Bool,a)] -> [(SMTExpr Bool,a)]
+mergeCondList [] ys = ys
+mergeCondList (x:xs) ys = mergeCondList xs (insert x ys)
+  where
+    insert x [] = [x]
+    insert x@(cx,objx) (y@(cy,objy):ys) = if objx==objy
+                                          then (cx .||. cy,objx):ys
+                                          else y:(insert x ys)

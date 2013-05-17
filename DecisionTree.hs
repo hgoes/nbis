@@ -99,7 +99,6 @@ decisionTreeEq f x y = case mkEq f x y of
   Left c -> constant c
   Right cond -> cond
   where
-    mkEq :: (a -> a -> Either Bool (SMTExpr Bool)) -> DecisionTree a -> DecisionTree a -> Either Bool (SMTExpr Bool)
     mkEq f (GroundNode x) (GroundNode y) = f x y
     mkEq f (BoolNode c x1 x2) y = case mkEq f x1 y of
       Left True -> case mkEq f x2 y of
