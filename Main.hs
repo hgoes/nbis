@@ -106,7 +106,7 @@ data FunctionDescr gr = FunctionDescr
                         { funDescrArgs :: [(Ptr Argument,TypeDesc)]
                         , funDescrReturnType :: TypeDesc
                         , funDescrBlocks :: [(Ptr BasicBlock,Maybe String,[[InstrDesc Operand]])]
-                        , funDescrGraph :: gr ((Ptr BasicBlock,Maybe String,Integer,[InstrDesc Operand]),Map Gr.Node (Set [Gr.Node]),VariableInfo) ()
+                        , funDescrGraph :: gr ((Ptr BasicBlock,Maybe String,Integer,[InstrDesc Operand])) ()
                         , funDescrNodeMap :: Map (Ptr BasicBlock,Integer) Gr.Node
                         , funDescrSCC :: [[Gr.Node]]
                         , funDescrDefines :: Map (Ptr Instruction) (Ptr BasicBlock,Integer)
@@ -545,12 +545,12 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m mloc var pt
                          in FunctionDescr { funDescrArgs = sig
                                           , funDescrReturnType = rtp
                                           , funDescrBlocks = blks
-                                          , funDescrGraph = getVariableInfo
+                                          , funDescrGraph = {-getVariableInfo
                                                             (\(_,_,_,instrs) -> instrs)
                                                             (\instr -> let Just (blk,sblk) = Map.lookup instr defs
                                                                            Just nd = Map.lookup (blk,sblk) pmp
                                                                        in nd)
-                                                            $ getReachability pgr
+                                                            $ getReachability-} pgr
                                           , funDescrNodeMap = pmp
                                           , funDescrSCC = filter (\comp -> case comp of
                                                                      [nd] -> isSelfLoop nd pgr
@@ -561,11 +561,11 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m mloc var pt
                                           , funDescrLoops = loops
                                           }
                      ) funs
-  liftIO $ mapM_ (\(fname,f) -> do
+  {-liftIO $ mapM_ (\(fname,f) -> do
                      writeFile ("program-"++fname++".dot") $ Gr.graphviz' (Gr.nmap (\((ptr,name,i,_),_,_) -> (GrStr $ case name of
                                                                                                                  Nothing -> show ptr
                                                                                                                  Just name' -> name',i)) (funDescrGraph f))
-                 ) (Map.toList allfuns)
+                 ) (Map.toList allfuns)-}
   liftIO $ putStrLn $ unlines $ concat $
     fmap (\(fname,FunctionDescr { funDescrArgs = sig
                                 , funDescrReturnType = rtp
