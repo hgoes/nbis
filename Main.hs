@@ -158,8 +158,8 @@ data Transition ptr = TBegin
                     | TReturn (Maybe (Either Val ptr))
                     | TDeliver (Ptr Instruction) Gr.Node
 
-data Output ptr = Output { outputStatic :: Map (Ptr Instruction) (Either Val ptr,String,TypeDesc)
-                         , outputLoopStatics :: [(LoopDesc,Map (Ptr Instruction) (Either Val ptr,String,TypeDesc))]
+data Output ptr = Output { outputStatic :: Map (Ptr Instruction) (Val,String,TypeDesc)
+                         , outputLoopStatics :: [(LoopDesc,Map (Ptr Instruction) (Val,String,TypeDesc))]
                          , outputDynamics :: Map (Ptr Instruction) (Either VarValue VarPointer)
                          } deriving (Show)
 
@@ -262,14 +262,14 @@ updateDelayed gr from nd delayed
                               }:qs,dels')
              else (qs,del:dels)
 
-allStatics :: Output ptr -> Map (Ptr Instruction) (Either Val ptr)
+allStatics :: Output ptr -> Map (Ptr Instruction) Val
 allStatics outp = fmap (\(v,_,_) -> v) $ Map.unions $ 
                   (outputStatic outp):(fmap snd $ outputLoopStatics outp)
 
 -- | Remove all static variables which will no longer be static in the new block.
 --   Creates empty mappings for all new loops entered by the new block.
 --   Also it returns the variables it removes.
-adjustLoopStack :: [LoopDesc] -> Ptr BasicBlock -> Output ptr -> (Output ptr,Map (Ptr Instruction) (Either Val ptr,String,TypeDesc))
+adjustLoopStack :: [LoopDesc] -> Ptr BasicBlock -> Output ptr -> (Output ptr,Map (Ptr Instruction) (Val,String,TypeDesc))
 adjustLoopStack all_loops blk outp = case outputLoopStatics outp of
   [] -> (outp { outputLoopStatics = fmap (\li -> (li,Map.empty)) (findLoopForBlock blk all_loops) },Map.empty)
   (li,mp):lis -> if blk `elem` (loopDescBlocks li)
@@ -313,22 +313,33 @@ makeDynamic cond mp outp
                return (coutp { outputDynamics = Map.insert instr nentr (outputDynamics coutp) })
            ) outp (Map.toList mp)
 
-makeStatic :: Map (Ptr Instruction) (Either Val ptr,String,TypeDesc) -> Output ptr -> Output ptr
+makeStatic :: Map (Ptr Instruction) (Val,String,TypeDesc) -> Output ptr -> Output ptr
 makeStatic mp outp = case outputLoopStatics outp of
   [] -> outp { outputStatic = Map.union mp (outputStatic outp) }
   (li,mp'):lis -> outp { outputLoopStatics = (li,Map.union mp mp'):lis }
 
-mergeOutputs :: (Gr.DynGraph gr,MemoryModel m mloc ptr) => SMTExpr Bool
+addOutputs :: Enum ptr => Map (Ptr Instruction) (Either Val ptr,String,TypeDesc) -> Output ptr -> Unrollment gr m mloc ptr (Output ptr)
+addOutputs vals outp = do
+  let (stat,dyn) = Map.mapEither (\(entr,name,tp) -> case entr of
+                                     Left val -> Left (val,name,tp)
+                                     Right ptr -> Right (Right ptr,name,tp)) vals
+      outp1 = makeStatic stat outp
+  makeDynamic (constant True) dyn outp1
+
+mergeOutputs :: (Gr.DynGraph gr,MemoryModel m mloc ptr,Show ptr) => SMTExpr Bool
                 -> Map (Ptr Instruction) (Either VarValue VarPointer)
                 -> Gr.Node
                 -> Unrollment gr m mloc ptr ()
 mergeOutputs cond new_outs node = do
+  trace ("Merge "++show (Map.toList new_outs)++" at "++show node++" with condition "++show cond) (return ())
   gr <- get
   let (Just (inc,_,nd,outg),gr') = Gr.match node (nodeGraph gr)
   case nodeType nd of
     RealizedBlock { nodeInput = inp
                   , nodeOutput = outp
                   } -> do
+      trace ("Merge into inputs "++show (Map.toList inp)) (return ())
+      trace ("Merge into outputs "++show (Map.toList $ outputDynamics outp)) (return ())
       mapM_ (\pair -> case pair of 
                 (Right ps_out,Right p_in) -> do
                   gr1 <- get
@@ -336,6 +347,7 @@ mergeOutputs cond new_outs node = do
                   modify $ \gr -> gr { ptrStore = nstore }
                   gr2 <- get
                   (pr,_) <- getProxies
+                  trace ("Merge into "++show p_in) (return ())
                   nmem <- lift $ connectPointer (globalMemory gr2) pr cond rout p_in
                   put $ gr2 { globalMemory = nmem }
                 (Left vout,Left vin) -> do
@@ -355,7 +367,8 @@ mergeOutputs cond new_outs node = do
                                                      put $ gr { varStore = nstore }
                                                      return (Left vold)
                                                    (Right pold,Right pnew) -> do
-                                                     gr1 <- get
+                                                     trace ("Add "++show pnew++" to join "++show pold) (return ())
+                                                     gr <- get
                                                      nstore <- addJoin pold (Left pnew) cond (ptrStore gr)
                                                      modify $ \gr -> gr { ptrStore = nstore }
                                                      return (Right pold)
@@ -368,7 +381,7 @@ mergeOutputs cond new_outs node = do
       mapM_ (\(_,trg) -> mergeOutputs cond prop_upds trg) outg
     _ -> return ()
 
-makeNode :: (Gr.DynGraph gr,Enum mloc,Enum ptr,MemoryModel m mloc ptr)
+makeNode :: (Gr.DynGraph gr,Enum mloc,Enum ptr,MemoryModel m mloc ptr,Show ptr)
             => Maybe Gr.Node
             -> Maybe Gr.Node
             -> NodeId
@@ -457,7 +470,11 @@ makeNode read_from from nid = do
       (fin,nst,outp) <- lift $ runRWST (realizeInstructions instrs) env st
       put $ gr { nextPointer = reNextPtr nst
                , varStore = reVarStore nst }
-      let output_vars = makeStatic (Map.union (reLocals nst) (reInputs nst)) outp_cur
+      output_vars <- addOutputs (Map.union (reLocals nst) (reInputs nst)) (outp_cur { outputDynamics = Map.empty })
+      trace ("Node "++show new_gr_id) (return ())
+      trace ("  Input vars: "++show (Map.toList $ reInputs nst)) (return ())
+      trace ("  Static vars: "++show (Map.toList $ allStatics output_vars)) (return ())
+      trace ("  Output vars: "++show (outputDynamics output_vars)) (return ())
       return (RealizedBlock { nodeFunctionNode = ffid
                             , nodeBlock = blk
                             , nodeBlockName = name
@@ -487,7 +504,7 @@ makeNode read_from from nid = do
             }
   return new_gr_id
 
-connectNodes :: (Gr.DynGraph gr,MemoryModel m mloc ptr)
+connectNodes :: (Gr.DynGraph gr,MemoryModel m mloc ptr,Enum ptr,Show ptr)
                 => Gr.Node -> Gr.Node -> Transition ptr -> Gr.Node 
                 -> Unrollment gr m mloc ptr ()
 connectNodes from read_from trans to = do
@@ -539,10 +556,29 @@ connectNodes from read_from trans to = do
                                              Just name' -> name'))
   lift $ assert $ nodeActivationProxy nd_to .==. (cond .||. nproxy)
   put $ gr { nodeGraph = (in_to,to,nd_to { nodeActivationProxy = nproxy },out_to) Gr.& gr1 }
-  case nodeType nd_from of
+  
+  gr <- get
+  (_,pr) <- getProxies
+  mem' <- lift $ connectLocation (globalMemory gr) pr cond
+          (nodeOutputLoc nd_from)
+          (nodeInputLoc nd_to)
+  put $ gr { globalMemory = mem' }
+  
+  case nodeType nd_read_from of
     RealizedStart {} -> case nodeType nd_to of
       RealizedBlock {} -> return ()
-    RealizedBlock { nodeOutput = outp } -> mergeOutputs cond (outputDynamics outp) to
+    RealizedBlock { nodeOutput = outp
+                  , nodeFunctionNode = fnode }
+      -> case nodeType nd_to of
+      RealizedBlock { nodeBlock = blk } -> do
+        let Just fnd = Gr.lab (nodeGraph gr) fnode
+            RealizedStart { nodeStartName = fname } = nodeType fnd
+            fun_descr = (allFunctions gr)!fname
+            (_,demoted) = adjustLoopStack (funDescrLoops fun_descr) blk outp
+        trace ("Demoted: "++show demoted) (return ())
+        outp' <- makeDynamic cond (fmap (\(val,name,tp) -> (Left val,name,tp)) demoted) outp
+        mergeOutputs cond (outputDynamics outp') to
+      _ -> return ()
   {-let (ptr_eqs,val_eqs) = foldr (\pair (ptr_eqs,val_eqs) -> case pair of
                                     (Right p1,Right p2) -> ((p1,p2):ptr_eqs,val_eqs)
                                     (Left v1,Left v2) -> (ptr_eqs,(v1,v2):val_eqs)
@@ -552,12 +588,6 @@ connectNodes from read_from trans to = do
                        lift $ assert $ cond .=>. (valEq v_in rout)
                        return store'
                    ) (varStore gr) val_eqs-}
-  gr <- get
-  (_,pr) <- getProxies
-  mem' <- lift $ connectLocation (globalMemory gr) pr cond
-          (nodeOutputLoc nd_from)
-          (nodeInputLoc nd_to)
-  put $ gr { globalMemory = mem' }
   case nodeType nd_from of
     RealizedBlock { nodeBlock = blk } -> case nodeType nd_to of
       RealizedBlock { nodePhis = phis } 
@@ -569,7 +599,7 @@ connectNodes from read_from trans to = do
       _ -> return ()
     _ -> return ()
 
-targetNode :: (Gr.DynGraph gr,Enum mloc,Enum ptr,MemoryModel m mloc ptr)
+targetNode :: (Gr.DynGraph gr,Enum mloc,Enum ptr,MemoryModel m mloc ptr,Show ptr)
               => Gr.Node -> Gr.Node -> NodeId
               -> Unrollment gr m mloc ptr (Gr.Node,Bool)
 targetNode read_from from to = do
@@ -598,7 +628,7 @@ targetNode read_from from to = do
            then getNode gr (Just x) xs
            else res
 
-incrementGraph :: (Gr.DynGraph gr,Enum ptr,Enum mloc,MemoryModel m mloc ptr)
+incrementGraph :: (Gr.DynGraph gr,Enum ptr,Enum mloc,MemoryModel m mloc ptr,Show ptr)
                   => Unrollment gr m mloc ptr ()
 incrementGraph = do
   entr <- dequeueNode
@@ -634,7 +664,7 @@ data GrStr = GrStr String
 instance Show GrStr where
   show (GrStr x) = x
 
-unrollProgram :: (Gr.DynGraph gr,Integral ptr,Integral mloc,MemoryModel m mloc ptr)
+unrollProgram :: (Gr.DynGraph gr,Integral ptr,Integral mloc,MemoryModel m mloc ptr,Show ptr)
                 => ProgDesc -> String 
                 -> Unrollment gr m mloc ptr a
                 -> SMT a
@@ -678,9 +708,11 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m mloc ptr a)
                                 , funDescrReturnType = rtp
                                 , funDescrBlocks = blks
                                 , funDescrSCC = scc 
-                                , funDescrRealizationOrder = order })
+                                , funDescrRealizationOrder = order
+                                , funDescrLoops = loops })
           -> ["SCC "++fname++": "++show scc
-             ,"ORDER "++show order]
+             ,"ORDER "++show order
+             ,"LOOPS "++show loops]
          ) (Map.toList allfuns)
   let ((cptr,prog),globs') = mapAccumL (\(ptr',prog') (tp,cont) 
                                         -> ((succ ptr',(ptr',tp,cont):prog'),ptr')

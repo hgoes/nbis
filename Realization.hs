@@ -24,8 +24,6 @@ type Watchpoint = (String,SMTExpr Bool,[(TypeDesc,SMTExpr (BitVector BVUntyped))
 
 type Guard = (ErrorDesc,SMTExpr Bool)
 
-type Statics ptr = Map (Ptr Instruction) (Either Val ptr)
-
 data VarKind var ptr = Value Val
                      | Pointer ptr
                      | JoinPoint var
@@ -38,7 +36,7 @@ data RealizationEnv var ptr
                    , reActivation :: SMTExpr Bool
                    , reGlobals :: Map (Ptr GlobalVariable) ptr
                    , reArgs :: Map (Ptr Argument) (Either var ptr)
-                   , reStaticInput :: Statics ptr
+                   , reStaticInput :: Map (Ptr Instruction) Val
                    , reStructs :: Map String [TypeDesc]
                    }
 
@@ -166,7 +164,7 @@ argToExpr expr = case operandDesc expr of
       Nothing -> case Map.lookup instr (reInputs re) of
         Just (res,_,_) -> return res
         Nothing -> case Map.lookup instr (reStaticInput rs) of
-          Just res -> return res
+          Just res -> return (Left res)
           Nothing -> do
             res <- reNewVar instr name (operandType expr)
             re <- get

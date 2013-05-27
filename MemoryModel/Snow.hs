@@ -84,19 +84,21 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
                         [] -> Map.insert start_loc (snowGlobal mem) (snowLocations mem)
                         _ -> snowLocations mem
                    }
-    foldlM (\cmem instr -> do
-               (obj_upd',ptr_upd',next) <- initUpdates (snowStructs cmem) (snowNextObject cmem) instr
-               let cmem1 = cmem { snowNextObject = next }
-               applyUpdates
-                 (case ptr_upd' of
-                     Nothing -> []
-                     Just up -> [up])
-                 (case obj_upd' of
-                     Nothing -> []
-                     Just up -> [up]) (snowProgram cmem1) cmem1
+    mem2 <- foldlM (\cmem instr -> do
+                       (obj_upd',ptr_upd',next) <- initUpdates (snowStructs cmem) (snowNextObject cmem) instr
+                       let cmem1 = cmem { snowNextObject = next }
+                       applyUpdates
+                         (case ptr_upd' of
+                             Nothing -> []
+                             Just up -> [up])
+                         (case obj_upd' of
+                             Nothing -> []
+                             Just up -> [up]) (snowProgram cmem1) cmem1
            ) mem1 prog
+    return mem2
+    --applyUpdates (Map.toList $ snowPointers mem1) [] prog mem2
   connectLocation mem _ cond loc_from loc_to = do
-    trace ("Connecting "++show loc_from++" with "++show loc_to) $ return ()
+    trace ("Connecting location "++show loc_from++" with "++show loc_to) $ return ()
     let cloc = case Map.lookup loc_from (snowLocations mem) of
           Just l -> l
           Nothing -> error $ "Couldn't find location "++show loc_from --SnowLocation Map.empty Map.empty
@@ -104,14 +106,14 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
         obj_upd = [ (loc_to,obj,assign) | (obj,assign) <- Map.toList $ snowObjects cloc ]
         
         obj_upd' = concat $ fmap (connectObjectUpdate (snowLocationConnections mem1)) obj_upd
-
     applyUpdates [] obj_upd' (snowProgram mem1) mem1
   connectPointer mem _ cond ptr_from ptr_to = do
+    trace ("Connecting pointer "++show ptr_from++" with "++show ptr_to) $ return ()
     let mem1 = mem { snowPointerConnections = Map.insertWith (++) ptr_from [(ptr_to,cond)] (snowPointerConnections mem) }
         ptr_upd = case Map.lookup ptr_from (snowPointers mem1) of
-          Just assign -> (ptr_to,assign)
-        ptr_upd' = connectPointerUpdate (snowLocationConnections mem1) (snowPointerConnections mem1) ptr_upd
-    applyUpdates ptr_upd' [] (snowProgram mem1) mem1
+          Just assign -> connectPointerUpdate (snowLocationConnections mem1) (snowPointerConnections mem1) (ptr_to,assign)
+          Nothing -> []
+    applyUpdates ptr_upd [] (snowProgram mem1) mem1
   debugMem mem _ _ = snowDebug mem
 
 applyUpdates :: (Ord ptr,Ord mloc,Show mloc,Show ptr) => [PointerUpdate ptr] -> [ObjectUpdate mloc ptr] -> [MemoryInstruction mloc ptr] -> SnowMemory mloc ptr -> SMT (SnowMemory mloc ptr)
@@ -212,6 +214,7 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) instr = case instr o
                 Just (obj_p,idx) -> do
                   let ObjAccessor access = ptrIndexGetAccessor structs idx
                   case Map.lookup obj_p all_objs of
+                    Nothing -> error $ "Object "++show obj_p++" not found at location "++show mfrom
                     Just objs -> do
                       mapM_ (\(cond',obj) -> do
                                 let (_,loaded,errs) = access 
@@ -361,6 +364,7 @@ updateObject structs all_ptrs all_objs (loc,new_obj,new_conds) instr = case inst
                                       else return ()
               ) srcs
         return ([],Nothing)
+      Nothing -> error $ "Pointer "++show ptr++" couldn't be found for loading"
     | otherwise -> return ([],Nothing)
   MILoadPtr mfrom ptr_from ptr_to mto
     | mfrom==loc -> do
@@ -447,7 +451,23 @@ listHeader x (y:ys) = let l = (length x)+1
                       in (x++" "++y):(fmap ((replicate l ' ')++) ys)
 
 snowDebug :: (Show ptr,Show mloc) => SnowMemory mloc ptr -> String
-snowDebug mem = unlines $ concat
-                [ snowDebugLocation (show loc) cont
-                | (loc,cont) <- Map.toList (snowLocations mem)
-                ]
+snowDebug mem = unlines $ 
+                (concat
+                 [ snowDebugLocation (show loc) cont
+                 | (loc,cont) <- Map.toList (snowLocations mem)
+                 ])++
+                (listHeader "Pointers:"
+                 [ concat $
+                   listHeader (show ptr++":")
+                   [ show cond ++ " ~> " ++ (case obj of
+                                                Nothing -> "null"
+                                                Just (obj_p,idx) -> show obj_p++show idx)
+                   | (cond,obj) <- assigns ]
+                 | (ptr,assigns) <- Map.toList (snowPointers mem) ])++
+                (listHeader "Pointer connects:"
+                 [ concat $
+                   listHeader (show ptr++":")
+                   [ show cond ++ " ~> " ++ show oth 
+                   | (oth,cond) <- conns ]
+                 | (ptr,conns) <- Map.toList (snowPointerConnections mem)
+                 ])

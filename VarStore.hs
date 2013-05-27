@@ -38,7 +38,7 @@ readVar x store = case Map.lookup x (varStoreVars store) of
                          (rval,nstore) <- case val' of
                            Left y -> readVar y cstore
                            Right y -> return (y,cstore)
-                         varStoreCombine nstore cond val rval
+                         varStoreCombine nstore cond rval val
                          return nstore
                      ) store1 joins
     return (val,store2)
@@ -49,9 +49,9 @@ addJoin x val cond store = case Map.lookup x (varStoreVars store) of
     -> return (store { varStoreVars = Map.insert x 
                                       (Unmerged ann ((val,cond):joins))
                                       (varStoreVars store) })
-  Just (Merged val') -> do
+  Just (Merged merge) -> do
     (rval,nstore) <- case val of
-      Right x -> return (x,store)
-      Left x -> readVar x store
-    varStoreCombine nstore cond rval val'
+      Right val' -> return (val',store)
+      Left x' -> readVar x' store
+    varStoreCombine nstore cond rval merge
     return nstore
