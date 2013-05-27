@@ -24,6 +24,8 @@ type Watchpoint = (String,SMTExpr Bool,[(TypeDesc,SMTExpr (BitVector BVUntyped))
 
 type Guard = (ErrorDesc,SMTExpr Bool)
 
+type Statics ptr = Map (Ptr Instruction) (Either Val ptr)
+
 data VarKind var ptr = Value Val
                      | Pointer ptr
                      | JoinPoint var
@@ -36,14 +38,17 @@ data RealizationEnv var ptr
                    , reActivation :: SMTExpr Bool
                    , reGlobals :: Map (Ptr GlobalVariable) ptr
                    , reArgs :: Map (Ptr Argument) (Either var ptr)
-                   , rePhis :: Map (Ptr BasicBlock) (SMTExpr Bool)
+                   , reStaticInput :: Statics ptr
+                   , reStructs :: Map String [TypeDesc]
                    }
 
 data RealizationState mem var ptr
-  = RealizationState { reVarStore :: VarStore var
-                     , reLocals :: Map (Ptr Instruction) (VarKind var ptr)
+  = RealizationState { reVarStore :: VarStore SMT var (String,TypeDesc) Val
                      , reCurMemLoc :: mem
                      , reNextPtr :: ptr
+                     , reLocals :: Map (Ptr Instruction) (Either Val ptr,String,TypeDesc)
+                     , reInputs :: Map (Ptr Instruction) (Either Val ptr,String,TypeDesc)
+                     , rePhis :: Map (Ptr BasicBlock) (SMTExpr Bool)
                      }
 
 data RealizationOutput mem ptr
@@ -64,7 +69,7 @@ instance Monoid (RealizationOutput mem ptr) where
 
 type Realization mem var ptr = RWST (RealizationEnv var ptr) (RealizationOutput mem ptr) (RealizationState mem var ptr) SMT
 
-data BlockFinalization ptr = Jump (ConditionList (Ptr BasicBlock,Integer))
+data BlockFinalization ptr = Jump (CondList (Ptr BasicBlock,Integer))
                            | Return (Maybe (Either Val ptr))
                            | Call String [Either Val ptr] (Ptr Instruction)
                            deriving (Show)
@@ -86,8 +91,8 @@ reEnvError msg = do
     ++ " " ++ show (Map.keys $ reArgs re)
     ++ " " ++ show (Map.keys $ reGlobals re)
 
-rePutVar :: Ptr Instruction -> VarKind var ptr -> Realization mem var ptr ()
-rePutVar name val = modify (\st -> st { reLocals = Map.insert name val (reLocals st) })
+rePutVar :: Ptr Instruction -> String -> TypeDesc -> Either Val ptr -> Realization mem var ptr ()
+rePutVar instr name td val = modify (\st -> st { reLocals = Map.insert instr (val,name,td) (reLocals st) })
 
 reNewPtr :: Enum ptr => Realization mem var ptr ptr
 reNewPtr = do
@@ -123,6 +128,25 @@ reGetVar (Pointer ptr) = return (Right ptr)
 reGetVar (Value v) = return (Left v)
 reGetVar (JoinPoint i) = fmap Left $ reGetJoin i
   
+reNewVar :: Enum ptr => Ptr Instruction -> Maybe String -> TypeDesc -> Realization mem var ptr (Either Val ptr)
+reNewVar instr name (PointerType tp) = do
+  re <- get
+  let ptr = reNextPtr re
+  put $ re { reNextPtr = succ ptr }
+  return $ Right ptr
+reNewVar instr name tp = do
+  let name' = case name of
+        Nothing -> "input_"++(show instr)
+        Just n -> "input_"++n
+  val <- case tp of
+    IntegerType 1 -> do
+      v <- lift $ varNamed name'
+      return $ ConditionValue v 1
+    IntegerType w -> do
+      v <- lift $ varNamedAnn name' w
+      return $ DirectValue v
+  return $ Left val
+
 argToExpr :: (Enum ptr,Enum mem,Ord var) => Operand -> Realization mem var ptr (Either Val ptr)
 argToExpr expr = case operandDesc expr of
   ODNull -> do
@@ -133,11 +157,23 @@ argToExpr expr = case operandDesc expr of
     reMemInstr (MINull loc tp ptr nloc)
     return $ Right ptr
   ODInt v -> return $ Left $ ConstValue v (bitWidth (operandType expr))
-  ODInstr instr _ _ -> do
+  ODInstr instr _ name -> do
+    let tp = operandType expr
     re <- get
+    rs <- ask
     case Map.lookup instr (reLocals re) of
-      Nothing -> reEnvError $ "Couldn't find local variable "++show instr
-      Just res -> reGetVar res
+      Just (res,_,_) -> return res
+      Nothing -> case Map.lookup instr (reInputs re) of
+        Just (res,_,_) -> return res
+        Nothing -> case Map.lookup instr (reStaticInput rs) of
+          Just res -> return res
+          Nothing -> do
+            res <- reNewVar instr name (operandType expr)
+            re <- get
+            put $ re { reInputs = Map.insert instr (res,case name of
+                                                       Nothing -> show instr
+                                                       Just n -> n,tp) (reInputs re) }
+            return res
   ODGlobal g -> do
     re <- ask
     case Map.lookup g (reGlobals re) of
@@ -182,18 +218,16 @@ realizeInstruction (ITerminator (IRet e)) = do
 realizeInstruction (ITerminator IRetVoid) = return $ Just $ Return Nothing
 realizeInstruction (ITerminator (IBr to)) = do
   re <- get
-  return $ Just $ Jump (CondElse (to,0))
+  return $ Just $ Jump [(constant True,(to,0))]
 realizeInstruction (ITerminator (IBrCond cond ifT ifF)) = do
   cond' <- argToExpr cond
   case cond' of
     Left (ConstCondition cond'')
-      -> return $ Just $ Jump (CondElse 
-                               (if cond''
-                                then ifT
-                                else ifF,0))
-    Left v -> return $ Just $ Jump $
-              CondIf (ifT,0) (valCond v) $
-              CondElse (ifF,0)
+      -> return $ Just $ Jump [(constant True,(if cond''
+                                               then ifT
+                                               else ifF,0))]
+    Left v -> return $ Just $ Jump [(valCond v,(ifT,0))
+                                   ,(not' $ valCond v,(ifF,0))]
 realizeInstruction (ITerminator (ISwitch val def args)) = do
   val' <- argToExpr val
   args' <- mapM (\(cmp_v,to) -> do
@@ -201,23 +235,25 @@ realizeInstruction (ITerminator (ISwitch val def args)) = do
                     return (cmp_v',to)) args
   case val' of
     Left (ConstValue v _) -> case [ to | (Left (ConstValue v' _),to) <- args', v==v' ] of
-      [] -> return $ Just $ Jump (CondElse (def,0))
-      [to] -> return $ Just $ Jump (CondElse (to,0))
+      [] -> return $ Just $ Jump [(constant True,(def,0))]
+      [to] -> return $ Just $ Jump [(constant True,(to,0))]
     Left v -> do
-      jumps <- foldrM (\(Left cmp_v,to) cond -> do
-                          let res = valEq cmp_v v
-                          return (CondIf (to,0) res cond)
-                      ) (CondElse (def,0)) args'
-      return $ Just $ Jump jumps
-realizeInstruction (IAssign trg name expr) = do
+      (jumps,cond') <- foldrM (\(Left cmp_v,to) (lst,cond) -> do
+                                  let res = valEq cmp_v v
+                                  return ((res .&&. cond,(to,0)):lst,(not' res) .&&. cond)
+                              ) ([],constant True) args'
+      let jumps' = (cond',(def,0)):jumps
+      return $ Just $ Jump jumps'
+realizeInstruction instr@(IAssign trg name expr) = do
   let genName v = case name of
         Just name' -> "assign_"++name'
         Nothing -> "assign"++v
+  tp <- asks (\re -> getInstrType (reStructs re) instr)
   rval <- case expr of
     IBinaryOperator op lhs rhs -> do
       Left lhs' <- argToExpr lhs
       Left rhs' <- argToExpr rhs
-      fmap Value $ lift $ valCopy (genName "BinOp") $ valBinOp op lhs' rhs'
+      fmap Left $ lift $ valCopy (genName "BinOp") $ valBinOp op lhs' rhs'
     IICmp op lhs rhs -> case operandType lhs of
       PointerType _ -> do
         Right lhs' <- argToExpr lhs
@@ -230,11 +266,11 @@ realizeInstruction (IAssign trg name expr) = do
                " unsupported (only (in-)equality allowed)"
         loc <- reMemLoc
         reMemInstr (MICompare loc lhs' rhs' rcond)
-        return $ Value $ ConditionValue cond 1
+        return $ Left $ ConditionValue cond 1
       _ -> do
         Left lhs' <- argToExpr lhs
         Left rhs' <- argToExpr rhs
-        fmap Value $ lift $ valCopy (genName "ICmp") $ valIntComp op lhs' rhs'
+        fmap Left $ lift $ valCopy (genName "ICmp") $ valIntComp op lhs' rhs'
     IGetElementPtr ptr idx -> do
       Right ptr' <- argToExpr ptr
       idx' <- mapM (\arg -> do
@@ -247,12 +283,17 @@ realizeInstruction (IAssign trg name expr) = do
       loc <- reMemLoc
       nloc <- reNewMemLoc
       reMemInstr (MIIndex loc idx' ptr' ptr'' nloc)
-      return $ Pointer ptr''
+      return $ Right ptr''
     IPhi args -> do
       nargs <- mapM (\(lbl,arg) -> do
                         arg' <- argToExpr arg
-                        re <- ask
-                        let Just phi_cond = Map.lookup lbl (rePhis re)
+                        re <- get
+                        phi_cond <- case Map.lookup lbl (rePhis re) of
+                          Nothing -> do
+                            phi <- lift $ varNamed "phi"
+                            put $ re { rePhis = Map.insert lbl phi (rePhis re) }
+                            return phi
+                          Just phi -> return phi
                         return (arg',phi_cond)
                     ) args
       case nargs of
@@ -261,8 +302,8 @@ realizeInstruction (IAssign trg name expr) = do
           loc <- reMemLoc
           nloc <- reNewMemLoc
           reMemInstr (MISelect loc [ (cond,ptr') | (Right ptr',cond) <- nargs ] ptr nloc)
-          return (Pointer ptr)
-        _ -> fmap Value $ lift $ valCopy (genName "Phi") $ valSwitch (fmap (\(Left v,c) -> (v,c)) nargs)
+          return (Right ptr)
+        _ -> fmap Left $ lift $ valCopy (genName "Phi") $ valSwitch (fmap (\(Left v,c) -> (v,c)) nargs)
     ILoad arg -> do
       Right ptr <- argToExpr arg
       loc <- reMemLoc
@@ -271,11 +312,11 @@ realizeInstruction (IAssign trg name expr) = do
           ptr2 <- reNewPtr
           nloc <- reNewMemLoc
           reMemInstr (MILoadPtr loc ptr ptr2 nloc)
-          return $ Pointer ptr2
+          return $ Right ptr2
         PointerType tp -> do
           loadRes <- lift $ varNamedAnn (genName "LoadRes") ((typeWidth tp)*8)
           reMemInstr (MILoad loc ptr loadRes)
-          return $ Value $ DirectValue loadRes
+          return $ Left $ DirectValue loadRes
     IBitCast tp_to arg -> do
       Right ptr <- argToExpr arg
       let PointerType tp_from = operandType arg
@@ -283,33 +324,33 @@ realizeInstruction (IAssign trg name expr) = do
       loc <- reMemLoc
       nloc <- reNewMemLoc
       reMemInstr (MICast loc tp_from tp_to ptr ptr' nloc)
-      return $ Pointer ptr'
+      return $ Right ptr'
     ISExt tp arg -> do
       arg' <- argToExpr arg
       case arg' of
-        Left (ConditionValue v w) -> return $ Value $ ConditionValue v (bitWidth (operandType arg))
+        Left (ConditionValue v w) -> return $ Left $ ConditionValue v (bitWidth (operandType arg))
         Left arg'' -> let v = valValue arg''
                           w = bitWidth (operandType arg)
                           d = (bitWidth tp) - w
                           nv = bvconcat (ite (bvslt v (constantAnn (BitVector 0) w::SMTExpr (BitVector BVUntyped)))
                                          (constantAnn (BitVector (-1)) d::SMTExpr (BitVector BVUntyped))
                                          (constantAnn (BitVector 0) (fromIntegral d))) v
-                      in fmap Value $ lift $ valCopy (genName "SExt") $ DirectValue nv
+                      in fmap Left $ lift $ valCopy (genName "SExt") $ DirectValue nv
     ITrunc tp arg -> do
       let w = bitWidth tp
       arg' <- argToExpr arg
       case arg' of
-        Left (ConstValue bv _) -> return $ Value $ ConstValue bv w
-        Left (ConditionValue v _) -> return $ Value $ ConditionValue v w
-        Left arg'' -> fmap Value $ lift $ valCopy (genName "Trunc") $ DirectValue (bvextract' 0 w (valValue arg''))
+        Left (ConstValue bv _) -> return $ Left $ ConstValue bv w
+        Left (ConditionValue v _) -> return $ Left $ ConditionValue v w
+        Left arg'' -> fmap Left $ lift $ valCopy (genName "Trunc") $ DirectValue (bvextract' 0 w (valValue arg''))
     IZExt tp arg -> do
       arg' <- argToExpr arg
       case arg' of
-        Left (ConditionValue v w) -> return $ Value $ ConditionValue v (bitWidth (operandType arg))
+        Left (ConditionValue v w) -> return $ Left $ ConditionValue v (bitWidth (operandType arg))
         Left arg'' -> let v = valValue arg''
                           d = (bitWidth tp) - (bitWidth (operandType arg))
                           nv = bvconcat (constantAnn (BitVector 0) d::SMTExpr (BitVector BVUntyped)) v
-                      in fmap Value $ lift $ valCopy (genName "ZExt") $ DirectValue nv
+                      in fmap Left $ lift $ valCopy (genName "ZExt") $ DirectValue nv
     IAlloca tp sz -> do
       size' <- case sz of
         Nothing -> return (ConstValue 1 32)
@@ -323,7 +364,7 @@ realizeInstruction (IAssign trg name expr) = do
       loc <- reMemLoc
       new_loc <- reNewMemLoc
       reMemInstr (MIAlloc loc tp size'' ptr new_loc)
-      return $ Pointer ptr
+      return $ Right ptr
     ISelect cond ifT ifF -> do
       Left condArg <- argToExpr cond
       ifTArg <- argToExpr ifT
@@ -335,8 +376,8 @@ realizeInstruction (IAssign trg name expr) = do
           loc <- reMemLoc
           nloc <- reNewMemLoc
           reMemInstr (MISelect loc [(cond',ifT'),(not' cond',ifF')] ptr nloc)
-          return $ Pointer ptr
-        (Left ifT',Left ifF') -> fmap Value $ lift $ valCopy (genName "Switch") $ valSwitch [(ifT',cond'),(ifF',not' cond')]
+          return $ Right ptr
+        (Left ifT',Left ifF') -> fmap Left $ lift $ valCopy (genName "Switch") $ valSwitch [(ifT',cond'),(ifF',not' cond')]
     IMalloc (Just tp) sz True -> do
       Left rsz <- argToExpr sz
       let size = case rsz of
@@ -346,9 +387,11 @@ realizeInstruction (IAssign trg name expr) = do
       loc <- reMemLoc
       new_loc <- reNewMemLoc
       reMemInstr (MIAlloc loc tp size ptr new_loc)
-      return (Pointer ptr)
+      return (Right ptr)
     _ -> reEnvError $ "Unimplemented assign instruction: "++show expr
-  rePutVar trg rval
+  rePutVar trg (case name of
+                   Nothing -> show trg
+                   Just n -> n) tp rval
   return Nothing
 realizeInstruction (IStore val to) = do
   Right ptr <- argToExpr to
@@ -437,4 +480,4 @@ intr_watch _ ((Left (ConstValue bv _),_):exprs) = do
 
 intr_nondet width trg [] = do
   v <- lift $ varNamedAnn "nondetVar" width
-  rePutVar trg (Value $ DirectValue v)
+  rePutVar trg "nondetVar" (IntegerType width) (Left $ DirectValue v)

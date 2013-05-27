@@ -77,13 +77,18 @@ getUsedTypes mod = do
   deleteFindUsedTypes pass
   return (all_tps,Map.fromList $ catMaybes structs)
 
-data LoopDesc = LoopDesc (Ptr Loop) [Ptr BasicBlock] [LoopDesc] deriving Show
+data LoopDesc = LoopDesc { loopDescPtr :: Ptr Loop
+                         , loopDescUniquePath :: Bool
+                         , loopDescBlocks :: [Ptr BasicBlock]
+                         , loopDescSubs :: [LoopDesc]
+                         } deriving Show
 
 reifyLoop :: Ptr Loop -> IO LoopDesc
 reifyLoop loop = do
+  backEdges <- loopGetNumBackEdges loop
   blks <- loopGetBlocks loop >>= vectorToList
   subs <- loopGetSubLoops loop >>= vectorToList >>= mapM reifyLoop
-  return $ LoopDesc loop blks subs
+  return $ LoopDesc loop (backEdges==1) blks subs
 
 data APass = forall p. PassC p => APass (IO (Ptr p))
 

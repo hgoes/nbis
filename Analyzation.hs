@@ -4,7 +4,7 @@ import Data.Map as Map hiding (foldl,foldr)
 import Data.Set as Set hiding (foldl,foldr)
 import Prelude hiding (foldl,foldr,concat,all,any,elem)
 import Data.Foldable
-import Data.List as List (mapAccumL,lookup)
+import Data.List as List (mapAccumL,lookup,find)
 import InstrDesc
 import TypeDesc
 import LLVM.FFI.Instruction
@@ -69,6 +69,12 @@ programAsGraph prog = createEdges $ createNodes (Gr.empty,Map.empty) prog
                                          ICall _ _ _ -> case Map.lookup (blk,sblk+1) mp of
                                            Just trg -> Gr.insEdge (node,trg,()) cgr
                                     ) gr gr,mp)
+
+-- | Can there ever only be one connection between two nodes?
+singletonConnection :: Gr.Graph gr => Gr.Node -> Gr.Node -> [[Gr.Node]] -> gr a b -> Bool
+singletonConnection nfrom nto sccs gr = case List.find (elem nfrom) sccs of
+  Nothing -> True
+  Just comp -> isLoopCenter nfrom comp gr || isLoopCenter nto comp gr
 
 isLoopCenter :: Gr.Graph gr => Gr.Node -> [Gr.Node] -> gr a b -> Bool
 isLoopCenter nd comp gr = returnsOnlyTo nd Set.empty

@@ -1,21 +1,22 @@
 module ConditionList where
 
 import Language.SMTLib2
+import Simplifier
 
-data ConditionList a
-  = CondIf a (SMTExpr Bool) (ConditionList a)
-  | CondElse a
-  deriving (Eq)
+type CondList a = [(SMTExpr Bool,a)]
 
-instance Show a => Show (ConditionList a) where
-  show (CondIf x cond rest) = "if "++show cond++" then "++show x++" else ("++show rest++")"
-  show (CondElse x) = show x
+simplifyCondList :: CondList a -> CondList a
+simplifyCondList [] = []
+simplifyCondList ((c,x):xs) = let c' = simplifier c
+                              in (if isFalse c'
+                                  then simplifyCondList xs
+                                  else (c',x):simplifyCondList xs)
 
-accumConditions :: ConditionList a -> [(a,Maybe (SMTExpr Bool))]
-accumConditions = accum' []
+mergeCondList :: Eq a => CondList a -> CondList a -> CondList a
+mergeCondList [] ys = ys
+mergeCondList (x:xs) ys = mergeCondList xs (insert x ys)
   where
-    accum' [] (CondIf x cond rest) = (x,Just cond):accum' [not' cond] rest
-    accum' [] (CondElse x) = [(x,Nothing)]
-    accum' conds (CondIf x cond rest)
-      = (x,Just (app and' (conds++[cond]))):accum' (conds++[not' cond]) rest
-    accum' conds (CondElse x) = [(x,Just (app and' conds))]
+    insert x [] = [x]
+    insert x@(cx,objx) (y@(cy,objy):ys) = if objx==objy
+                                          then (cx .||. cy,objx):ys
+                                          else y:(insert x ys)
