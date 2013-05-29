@@ -89,6 +89,14 @@ reifyInstr tl dl ptr
                 op2 <- getOperand binop 1 >>= reifyOperand
                 return $ IAssign ptr name $ IBinaryOperator opcode op1 op2
             ) (castDown ptr)
+      ,fmap (\alloc -> do
+                isArray <- allocaInstIsArrayAllocation alloc
+                arg <- if isArray
+                       then fmap Just $ allocaInstGetArraySize alloc >>= reifyOperand
+                       else return Nothing
+                tp <- getType ptr >>= reifyType
+                return $ IAssign ptr name $ IAlloca tp arg
+            ) (castDown ptr)
       ,fmap (\call -> do
 #if HS_LLVM_VERSION >= 302
                 isMalloc <- isMallocLikeFn call tl False
