@@ -183,6 +183,11 @@ reifyInstr tl dl ptr
                 tp <- getType zext >>= reifyType
                 return $ IAssign ptr name (IZExt tp op)
             ) (castDown ptr)
+      ,fmap (\sext -> do
+                op <- getOperand (sext::Ptr SExtInst) 0 >>= reifyOperand
+                tp <- getType sext >>= reifyType
+                return $ IAssign ptr name (ISExt tp op)
+            ) (castDown ptr)
       ,fmap (\trunc -> do
                 op <- getOperand (trunc::Ptr TruncInst) 0 >>= reifyOperand
                 tp <- getType trunc >>= reifyType
