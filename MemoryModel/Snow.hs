@@ -67,7 +67,7 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
                                     return (loc { snowObjects = Map.insert next [(constant True,glob)] (snowObjects loc)
                                                 },Map.insert ptr [(constant True,Just (next,[(tp,[])]))] ptrs,succ next)
                                 ) (SnowLocation Map.empty,Map.empty,0) globals
-    trace (unlines $ snowDebugLocation "globals" globs) $ return ()
+    --trace (unlines $ snowDebugLocation "globals" globs) $ return ()
     return $ SnowMemory { snowStructs = structs
                         , snowProgram = []
                         , snowLocations = Map.empty
@@ -98,7 +98,7 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
     --return mem2
     applyUpdates (Map.toList $ snowPointers mem1) [] prog mem2
   connectLocation mem _ cond loc_from loc_to = do
-    trace ("Connecting location "++show loc_from++" with "++show loc_to) $ return ()
+    --trace ("Connecting location "++show loc_from++" with "++show loc_to) $ return ()
     let cloc = case Map.lookup loc_from (snowLocations mem) of
           Just l -> l
           Nothing -> error $ "Couldn't find location "++show loc_from --SnowLocation Map.empty Map.empty
@@ -108,12 +108,12 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
         obj_upd' = concat $ fmap (connectObjectUpdate (snowLocationConnections mem1)) obj_upd
     applyUpdates [] obj_upd' (snowProgram mem1) mem1
   connectPointer mem _ cond ptr_from ptr_to = do
-    trace ("Connecting pointer "++show ptr_from++" with "++show ptr_to) $ return ()
+    --trace ("Connecting pointer "++show ptr_from++" with "++show ptr_to) $ return ()
     let mem1 = mem { snowPointerConnections = Map.insertWith (++) ptr_from [(ptr_to,cond)] (snowPointerConnections mem) }
         ptr_upd = case Map.lookup ptr_from (snowPointers mem1) of
           Just assign -> connectPointerUpdate (snowLocationConnections mem1) (snowPointerConnections mem1) (ptr_to,assign)
           Nothing -> []
-    trace ("Connections: "++show (snowPointerConnections mem1)) (return ())
+    --trace ("Connections: "++show (snowPointerConnections mem1)) (return ())
     applyUpdates ptr_upd [] (snowProgram mem1) mem1
   debugMem mem _ _ = snowDebug mem
 
@@ -267,10 +267,11 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) instr = case instr o
                                                            ) obj
                               ])
                  | (cond,Just (obj_p,idx)) <- new_conds,
-                   let ObjAccessor access = ptrIndexGetAccessor structs idx
-                       objs' = case Map.lookup obj_p all_objs of
-                         Just x -> x
-                         Nothing -> error $ "Can't find object "++show obj_p++" in "++show all_objs++" @"++show mfrom
+                   let ObjAccessor access = ptrIndexGetAccessor structs idx,
+                   objs' <- case Map.lookup obj_p all_objs of
+                     Just x -> [x]
+                     --Nothing -> error $ "Can't find object "++show obj_p++" in "++show all_objs++" @"++show mfrom
+                     Nothing -> [] -- TODO: Is this sound?
                  ],Nothing)
     | otherwise -> return ([],Nothing)
   MIStorePtr mfrom ptr_from ptr_to mto

@@ -333,15 +333,15 @@ mergeOutputs :: (Gr.DynGraph gr,MemoryModel m mloc ptr,Show ptr) => SMTExpr Bool
                 -> Gr.Node
                 -> Unrollment gr m mloc ptr ()
 mergeOutputs cond new_outs node = do
-  trace ("Merge "++show (Map.toList new_outs)++" at "++show node++" with condition "++show cond) (return ())
+  --trace ("Merge "++show (Map.toList new_outs)++" at "++show node++" with condition "++show cond) (return ())
   gr <- get
   let (Just (inc,_,nd,outg),gr') = Gr.match node (nodeGraph gr)
   case nodeType nd of
     RealizedBlock { nodeInput = inp
                   , nodeOutput = outp
                   } -> do
-      trace ("Merge into inputs "++show (Map.toList inp)) (return ())
-      trace ("Merge into outputs "++show (Map.toList $ outputDynamics outp)) (return ())
+      --trace ("Merge into inputs "++show (Map.toList inp)) (return ())
+      --trace ("Merge into outputs "++show (Map.toList $ outputDynamics outp)) (return ())
       mapM_ (\pair -> case pair of 
                 (Right ps_out,Right p_in) -> do
                   gr1 <- get
@@ -349,7 +349,7 @@ mergeOutputs cond new_outs node = do
                   modify $ \gr -> gr { ptrStore = nstore }
                   gr2 <- get
                   (pr,_) <- getProxies
-                  trace ("Merge into "++show p_in) (return ())
+                  --trace ("Merge into "++show p_in) (return ())
                   nmem <- lift $ connectPointer (globalMemory gr2) pr cond rout p_in
                   put $ gr2 { globalMemory = nmem }
                 (Left vout,Left vin) -> do
@@ -449,6 +449,7 @@ makeNode read_from from nid = do
                 _ -> Output Map.empty [] Map.empty
               Nothing -> Output Map.empty [] Map.empty
           (outp_cur,_) = adjustLoopStack (funDescrLoops fun_descr) blk outp_prev
+      liftIO $ putStrLn $ "Creating node for "++show name
       act <- lift $ varNamed (case name of
                                  Nothing -> "act_"++fun++"_"++show blk++"_"++show sblk
                                  Just rname -> "act_"++rname++"_"++show sblk)
@@ -473,10 +474,10 @@ makeNode read_from from nid = do
       put $ gr { nextPointer = reNextPtr nst
                , varStore = reVarStore nst }
       let output_vars = makeStatic (Map.union (reLocals nst) (reInputs nst)) (outp_cur { outputDynamics = Map.empty })
-      trace ("Node "++show new_gr_id) (return ())
-      trace ("  Input vars: "++show (Map.toList $ reInputs nst)) (return ())
-      trace ("  Static vars: "++show (Map.toList $ allStatics output_vars)) (return ())
-      trace ("  Output vars: "++show (outputDynamics output_vars)) (return ())
+      --trace ("Node "++show new_gr_id) (return ())
+      --trace ("  Input vars: "++show (Map.toList $ reInputs nst)) (return ())
+      --trace ("  Static vars: "++show (Map.toList $ allStatics output_vars)) (return ())
+      --trace ("  Output vars: "++show (outputDynamics output_vars)) (return ())
       return (RealizedBlock { nodeFunctionNode = ffid
                             , nodeBlock = blk
                             , nodeBlockName = name
@@ -498,8 +499,8 @@ makeNode read_from from nid = do
                                      , nodeType = node_type })
                     (nodeGraph ngr)
   nmem <- lift $ addProgram (globalMemory ngr) act mloc_in prog
-  (p1,p2) <- getProxies
-  trace (debugMem nmem p1 p2) (return ())
+  --(p1,p2) <- getProxies
+  --trace (debugMem nmem p1 p2) (return ())
   put $ ngr { nodeGraph = node_graph'
             , nextLocation = succ mloc_out
             , globalMemory = nmem
@@ -570,7 +571,7 @@ connectNodes from read_from trans to = do
             RealizedStart { nodeStartName = fname } = nodeType fnd
             fun_descr = (allFunctions gr)!fname
             (_,demoted) = adjustLoopStack (funDescrLoops fun_descr) blk outp
-        trace ("Demoted: "++show demoted) (return ())
+        --trace ("Demoted: "++show demoted) (return ())
         outp' <- makeDynamic cond demoted outp
         mergeOutputs cond (outputDynamics outp') to
       _ -> return ()
@@ -701,11 +702,11 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m mloc ptr a)
                                           , funDescrLoops = loops
                                           }
                      ) funs
-  {-liftIO $ mapM_ (\(fname,f) -> do
-                     writeFile ("program-"++fname++".dot") $ Gr.graphviz' (Gr.nmap (\((ptr,name,i,_),_,_) -> (GrStr $ case name of
-                                                                                                                 Nothing -> show ptr
-                                                                                                                 Just name' -> name',i)) (funDescrGraph f))
-                 ) (Map.toList allfuns)-}
+  liftIO $ mapM_ (\(fname,f) -> do
+                     writeFile ("program-"++fname++".dot") $ Gr.graphviz' (Gr.nmap (\(ptr,name,i,_) -> (GrStr $ case name of
+                                                                                                           Nothing -> show ptr
+                                                                                                           Just name' -> name',i)) (funDescrGraph f))
+                 ) (Map.toList allfuns)
   liftIO $ putStrLn $ unlines $ concat $
     fmap (\(fname,FunctionDescr { funDescrArgs = sig
                                 , funDescrReturnType = rtp
@@ -714,7 +715,9 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m mloc ptr a)
                                 , funDescrRealizationOrder = order
                                 , funDescrLoops = loops })
           -> ["SCC "++fname++": "++show scc
-             ,"ORDER "++show order
+             ,"ORDER "++show (fmap (\(blk,sblk) -> case List.find (\(blk',_,_) -> blk==blk') blks of
+                                                        Just (_,Just name,_) -> name
+                                   ) order)
              ,"LOOPS "++show loops]
          ) (Map.toList allfuns)
   let ((cptr,prog),globs') = mapAccumL (\(ptr',prog') (tp,cont) 
