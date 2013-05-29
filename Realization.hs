@@ -422,6 +422,8 @@ intrinsics "llvm.memcpy.p0i8.p0i8.i64" = Just intr_memcpy
 intrinsics "llvm.memcpy.p0i8.p0i8.i32" = Just intr_memcpy
 intrinsics "llvm.memset.p0i8.i32" = Just intr_memset
 intrinsics "llvm.memset.p0i8.i64" = Just intr_memset
+intrinsics "llvm.stacksave" = Just intr_stacksave
+intrinsics "llvm.stackrestore" = Just intr_stackrestore
 intrinsics "nbis_restrict" = Just intr_restrict
 intrinsics "nbis_assert" = Just intr_assert
 intrinsics "nbis_nondet_i64" = Just (intr_nondet 64)
@@ -479,3 +481,6 @@ intr_watch _ ((Left (ConstValue bv _),_):exprs) = do
 intr_nondet width trg [] = do
   v <- lift $ varNamedAnn "nondetVar" width
   rePutVar trg "nondetVar" (IntegerType width) (Left $ DirectValue v)
+
+intr_stacksave _ _ = return ()
+intr_stackrestore _ _ = return ()

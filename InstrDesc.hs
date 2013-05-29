@@ -94,7 +94,7 @@ reifyInstr tl dl ptr
                 arg <- if isArray
                        then fmap Just $ allocaInstGetArraySize alloc >>= reifyOperand
                        else return Nothing
-                tp <- getType ptr >>= reifyType
+                PointerType tp <- getType ptr >>= reifyType
                 return $ IAssign ptr name $ IAlloca tp arg
             ) (castDown ptr)
       ,fmap (\call -> do
