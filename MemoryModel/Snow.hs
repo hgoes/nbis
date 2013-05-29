@@ -95,8 +95,8 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
                              Nothing -> []
                              Just up -> [up]) (snowProgram cmem1) cmem1
            ) mem1 prog
-    return mem2
-    --applyUpdates (Map.toList $ snowPointers mem1) [] prog mem2
+    --return mem2
+    applyUpdates (Map.toList $ snowPointers mem1) [] prog mem2
   connectLocation mem _ cond loc_from loc_to = do
     trace ("Connecting location "++show loc_from++" with "++show loc_to) $ return ()
     let cloc = case Map.lookup loc_from (snowLocations mem) of
@@ -113,23 +113,26 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
         ptr_upd = case Map.lookup ptr_from (snowPointers mem1) of
           Just assign -> connectPointerUpdate (snowLocationConnections mem1) (snowPointerConnections mem1) (ptr_to,assign)
           Nothing -> []
+    trace ("Connections: "++show (snowPointerConnections mem1)) (return ())
     applyUpdates ptr_upd [] (snowProgram mem1) mem1
   debugMem mem _ _ = snowDebug mem
 
 applyUpdates :: (Ord ptr,Ord mloc,Show mloc,Show ptr) => [PointerUpdate ptr] -> [ObjectUpdate mloc ptr] -> [MemoryInstruction mloc ptr] -> SnowMemory mloc ptr -> SMT (SnowMemory mloc ptr)
 applyUpdates [] [] _ mem = return mem
 applyUpdates ptr_upds obj_upds instrs mem = do
-  trace (unlines $ listHeader "Pointer updates: " (fmap show ptr_upds)) (return ())
-  trace (unlines $ listHeader "Object updates: " (fmap show obj_upds)) (return ())
+  let ptr_upds' = fmap (\(ptr,upd) -> (ptr,simplifyCondList upd)) ptr_upds
+      obj_upds' = fmap (\(loc,obj_p,upd) -> (loc,obj_p,simplifyCondList upd)) obj_upds
+  trace (unlines $ listHeader "Pointer updates: " (fmap show ptr_upds')) (return ())
+  trace (unlines $ listHeader "Object updates: " (fmap show obj_upds')) (return ())
   let mem1 = foldl (\cmem (ptr,assign)
                     -> cmem { snowPointers = Map.insertWith mergeCondList ptr assign (snowPointers cmem)
-                            }) mem ptr_upds
+                            }) mem ptr_upds'
       mem2 = foldl (\cmem (loc,obj_p,assign)
                      -> cmem { snowLocations = Map.insertWith mappend loc
                                                (SnowLocation { snowObjects = Map.singleton obj_p assign
                                                              }) (snowLocations cmem)
-                             }) mem1 obj_upds
-  applyUpdates' ptr_upds obj_upds [] instrs mem2
+                             }) mem1 obj_upds'
+  applyUpdates' ptr_upds' obj_upds' [] instrs mem2
   --mem1 <- foldlM (\cmem obj_upd -> applyObjectUpdate obj_upd cmem) mem (concat $ fmap (connectObjectUpdate (snowLocationConnections mem)) obj_upds)
   --mem2 <- foldlM (\cmem ptr_upd -> applyPointerUpdate ptr_upd cmem) mem1 (concat $ fmap (connectPointerUpdate (snowLocationConnections mem1) (snowPointerConnections mem1)) ptr_upds)
   --return mem2
@@ -214,7 +217,8 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) instr = case instr o
                 Just (obj_p,idx) -> do
                   let ObjAccessor access = ptrIndexGetAccessor structs idx
                   case Map.lookup obj_p all_objs of
-                    Nothing -> error $ "Object "++show obj_p++" not found at location "++show mfrom
+                    --Nothing -> error $ "Object "++show obj_p++" not found at location "++show mfrom
+                    Nothing -> return () -- TODO: Is this sound?
                     Just objs -> do
                       mapM_ (\(cond',obj) -> do
                                 let (_,loaded,errs) = access 
@@ -248,6 +252,7 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) instr = case instr o
                                                       -> [(and' `app` ([cond,cond',c]),d)
                                                          | (c,d) <- dests ]
                                            ) objs'
+                                 Nothing -> [] -- TODO: Is this sound?
                       ) new_conds
       case concat $ concat nptr of
         [] -> return ([],Nothing)
@@ -326,7 +331,7 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) instr = case instr o
     | ptr_from==new_ptr 
       -> return ([],Just (ptr_to,[ case src of
                                       Nothing -> (c,Nothing)
-                                      Just (obj_p,idx) -> (c,Just (obj_p,ptrIndexCast structs tp_to idx))
+                                      Just (obj_p,idx) -> trace ("Indexing "++show obj_p++" with "++show idx) (c,Just (obj_p,ptrIndexCast structs tp_to idx))
                                  | (c,src) <- new_conds ]))
     | otherwise -> return ([],Nothing)
   MIIndex mfrom idx ptr_from ptr_to mto
@@ -364,6 +369,7 @@ updateObject structs all_ptrs all_objs (loc,new_obj,new_conds) instr = case inst
                                       else return ()
               ) srcs
         return ([],Nothing)
+      --Nothing -> return ([],Nothing) -- TODO: Is this sound?
       Nothing -> error $ "Pointer "++show ptr++" couldn't be found for loading"
     | otherwise -> return ([],Nothing)
   MILoadPtr mfrom ptr_from ptr_to mto

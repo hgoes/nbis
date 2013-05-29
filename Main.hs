@@ -158,8 +158,8 @@ data Transition ptr = TBegin
                     | TReturn (Maybe (Either Val ptr))
                     | TDeliver (Ptr Instruction) Gr.Node
 
-data Output ptr = Output { outputStatic :: Map (Ptr Instruction) (Val,String,TypeDesc)
-                         , outputLoopStatics :: [(LoopDesc,Map (Ptr Instruction) (Val,String,TypeDesc))]
+data Output ptr = Output { outputStatic :: Map (Ptr Instruction) (Either Val ptr,String,TypeDesc)
+                         , outputLoopStatics :: [(LoopDesc,Map (Ptr Instruction) (Either Val ptr,String,TypeDesc))]
                          , outputDynamics :: Map (Ptr Instruction) (Either VarValue VarPointer)
                          } deriving (Show)
 
@@ -262,14 +262,14 @@ updateDelayed gr from nd delayed
                               }:qs,dels')
              else (qs,del:dels)
 
-allStatics :: Output ptr -> Map (Ptr Instruction) Val
+allStatics :: Output ptr -> Map (Ptr Instruction) (Either Val ptr)
 allStatics outp = fmap (\(v,_,_) -> v) $ Map.unions $ 
                   (outputStatic outp):(fmap snd $ outputLoopStatics outp)
 
 -- | Remove all static variables which will no longer be static in the new block.
 --   Creates empty mappings for all new loops entered by the new block.
 --   Also it returns the variables it removes.
-adjustLoopStack :: [LoopDesc] -> Ptr BasicBlock -> Output ptr -> (Output ptr,Map (Ptr Instruction) (Val,String,TypeDesc))
+adjustLoopStack :: [LoopDesc] -> Ptr BasicBlock -> Output ptr -> (Output ptr,Map (Ptr Instruction) (Either Val ptr,String,TypeDesc))
 adjustLoopStack all_loops blk outp = case outputLoopStatics outp of
   [] -> (outp { outputLoopStatics = fmap (\li -> (li,Map.empty)) (findLoopForBlock blk all_loops) },Map.empty)
   (li,mp):lis -> if blk `elem` (loopDescBlocks li)
@@ -278,7 +278,7 @@ adjustLoopStack all_loops blk outp = case outputLoopStatics outp of
                       in (res,Map.union mp mp')
 
 -- | Add new dynamic output variables into an output mapping
-makeDynamic :: Enum ptr => SMTExpr Bool
+makeDynamic :: (Enum ptr,Show ptr) => SMTExpr Bool
                -> Map (Ptr Instruction) (Either Val ptr,String,TypeDesc)
                -> Output ptr
                -> Unrollment gr m mloc ptr (Output ptr)
@@ -295,6 +295,7 @@ makeDynamic cond mp outp
                    Right ptr -> do
                      gr <- get
                      let (entr,store1) = newEntry (nextPointer gr) (ptrStore gr)
+                     trace ("Add pointer "++show ptr++" to join "++show entr) (return ())
                      store2 <- addJoin entr (Right ptr) cond store1
                      modify $ \gr -> gr { ptrStore = store2
                                         , nextPointer = succ $ nextPointer gr }
@@ -307,24 +308,25 @@ makeDynamic cond mp outp
                      return $ Left v2
                    (Right ptr,Right ptrs) -> do
                      gr <- get
+                     trace ("Add pointer "++show ptr++" to join "++show ptrs) (return ())
                      store1 <- addJoin ptrs (Right ptr) cond (ptrStore gr)
                      modify $ \gr -> gr { ptrStore = store1 }
                      return (Right ptrs)
                return (coutp { outputDynamics = Map.insert instr nentr (outputDynamics coutp) })
            ) outp (Map.toList mp)
 
-makeStatic :: Map (Ptr Instruction) (Val,String,TypeDesc) -> Output ptr -> Output ptr
+makeStatic :: Map (Ptr Instruction) (Either Val ptr,String,TypeDesc) -> Output ptr -> Output ptr
 makeStatic mp outp = case outputLoopStatics outp of
   [] -> outp { outputStatic = Map.union mp (outputStatic outp) }
   (li,mp'):lis -> outp { outputLoopStatics = (li,Map.union mp mp'):lis }
 
-addOutputs :: Enum ptr => Map (Ptr Instruction) (Either Val ptr,String,TypeDesc) -> Output ptr -> Unrollment gr m mloc ptr (Output ptr)
+{-addOutputs :: (Enum ptr,Show ptr) => Map (Ptr Instruction) (Either Val ptr,String,TypeDesc) -> Output ptr -> Unrollment gr m mloc ptr (Output ptr)
 addOutputs vals outp = do
   let (stat,dyn) = Map.mapEither (\(entr,name,tp) -> case entr of
                                      Left val -> Left (val,name,tp)
                                      Right ptr -> Right (Right ptr,name,tp)) vals
       outp1 = makeStatic stat outp
-  makeDynamic (constant True) dyn outp1
+  makeDynamic (constant True) dyn outp1-}
 
 mergeOutputs :: (Gr.DynGraph gr,MemoryModel m mloc ptr,Show ptr) => SMTExpr Bool
                 -> Map (Ptr Instruction) (Either VarValue VarPointer)
@@ -470,7 +472,7 @@ makeNode read_from from nid = do
       (fin,nst,outp) <- lift $ runRWST (realizeInstructions instrs) env st
       put $ gr { nextPointer = reNextPtr nst
                , varStore = reVarStore nst }
-      output_vars <- addOutputs (Map.union (reLocals nst) (reInputs nst)) (outp_cur { outputDynamics = Map.empty })
+      let output_vars = makeStatic (Map.union (reLocals nst) (reInputs nst)) (outp_cur { outputDynamics = Map.empty })
       trace ("Node "++show new_gr_id) (return ())
       trace ("  Input vars: "++show (Map.toList $ reInputs nst)) (return ())
       trace ("  Static vars: "++show (Map.toList $ allStatics output_vars)) (return ())
@@ -557,13 +559,6 @@ connectNodes from read_from trans to = do
   lift $ assert $ nodeActivationProxy nd_to .==. (cond .||. nproxy)
   put $ gr { nodeGraph = (in_to,to,nd_to { nodeActivationProxy = nproxy },out_to) Gr.& gr1 }
   
-  gr <- get
-  (_,pr) <- getProxies
-  mem' <- lift $ connectLocation (globalMemory gr) pr cond
-          (nodeOutputLoc nd_from)
-          (nodeInputLoc nd_to)
-  put $ gr { globalMemory = mem' }
-  
   case nodeType nd_read_from of
     RealizedStart {} -> case nodeType nd_to of
       RealizedBlock {} -> return ()
@@ -576,9 +571,17 @@ connectNodes from read_from trans to = do
             fun_descr = (allFunctions gr)!fname
             (_,demoted) = adjustLoopStack (funDescrLoops fun_descr) blk outp
         trace ("Demoted: "++show demoted) (return ())
-        outp' <- makeDynamic cond (fmap (\(val,name,tp) -> (Left val,name,tp)) demoted) outp
+        outp' <- makeDynamic cond demoted outp
         mergeOutputs cond (outputDynamics outp') to
       _ -> return ()
+  
+  gr <- get
+  (_,pr) <- getProxies
+  mem' <- lift $ connectLocation (globalMemory gr) pr cond
+          (nodeOutputLoc nd_from)
+          (nodeInputLoc nd_to)
+  put $ gr { globalMemory = mem' }
+  
   {-let (ptr_eqs,val_eqs) = foldr (\pair (ptr_eqs,val_eqs) -> case pair of
                                     (Right p1,Right p2) -> ((p1,p2):ptr_eqs,val_eqs)
                                     (Left v1,Left v2) -> (ptr_eqs,(v1,v2):val_eqs)

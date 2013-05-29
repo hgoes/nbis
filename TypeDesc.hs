@@ -122,6 +122,7 @@ indexType structs (PointerType tp) (_:idx) = indexType' tp idx
         in indexType' (List.genericIndex tps i) is
     indexType' (ArrayType _ tp) (_:is)
       = indexType' tp is
+indexType _ tp idx = error $ "Can't index type "++show tp
 
 typeWidth :: TypeDesc -> Integer
 typeWidth (IntegerType w)

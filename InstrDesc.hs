@@ -212,11 +212,11 @@ getInstrType structs (IAssign _ _ desc) = case desc of
   IBinaryOperator _ l _ -> operandType l
   IFCmp _ _ _ -> IntegerType 1
   IICmp _ _ _ -> IntegerType 1
-  IGetElementPtr ptr idx -> let PointerType tp = operandType ptr
-                            in indexType structs tp [ case operandDesc i of
-                                                         ODInt x -> Left x
-                                                         _ -> Right ()
-                                                    | i <- idx ]
+  IGetElementPtr ptr idx -> indexType structs (operandType ptr)
+                            [ case operandDesc i of
+                                 ODInt x -> Left x
+                                 _ -> Right ()
+                            | i <- idx ]
   IPhi ((_,op):_) -> operandType op
   ISelect _ arg _ -> operandType arg
   ILoad ptr -> let PointerType tp = operandType ptr

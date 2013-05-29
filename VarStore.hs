@@ -5,6 +5,7 @@ import Language.SMTLib2
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Foldable (foldlM)
+import Debug.Trace
 
 data VarStore m i a v
   = VarStore { varStoreNext :: i
@@ -15,6 +16,7 @@ data VarStore m i a v
 
 data VarState i a v = Unmerged a [(Either i v,SMTExpr Bool)]
                     | Merged v
+                    deriving (Show)
 
 newStore :: (Integral i) => (SMTExpr Bool -> v -> v -> m ()) -> (a -> m v) -> VarStore m i a v
 newStore f g = VarStore { varStoreNext = 0
@@ -55,3 +57,6 @@ addJoin x val cond store = case Map.lookup x (varStoreVars store) of
       Left x' -> readVar x' store
     varStoreCombine nstore cond rval merge
     return nstore
+
+varStoreDebug :: (Show i,Show a,Show v) => VarStore m i a v -> String
+varStoreDebug store = show $ varStoreVars store

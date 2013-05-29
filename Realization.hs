@@ -36,7 +36,7 @@ data RealizationEnv var ptr
                    , reActivation :: SMTExpr Bool
                    , reGlobals :: Map (Ptr GlobalVariable) ptr
                    , reArgs :: Map (Ptr Argument) (Either var ptr)
-                   , reStaticInput :: Map (Ptr Instruction) Val
+                   , reStaticInput :: Map (Ptr Instruction) (Either Val ptr)
                    , reStructs :: Map String [TypeDesc]
                    }
 
@@ -118,7 +118,7 @@ reGetJoin :: Ord var => var -> Realization mem var ptr Val
 reGetJoin i = do
   rs <- get
   (val,nstore) <- lift $ readVar i (reVarStore rs)
-  put $ rs { reVarStore = nstore }
+  modify $ \rs -> rs { reVarStore = nstore }
   return val
   
 reGetVar :: Ord var => VarKind var ptr -> Realization mem var ptr (Either Val ptr)
@@ -164,7 +164,7 @@ argToExpr expr = case operandDesc expr of
       Nothing -> case Map.lookup instr (reInputs re) of
         Just (res,_,_) -> return res
         Nothing -> case Map.lookup instr (reStaticInput rs) of
-          Just res -> return (Left res)
+          Just res -> return res
           Nothing -> do
             res <- reNewVar instr name (operandType expr)
             re <- get
