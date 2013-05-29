@@ -45,6 +45,7 @@ import qualified Data.Graph.Inductive as Gr
 import Control.Monad.State hiding (mapM,mapM_,sequence)
 import Control.Monad.RWS (runRWST)
 import Data.Proxy
+import Data.Ord
 
 import LLVM.FFI.BasicBlock
 import LLVM.FFI.Value
@@ -147,6 +148,7 @@ data DelayedReturn = DelayedReturn { callingNode :: Gr.Node
                                    } deriving Show
 
 data QueueEntry ptr = QueueEntry { queuedNode :: NodeId
+                                 , queueLevel :: Integer
                                  , incomingNode :: Gr.Node
                                  , incomingReadNode :: Gr.Node
                                  , incomingEdge :: Transition ptr
@@ -187,24 +189,31 @@ newInput name (PointerType tp) = do
   return $ Right ptr
 newInput name tp = fmap Left $ newJoinPoint name tp
 
-nodeSuccessors :: Gr.Graph gr => UnrollGraph gr m mloc ptr -> Gr.Node -> [QueueEntry ptr]
-nodeSuccessors gr nd = case Gr.lab (nodeGraph gr) nd of
+nodeSuccessors :: Gr.Graph gr => UnrollGraph gr m mloc ptr -> Gr.Node -> Integer -> [QueueEntry ptr]
+nodeSuccessors gr nd lvl = case Gr.lab (nodeGraph gr) nd of
   Nothing -> error $ "nbis internal error: nodeSuccessors called with unknown node "++show nd++" "++show (Gr.nodes $ nodeGraph gr)
   Just st -> case nodeType st of
     RealizedStart fun _ _
       -> let blks = funDescrBlocks $ (allFunctions gr)!fun
              (start_blk,_,_) = head blks
-         in [QueueEntry { queuedNode = IdBlock fun start_blk 0 
+         in [QueueEntry { queuedNode = IdBlock fun start_blk 0
+                        , queueLevel = 0
                         , incomingNode = nd
                         , incomingReadNode = nd
                         , incomingEdge = TBegin }]
     RealizedEnd fun ret -> []
     RealizedBlock { nodeFunctionNode = fnode
-                  , nodeFinalization = fin 
+                  , nodeFinalization = fin
+                  , nodeBlock = prev_blk
+                  , nodeSubblock = prev_sblk
                   } -> case fin of
       Jump trgs -> let Just fun_node = Gr.lab (nodeGraph gr) fnode
                        fun_name = nodeStartName $ nodeType fun_node
+                       order = funDescrRealizationOrder $ (allFunctions gr)!fun_name
                    in [ QueueEntry { queuedNode = IdBlock fun_name blk sblk
+                                   , queueLevel = case compareWithOrder order (prev_blk,prev_sblk) (blk,sblk) of
+                                     GT -> lvl
+                                     _ -> lvl+1
                                    , incomingNode = nd
                                    , incomingReadNode = nd
                                    , incomingEdge = TJump cond
@@ -213,10 +222,12 @@ nodeSuccessors gr nd = case Gr.lab (nodeGraph gr) nd of
       Return ret -> let Just fun_node = Gr.lab (nodeGraph gr) fnode
                         fun_name = nodeStartName $ nodeType fun_node
                     in [ QueueEntry { queuedNode = IdEnd fun_name
+                                    , queueLevel = 0
                                     , incomingNode = nd
                                     , incomingReadNode = nd
                                     , incomingEdge = TReturn ret } ]
       Call fname args rname -> [ QueueEntry { queuedNode = IdStart fname
+                                            , queueLevel = 0
                                             , incomingNode = nd
                                             , incomingReadNode = nd
                                             , incomingEdge = TCall args
@@ -256,6 +267,7 @@ updateDelayed gr from nd delayed
                                              (callingFunction del)
                                              (callingBlock del)
                                              (callingSubblock del)
+                              , queueLevel = 0
                               , incomingNode = nd
                               , incomingReadNode = callingNode del
                               , incomingEdge = TDeliver (callReturnsTo del) (callingNode del)
@@ -652,7 +664,7 @@ incrementGraph = do
   -- Update delayed nodes
   gr <- get
   let (qs1,ndl) = updateDelayed gr (incomingNode entr) nd (delayedNodes gr)
-      qs2 = if new then nodeSuccessors gr nd
+      qs2 = if new then nodeSuccessors gr nd (queueLevel entr)
             else []
   put $ gr { delayedNodes = ndl }
   mapM_ queueNode qs1
@@ -702,7 +714,7 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m mloc ptr a)
                                           , funDescrLoops = loops
                                           }
                      ) funs
-  liftIO $ mapM_ (\(fname,f) -> do
+  {-liftIO $ mapM_ (\(fname,f) -> do
                      writeFile ("program-"++fname++".dot") $ Gr.graphviz' (Gr.nmap (\(ptr,name,i,_) -> (GrStr $ case name of
                                                                                                            Nothing -> show ptr
                                                                                                            Just name' -> name',i)) (funDescrGraph f))
@@ -719,7 +731,7 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m mloc ptr a)
                                                         Just (_,Just name,_) -> name
                                    ) order)
              ,"LOOPS "++show loops]
-         ) (Map.toList allfuns)
+         ) (Map.toList allfuns)-}
   let ((cptr,prog),globs') = mapAccumL (\(ptr',prog') (tp,cont) 
                                         -> ((succ ptr',(ptr',tp,cont):prog'),ptr')
                                        ) (0,[]) globs
@@ -758,7 +770,7 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m mloc ptr a)
                  liftIO $ putStrLn $ "nd_start="++show nd_start
                  modify $ \gr -> gr { startNode = nd_start }
                  gr' <- get
-                 mapM_ queueNode (nodeSuccessors gr' nd_start)
+                 mapM_ queueNode (nodeSuccessors gr' nd_start 0)
                  f) gr0
 
 renderNodeGraph :: (Gr.Graph gr) => UnrollGraph gr m mloc ptr -> String
@@ -928,15 +940,30 @@ nodeIdFunction (IdStart f) = f
 nodeIdFunction (IdEnd f) = f
 nodeIdFunction (IdBlock { idFunction = f }) = f
 
-insertWithOrder :: Eq b => (a -> b) -> [b] -> a -> [a] -> [a]
-insertWithOrder f order el [] = [el]
-insertWithOrder f order el (x:xs) = updateOrder' order
+insertWithOrder :: Eq b => (a -> a -> Ordering) -> (a -> b) -> [b] -> a -> [a] -> [a]
+insertWithOrder cmp f order el [] = [el]
+insertWithOrder cmp f order el (x:xs) = case cmp el x of
+  LT -> el:x:xs
+  GT -> x:insertWithOrder cmp f order el xs
+  EQ -> updateOrder' order
   where
-    updateOrder' [] = x:insertWithOrder f order el xs
+    updateOrder' [] = x:insertWithOrder cmp f order el xs
     updateOrder' (y:ys)
       | y==f el    = el:x:xs
-      | y==f x     = x:insertWithOrder f (y:ys) el xs
+      | y==f x     = x:insertWithOrder cmp f (y:ys) el xs
       | otherwise = updateOrder' ys
+
+compareWithOrder :: Eq a => [a] -> a -> a -> Ordering
+compareWithOrder order x y = if x==y
+                             then EQ
+                             else getOrder' order
+  where
+    getOrder' [] = error "Elements not in order"
+    getOrder' (c:cs) = if c==x
+                       then GT
+                       else (if c==y
+                             then LT
+                             else getOrder' cs)
 
 queueNode :: QueueEntry ptr -> Unrollment gr m mloc ptr ()
 queueNode entr = do
@@ -958,11 +985,12 @@ queueNode entr = do
     insert'' ord loop_ptr [] = [(loop_ptr,[entr])]
     insert'' ord loop_ptr ((loop_ptr',entrs):qs)
       = if loop_ptr==loop_ptr'
-        then (loop_ptr',insertWithOrder (\e -> case queuedNode e of
-                                            IdBlock { idBlock = blk
-                                                    , idSubblock = sblk
-                                                    } -> (blk,sblk)
-                                            _ -> (nullPtr,0)) ord entr entrs):qs
+        then (loop_ptr',insertWithOrder (comparing queueLevel)
+                        (\e -> case queuedNode e of
+                            IdBlock { idBlock = blk
+                                    , idSubblock = sblk
+                                    } -> (blk,sblk)
+                            _ -> (nullPtr,0)) ord entr entrs):qs
         else (loop_ptr',entrs):insert'' ord loop_ptr qs
 
 dequeueNode :: Unrollment gr m mloc ptr (QueueEntry ptr)
