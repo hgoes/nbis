@@ -16,11 +16,11 @@ data Object ptr
 
 data UnboundedObject ptr
   = DynArrayObject { dynArrayIndexSize :: Integer
-                   , dynArrayBound :: SMTExpr (SMTExpr (BitVector BVUntyped))
+                   , dynArrayBound :: SMTExpr (BitVector BVUntyped)
                    , dynArrayWrites :: [(SMTExpr (BitVector BVUntyped),BoundedObject ptr)]
                    }
   | DynFlatArrayObject { dynFlatArrayIndexSize :: Integer
-                       , dynFlatArrayBound :: SMTExpr (SMTExpr (BitVector BVUntyped))
+                       , dynFlatArrayBound :: SMTExpr (BitVector BVUntyped)
                        , dynFlatArray :: [SMTExpr (SMTArray (SMTExpr (BitVector BVUntyped)) (BitVector BVUntyped))]
                        }
   deriving (Show,Eq)
@@ -163,6 +163,7 @@ allocaObject :: Map String [TypeDesc] -- ^ All structs in the program
 allocaObject structs tp (Left sz) = do
   objs <- sequence $ genericReplicate sz (allocaBounded structs tp)
   return $ Bounded $ StaticArrayObject objs
+allocaObject structs tp (Right sz) = fmap Unbounded (allocaUnbounded structs tp sz)
 
 allocaBounded :: Map String [TypeDesc] -- ^ All structs in the program
                  -> TypeDesc -- ^ The type to be allocated
@@ -179,6 +180,17 @@ allocaBounded structs (StructType desc) = do
         Right res -> res
   objs <- mapM (allocaBounded structs) tps
   return $ StructObject objs
+
+allocaUnbounded :: Map String [TypeDesc]
+                   -> TypeDesc
+                   -> SMTExpr (BitVector BVUntyped)
+                   -> SMT (UnboundedObject ptr)
+allocaUnbounded structs (IntegerType w) sz = do
+  let sz_width = extractAnnotation sz
+  arr <- varNamedAnn "allocArray" (sz_width,w)
+  return (DynFlatArrayObject { dynFlatArrayIndexSize = sz_width
+                             , dynFlatArrayBound = sz
+                             , dynFlatArray = [arr] })
 
 loadObject :: Integer -> Object ptr -> (SMTExpr (BitVector BVUntyped),[(ErrorDesc,SMTExpr Bool)])
 loadObject sz (Bounded obj) = case loadObject' sz obj of
