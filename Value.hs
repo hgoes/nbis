@@ -122,6 +122,7 @@ valBinOp op lhs rhs
           LShr -> bvlshr
           Or -> bvor
           Mul -> bvmul
+          SRem -> bvsrem
           _ -> error $ "nbis: Unsupported binary operator "++show op
     in DirectValue (rop lhs' rhs')
 
