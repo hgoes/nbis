@@ -35,7 +35,7 @@ data BoundedObject ptr
   deriving (Show,Eq)
 
 data ObjAccessor ptr = ObjAccessor (forall a. (Object ptr -> (Object ptr,a,[(ErrorDesc,SMTExpr Bool)])) 
-                                    -> Object ptr 
+                                    -> Object ptr
                                     -> (Object ptr,a,[(ErrorDesc,SMTExpr Bool)]))
 
 type PtrIndex = [(TypeDesc,[DynNum])]
@@ -123,6 +123,8 @@ indexObject structs (PointerType tp) (i:idx) (ObjAccessor access)
                             -> let (nobj,res,errs) 
                                      = indexBounded structs tp idx f obj
                                in (Bounded nobj,res,errs)
+                          (Unbounded obj,_) -> let (nobj,res,errs) = indexUnbounded structs tp (i:idx) f obj
+                                               in (Unbounded nobj,res,errs)
                       ) obj)
 indexObject structs (StructType desc) (Left i:idx) (ObjAccessor access)
   = let tps = case desc of
@@ -155,6 +157,23 @@ indexBounded structs (ArrayType _ tp) (Left i:idx) f (StaticArrayObject objs)
   = let (nobjs,res,errs) = changeAt i (indexBounded structs tp idx f) objs
     in (StaticArrayObject nobjs,res,errs)
 indexBounded _ tp idx _ obj = error $ "indexBounded unimplemented for "++show tp++" "++show idx++" ("++show obj++") in Snow memory model"
+
+indexUnbounded :: Show ptr => Map String [TypeDesc] -> TypeDesc -> [DynNum]
+                  -> (Object ptr -> (Object ptr,a,[(ErrorDesc,SMTExpr Bool)]))
+                  -> UnboundedObject ptr
+                  -> (UnboundedObject ptr,a,[(ErrorDesc,SMTExpr Bool)])
+indexUnbounded structs tp (Right i:is) f dynarr@(DynFlatArrayObject { dynFlatArrayBound = sz
+                                                                    , dynFlatArray = arrs
+                                                                    })
+  = let (nobj,res,errs) = indexBounded structs tp is f (assembleObject structs tp [ select arr i | arr <- arrs ])
+    in (dynarr { dynFlatArray = [ store arr i v | (arr,v) <- zip arrs (disassembleObject nobj) ] },res,{-(Overrun,sz .<=. i):-}errs)
+indexUnbounded _ tp idx _ obj = error $ "indexUnbounded unimplemented for "++show tp++" "++show idx++" ("++show obj++") in Snow memory model"
+
+assembleObject :: Map String [TypeDesc] -> TypeDesc -> [SMTExpr (BitVector BVUntyped)] -> BoundedObject ptr
+assembleObject _ (IntegerType w) [v] = WordObject v
+
+disassembleObject :: BoundedObject ptr -> [SMTExpr (BitVector BVUntyped)]
+disassembleObject (WordObject v) = [v]
 
 allocaObject :: Map String [TypeDesc] -- ^ All structs in the program
                 -> TypeDesc -- ^ The type to be allocated
