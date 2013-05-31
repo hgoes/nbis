@@ -103,8 +103,8 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
           Just l -> l
           Nothing -> error $ "Couldn't find location "++show loc_from --SnowLocation Map.empty Map.empty
         mem1 = mem { snowLocationConnections = Map.insertWith (++) loc_from [(loc_to,cond)] (snowLocationConnections mem) }
-        obj_upd = [ (loc_to,obj,assign) | (obj,assign) <- Map.toList $ snowObjects cloc ]
-        
+        obj_upd = [ (loc_to,obj,[ (cond .&&. cond',obj) | (cond',obj) <- assign])
+                  | (obj,assign) <- Map.toList $ snowObjects cloc ]
         obj_upd' = concat $ fmap (connectObjectUpdate (snowLocationConnections mem1)) obj_upd
     applyUpdates [] obj_upd' (snowProgram mem1) mem1
   connectPointer mem _ cond ptr_from ptr_to = do
@@ -183,7 +183,7 @@ connectObjectUpdate :: Ord mloc
 connectObjectUpdate mp x@(loc,obj_p,assign) = case Map.lookup loc mp of
   Nothing -> [x]
   Just locs -> x:(concat $ fmap (connectObjectUpdate mp) 
-                  [ (loc',obj_p,assign) | (loc',_) <- locs ])
+                  [ (loc',obj_p,[ (cond .&&. cond',obj) | (cond',obj) <- assign ]) | (loc',cond) <- locs ])
 
 initUpdates :: Map String [TypeDesc]
                 -> Integer
