@@ -111,7 +111,8 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
     --trace ("Connecting pointer "++show ptr_from++" with "++show ptr_to) $ return ()
     let mem1 = mem { snowPointerConnections = Map.insertWith (++) ptr_from [(ptr_to,cond)] (snowPointerConnections mem) }
         ptr_upd = case Map.lookup ptr_from (snowPointers mem1) of
-          Just assign -> connectPointerUpdate (snowLocationConnections mem1) (snowPointerConnections mem1) (ptr_to,assign)
+          Just assign -> connectPointerUpdate (snowPointerConnections mem1)
+                         (ptr_to,[ (cond .&&. cond',obj_p) | (cond',obj_p) <- assign ])
           Nothing -> []
     --trace ("Connections: "++show (snowPointerConnections mem1)) (return ())
     applyUpdates ptr_upd [] (snowProgram mem1) mem1
@@ -159,22 +160,21 @@ applyUpdates' ptr_upds obj_upds done (i:is) mem = do
                                               Just up -> up:cptr_up)
                                 ) r1 obj_upds
   let nobj_upd' = concat $ fmap (connectObjectUpdate (snowLocationConnections mem)) nobj_upd
-      nptr_upd' = concat $ fmap (connectPointerUpdate (snowLocationConnections mem) (snowPointerConnections mem)) nptr_upd
+      nptr_upd' = concat $ fmap (connectPointerUpdate (snowPointerConnections mem)) nptr_upd
   mem1 <- applyUpdates nptr_upd' nobj_upd' (done++[i]) mem
   applyUpdates' (ptr_upds++nptr_upd') (obj_upds++nobj_upd') (done++[i]) is mem1
 
-connectPointerUpdate :: (Ord ptr,Ord mloc)
-                         => Map mloc [(mloc,SMTExpr Bool)]
-                         -> Map ptr [(ptr,SMTExpr Bool)]
+connectPointerUpdate :: (Ord ptr)
+                         => Map ptr [(ptr,SMTExpr Bool)]
                          -> PointerUpdate ptr
                          -> [PointerUpdate ptr]
-connectPointerUpdate conns_loc conns_ptr x@(ptr,assign)
+connectPointerUpdate conns_ptr x@(ptr,assign)
   = let res_ptr = case Map.lookup ptr conns_ptr of
           Nothing -> []
           Just ptrs -> [ (ptr',[(cond' .&&. cond,trg)
                                | (cond,trg) <- assign ])
                        | (ptr',cond') <- ptrs ]
-    in x:(concat $ fmap (connectPointerUpdate conns_loc conns_ptr) res_ptr)
+    in x:(concat $ fmap (connectPointerUpdate conns_ptr) res_ptr)
 
 connectObjectUpdate :: Ord mloc
                        => Map mloc [(mloc,SMTExpr Bool)]
