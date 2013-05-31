@@ -18,5 +18,5 @@ mergeCondList (x:xs) ys = mergeCondList xs (insert x ys)
   where
     insert x [] = [x]
     insert x@(cx,objx) (y@(cy,objy):ys) = if objx==objy
-                                          then (cx .||. cy,objx):ys
+                                          then (simplifier $ cx .||. cy,objx):ys
                                           else y:(insert x ys)
