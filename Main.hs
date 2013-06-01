@@ -342,9 +342,10 @@ addOutputs vals outp = do
 
 mergeOutputs :: (Gr.DynGraph gr,MemoryModel m mloc ptr,Show ptr) => SMTExpr Bool
                 -> Map (Ptr Instruction) (Either VarValue VarPointer)
+                -> Map (Ptr Instruction) (Either Val ptr)
                 -> Gr.Node
                 -> Unrollment gr m mloc ptr ()
-mergeOutputs cond new_outs node = do
+mergeOutputs cond new_outs new_statics node = do
   --trace ("Merge "++show (Map.toList new_outs)++" at "++show node++" with condition "++show cond) (return ())
   gr <- get
   let (Just (inc,_,nd,outg),gr') = Gr.match node (nodeGraph gr)
@@ -367,9 +368,17 @@ mergeOutputs cond new_outs node = do
                 (Left vout,Left vin) -> do
                   gr <- get
                   (val_out,nstore) <- lift $ readVar vout (varStore gr)
-                  lift $ assert $ valEq vin val_out
+                  lift $ assert $ cond .=>. (valEq vin val_out)
                   put $ gr { varStore = nstore }
             ) $ Map.intersectionWith (\x y -> (x,y)) new_outs inp
+      mapM_ (\pair -> case pair of
+                (Right p_out,Right p_in) -> do
+                  gr <- get
+                  (pr,_) <- getProxies
+                  nmem <- lift $ connectPointer (globalMemory gr) pr cond p_out p_in
+                  put $ gr { globalMemory = nmem }
+                (Left vout,Left vin) -> lift $ assert $ cond .=>. (valEq vin vout)
+            ) $ Map.intersectionWith (\x y -> (x,y)) new_statics inp
       let new_outs' = Map.difference new_outs inp
       new_outs'' <- sequence $ Map.unionWith (\old_out new_out -> do
                                                  old_out' <- old_out
@@ -392,7 +401,7 @@ mergeOutputs cond new_outs node = do
       -- Propagate only unmerged values
       let prop_upds = Map.difference new_outs' (outputDynamics outp)
       modify $ \gr -> gr { nodeGraph = (inc,node,nd { nodeType = (nodeType nd) { nodeOutput = outp { outputDynamics = new_outs'' } } },outg) Gr.& gr' }
-      mapM_ (\(_,trg) -> mergeOutputs cond prop_upds trg) outg
+      mapM_ (\(_,trg) -> mergeOutputs cond prop_upds new_statics trg) outg
     _ -> return ()
 
 makeNode :: (Gr.DynGraph gr,Enum mloc,Enum ptr,MemoryModel m mloc ptr,Show ptr)
@@ -585,7 +594,7 @@ connectNodes from read_from trans to = do
             (_,demoted) = adjustLoopStack (funDescrLoops fun_descr) blk outp
         --trace ("Demoted: "++show demoted) (return ())
         outp' <- makeDynamic cond demoted outp
-        mergeOutputs cond (outputDynamics outp') to
+        mergeOutputs cond (outputDynamics outp') (allStatics outp') to
       _ -> return ()
   
   gr <- get
