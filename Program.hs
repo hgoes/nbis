@@ -21,6 +21,7 @@ import Foreign.Marshal.Array
 import Data.Maybe (catMaybes)
 import Control.Concurrent.MVar
 import Data.Proxy
+import Data.Tree
 
 import LLVM.FFI.Instruction
 import LLVM.FFI.BasicBlock
@@ -91,15 +92,13 @@ reifyLoop loop = do
   subs <- loopGetSubLoops loop >>= vectorToList >>= mapM reifyLoop
   return $ LoopDesc loop (backEdges==1) blks subs
 
-data DomTree = DomTree { domTreeRoot :: Ptr BasicBlock
-                       , domTreeChildren :: [DomTree]
-                       } deriving Show
+type DomTree = Tree (Ptr BasicBlock)
 
 reifyDomTree :: Ptr (DomTreeNodeBase BasicBlock) -> IO DomTree
 reifyDomTree tree = do
   blk <- domTreeNodeBaseGetBlock tree
   childs <- domTreeNodeBaseGetChildren tree >>= vectorToList >>= mapM reifyDomTree
-  return $ DomTree blk childs
+  return $ Node blk childs
 
 data APass = forall p. PassC p => APass (IO (Ptr p))
 
