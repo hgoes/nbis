@@ -50,7 +50,8 @@ import LLVM.FFI.CPP
 type ProgDesc = (Map String ([(Ptr Argument, TypeDesc)],
                              TypeDesc,
                              [(Ptr BasicBlock, Maybe String, [[InstrDesc Operand]])],
-                             [LoopDesc]),
+                             [LoopDesc],
+                             Maybe DomTree),
                  Map (Ptr GlobalVariable) (TypeDesc, Maybe MemContent),
                  Set TypeDesc,
                  Map String [TypeDesc])
@@ -90,9 +91,19 @@ reifyLoop loop = do
   subs <- loopGetSubLoops loop >>= vectorToList >>= mapM reifyLoop
   return $ LoopDesc loop (backEdges==1) blks subs
 
+data DomTree = DomTree { domTreeRoot :: Ptr BasicBlock
+                       , domTreeChildren :: [DomTree]
+                       } deriving Show
+
+reifyDomTree :: Ptr (DomTreeNodeBase BasicBlock) -> IO DomTree
+reifyDomTree tree = do
+  blk <- domTreeNodeBaseGetBlock tree
+  childs <- domTreeNodeBaseGetChildren tree >>= vectorToList >>= mapM reifyDomTree
+  return $ DomTree blk childs
+
 data APass = forall p. PassC p => APass (IO (Ptr p))
 
-passes :: MVar (Map String [LoopDesc]) -> [APass]
+passes :: MVar (Map String ([LoopDesc],Maybe DomTree)) -> [APass]
 passes var
   = [APass createPromoteMemoryToRegisterPass
     ,APass createConstantPropagationPass
@@ -111,33 +122,38 @@ passes var
     ,APass (createFunctionInliningPass 100)
     ,APass (newHaskellModulePass
             (\self au -> do
-                print "CONF"
+                analysisUsageAddRequired au (Proxy::Proxy DominatorTree)
                 analysisUsageAddRequired au (Proxy::Proxy LoopInfo))
             (\self mod -> do
-                print "RUN"
                 funs <- moduleGetFunctionList mod >>= ipListToList
                 loop_mp <- mapM 
                            (\fun -> do
                                fname <- getNameString fun
                                isDecl <- globalValueIsDeclaration fun
-                               loops <- if isDecl
-                                        then return []
-                                        else (do
-                                                 resolver <- passGetResolver self
-                                                 pass <- analysisResolverFindImplPassFun resolver self (Proxy::Proxy LoopInfo) fun
-                                                 analysis <- passGetAnalysis pass
-                                                 base <- loopInfoGetBase analysis
-                                                 begin <- loopInfoBaseBegin base
-                                                 end <- loopInfoBaseEnd base
-                                                 loop_list <- vectorIteratorToList begin end
-                                                 mapM reifyLoop loop_list)
-                               return (fname,loops)
+                               (loops,dt) <- if isDecl
+                                             then return ([],Nothing)
+                                             else (do
+                                                      resolver <- passGetResolver self
+                                                      pass_li <- analysisResolverFindImplPassFun resolver self (Proxy::Proxy LoopInfo) fun
+                                                      pass_dt <- analysisResolverFindImplPassFun resolver self (Proxy::Proxy DominatorTree) fun
+                                                      analysis_li <- passGetAnalysis pass_li
+                                                      analysis_dt <- passGetAnalysis pass_dt
+                                                      base <- loopInfoGetBase analysis_li
+                                                      begin <- loopInfoBaseBegin base
+                                                      end <- loopInfoBaseEnd base
+                                                      loop_list <- vectorIteratorToList begin end
+                                                      loops <- mapM reifyLoop loop_list
+                                                      print "REIFY DOMTREE"
+                                                      dt <- dominatorTreeGetRootNode analysis_dt >>= reifyDomTree
+                                                      return (loops,Just dt)
+                                                  )
+                               return (fname,(loops,dt))
                            ) funs
                 putMVar var (Map.fromList loop_mp)
                 return False))
     ]
 
-applyOptimizations :: Ptr Module -> IO (Map String [LoopDesc])
+applyOptimizations :: Ptr Module -> IO (Map String ([LoopDesc],Maybe DomTree))
 applyOptimizations mod = do
   var <- newEmptyMVar
   pm <- newPassManager
@@ -203,7 +219,8 @@ getProgram is_intr file = do
                                               ipListToList >>=
                                               mapM (reifyInstr tli dl)
                                     return (blk,blkName,mkSubBlocks [] instrs))
-                   return (fname,(zip args argtps,rtp,blks,loop_mp!fname))) >>=
+                   let (lis,dt) = loop_mp!fname
+                   return (fname,(zip args argtps,rtp,blks,lis,dt))) >>=
           return . Map.fromList
   globs <- moduleGetGlobalList mod >>= 
            ipListToList >>= 
@@ -269,13 +286,13 @@ getConstant val
 
 mergePrograms :: ProgDesc -> ProgDesc -> ProgDesc
 mergePrograms (p1,g1,tp1,s1) (p2,g2,tp2,s2) 
-  = (Map.unionWithKey (\name (args1,tp1,blks1,loops1) (args2,tp2,blks2,loops2)
+  = (Map.unionWithKey (\name (args1,tp1,blks1,loops1,dt1) (args2,tp2,blks2,loops2,dt2)
                        -> if fmap snd args1 /= fmap snd args2 || tp1 /= tp2
                           then error $ "Conflicting signatures for function "++show name++" detected"
                           else (if P.null blks1
-                                then (args2,tp2,blks2,loops2)
+                                then (args2,tp2,blks2,loops2,dt2)
                                 else (if P.null blks2
-                                      then (args1,tp1,blks1,loops1)
+                                      then (args1,tp1,blks1,loops1,dt1)
                                       else error $ "Conflicting definitions for function "++show name++" found"))) p1 p2,
      Map.union g1 g2,
      Set.union tp1 tp2,

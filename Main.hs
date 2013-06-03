@@ -118,6 +118,7 @@ data FunctionDescr gr = FunctionDescr
                         , funDescrDefines :: Map (Ptr Instruction) (Ptr BasicBlock,Integer)
                         , funDescrRealizationOrder :: [(Ptr BasicBlock,Integer)]
                         , funDescrLoops :: [LoopDesc]
+                        , funDescrDomTree :: Maybe DomTree
                         }
 
 data UnrollGraph gr m mloc ptr
@@ -694,9 +695,9 @@ unrollProgram :: (Gr.DynGraph gr,Integral ptr,Integral mloc,MemoryModel m mloc p
                 -> Unrollment gr m mloc ptr a
                 -> SMT a
 unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m mloc ptr a) = do
-  let (init_args,_,init_blks,_) = funs!init
+  let (init_args,_,init_blks,_,_) = funs!init
       globs_mp = fmap (\(tp,_) -> tp) globs
-      allfuns = fmap (\(sig,rtp,blks,loops)
+      allfuns = fmap (\(sig,rtp,blks,loops,dt)
                       -> let (pgr,pmp) = programAsGraph blks
                              defs = getDefiningBlocks isIntrinsic blks
                              order = case blks of
@@ -721,6 +722,7 @@ unrollProgram prog@(funs,globs,tps,structs) init (f::Unrollment gr m mloc ptr a)
                                           , funDescrDefines = defs
                                           , funDescrRealizationOrder = order
                                           , funDescrLoops = loops
+                                          , funDescrDomTree = dt
                                           }
                      ) funs
   {-liftIO $ mapM_ (\(fname,f) -> do
