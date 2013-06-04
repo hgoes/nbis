@@ -11,6 +11,7 @@ import TypeDesc
 import InstrDesc
 import VarStore
 import Simplifier
+import Activation
 
 import MemoryModel
 {-import MemoryModel.Untyped
@@ -71,8 +72,7 @@ data NodeId = IdStart { startFunction :: String }
             deriving (Eq,Ord,Show)
 
 data Node mloc ptr
-  = Node { nodeActivation :: SMTExpr Bool
-         , nodeActivationProxy :: SMTExpr Bool
+  = Node { nodeActivation :: ActivationVar
          , nodeType :: NodeType mloc ptr
          , nodeInputLoc :: mloc
          , nodeOutputLoc :: mloc
@@ -282,13 +282,15 @@ allStatics outp = fmap (\(v,_,_) -> v) $ Map.unions $
 -- | Remove all static variables which will no longer be static in the new block.
 --   Creates empty mappings for all new loops entered by the new block.
 --   Also it returns the variables it removes.
-adjustLoopStack :: [LoopDesc] -> Ptr BasicBlock -> Output ptr -> (Output ptr,Map (Ptr Instruction) (Either Val ptr,String,TypeDesc))
+adjustLoopStack :: [LoopDesc] -> Ptr BasicBlock -> Output ptr -> (Output ptr,Maybe (Map (Ptr Instruction) (Either Val ptr,String,TypeDesc)))
 adjustLoopStack all_loops blk outp = case outputLoopStatics outp of
-  [] -> (outp { outputLoopStatics = fmap (\li -> (li,Map.empty)) (findLoopForBlock blk all_loops) },Map.empty)
+  [] -> (outp { outputLoopStatics = fmap (\li -> (li,Map.empty)) (findLoopForBlock blk all_loops) },Nothing)
   (li,mp):lis -> if blk `elem` (loopDescBlocks li)
-                 then (outp { outputLoopStatics = (fmap (\li' -> (li',Map.empty)) (findLoopForBlock blk (loopDescSubs li)))++((li,mp):lis) },Map.empty)
+                 then (outp { outputLoopStatics = (fmap (\li' -> (li',Map.empty)) (findLoopForBlock blk (loopDescSubs li)))++((li,mp):lis) },Nothing)
                  else let (res,mp') = adjustLoopStack all_loops blk (outp { outputLoopStatics = lis })
-                      in (res,Map.union mp mp')
+                      in (res,case mp' of
+                             Nothing -> Just mp
+                             Just rmp' -> Just $ Map.union mp rmp')
 
 -- | Add new dynamic output variables into an output mapping
 makeDynamic :: (Enum ptr,Show ptr) => SMTExpr Bool
@@ -421,8 +423,8 @@ makeNode read_from from nid = do
                         val <- newInput ("funarg_"++fun) tp
                         return (name,val)) args
       act <- case from of
-        Nothing -> return $ constant True -- Don't use an activation variable for the first node
-        Just _ -> lift $ varNamed $ "start_"++fun
+        Nothing -> lift $ newStaticActivation ("start_"++fun) (constant True) -- Don't use an activation variable for the first node
+        Just _ -> lift $ newExtensibleActivation $ "start_"++fun
       return (RealizedStart fun args' Nothing,act,nextLocation gr,nextLocation gr,[])
     IdEnd fun -> do
       gr <- get
@@ -441,7 +443,7 @@ makeNode read_from from nid = do
                  (Just (inc,_,nd@Node { nodeType = RealizedStart fun args Nothing },outc),gr')
                    -> gr { nodeGraph = (inc,fnode,nd { nodeType = RealizedStart fun args (Just $ nextNode gr) },outc) Gr.& gr' }
              )
-      act <- lift $ varNamed $ "end_"++fun
+      act <- lift $ newExtensibleActivation $ "end_"++fun
       return (RealizedEnd fnode rv,act,nextLocation gr,nextLocation gr,[])
     IdBlock fun blk sblk -> do
       gr <- get
@@ -470,16 +472,28 @@ makeNode read_from from nid = do
                 RealizedBlock { nodeOutput = outp } -> outp
                 _ -> Output Map.empty [] Map.empty
               Nothing -> Output Map.empty [] Map.empty
-          (outp_cur,_) = adjustLoopStack (funDescrLoops fun_descr) blk outp_prev
+          (outp_cur,demoted) = adjustLoopStack (funDescrLoops fun_descr) blk outp_prev
       liftIO $ putStrLn $ "Creating node for "++show name
-      act <- lift $ varNamed (case name of
-                                 Nothing -> "act_"++fun++"_"++show blk++"_"++show sblk
-                                 Just rname -> "act_"++rname++"_"++show sblk)
+      let act_name = case name of
+            Nothing -> "act_"++fun++"_"++show blk++"_"++show sblk
+            Just rname -> "act_"++rname++"_"++show sblk
+      act <- case demoted of
+        Just _ -> lift $ newExtensibleActivation act_name -- We stepped out of a loop, we need an extensible activation variable.
+        Nothing -> case read_from of
+          Just read_from' -> case Gr.lab (nodeGraph gr) read_from' of
+            Just nd_read_from -> case nodeType nd_read_from of
+              RealizedBlock { nodeFinalization = fin } -> case fin of
+                Jump [_] -> lift $ newStaticActivation act_name (activationVar $ nodeActivation nd_read_from)
+                {-Jump lst -> case List.find (\(_,blk') -> blk==blk') lst of
+                  Just (cond,_) -> newStaticActivation act_name $ (activationVar $ nodeActivation nd_read_from) .&&. cond-}
+                _ -> lift $ newExtensibleActivation act_name
+              _ -> lift $ newExtensibleActivation act_name
+          Nothing -> lift $ newStaticActivation act_name (constant True)
       gr <- get
       let env = RealizationEnv { reFunction = fun
                                , reBlock = blk
                                , reSubblock = sblk
-                               , reActivation = act
+                               , reActivation = activationVar act
                                , reGlobals = globalPointers gr
                                , reArgs = Map.fromList fun_args
                                , reStaticInput = allStatics outp_cur
@@ -515,12 +529,11 @@ makeNode read_from from nid = do
   ngr <- get
   let node_graph' = Gr.insNode (new_gr_id,
                                 Node { nodeActivation = act
-                                     , nodeActivationProxy = act
                                      , nodeInputLoc = mloc_in
                                      , nodeOutputLoc = mloc_out
                                      , nodeType = node_type })
                     (nodeGraph ngr)
-  nmem <- lift $ addProgram (globalMemory ngr) act mloc_in prog
+  nmem <- lift $ addProgram (globalMemory ngr) (activationVar act) mloc_in prog
   --(p1,p2) <- getProxies
   --trace (debugMem nmem p1 p2) (return ())
   put $ ngr { nodeGraph = node_graph'
@@ -541,46 +554,27 @@ connectNodes from read_from trans to = do
                               Just nd -> nd)
       (Just (in_to,_,nd_to,out_to),gr1) = Gr.match to (nodeGraph gr)
       cond = case trans of
-        TBegin -> nodeActivation nd_from
+        TBegin -> activationVar (nodeActivation nd_from)
         TJump c -> if isTrue c
-                   then nodeActivation nd_from
-                   else nodeActivation nd_from .&&. c
-        TCall _ -> nodeActivation nd_from
-        TReturn _ -> nodeActivation nd_from
-        TDeliver _ _ -> nodeActivation nd_read_from
-      {-eqs = case nodeType nd_from of
-        RealizedStart fun_name args _ -> case nodeType nd_to of
-          RealizedBlock {} -> []
-        RealizedEnd _ ret -> case trans of
-          TDeliver ret_name _ -> case nodeType nd_read_from of
-            RealizedBlock { nodeOutput = outp_read } -> case nodeType nd_to of
-              RealizedBlock { nodeInput = inp }
-                -> let io = Map.elems $ Map.intersectionWith (\x y -> (x,y)) outp_read inp
-                       io' = case (Map.lookup ret_name inp,ret) of
-                         (Nothing,Nothing) -> io
-                         (Just o_ret,Just i_ret) -> (o_ret,i_ret):io
-                   in io'
-        RealizedBlock { nodeOutput = outp
-                      , nodeFinalization = fin }
-          -> case fin of
-          Jump conds -> case nodeType nd_to of
-            RealizedBlock { nodeInput = inp } -> Map.elems $ Map.intersectionWith (\x y -> (x,y)) outp inp
-          Return ret -> case nodeType nd_to of
-            RealizedEnd _ ret' -> case (ret,ret') of
-              (Nothing,Nothing) -> []
-              (Just r1,Just r2) -> [(r1,r2)]
-          Call f args_out del -> case nodeType nd_to of
-            RealizedStart _ args_in _ -> zipWith (\arg_o (_,arg_i) -> (arg_o,arg_i)) args_out args_in-}
-  nproxy <- lift $ varNamed ("proxy_"++(case nodeType nd_to of
-                                           RealizedStart { nodeStartName = fun } -> fun
-                                           RealizedEnd { } -> "end"
-                                           RealizedBlock { nodeBlock = blk
-                                                         , nodeBlockName = blkname
-                                                         } -> case blkname of
-                                             Nothing -> show blk
-                                             Just name' -> name'))
-  lift $ assert $ nodeActivationProxy nd_to .==. (cond .||. nproxy)
-  put $ gr { nodeGraph = (in_to,to,nd_to { nodeActivationProxy = nproxy },out_to) Gr.& gr1 }
+                   then activationVar (nodeActivation nd_from)
+                   else activationVar (nodeActivation nd_from) .&&. c
+        TCall _ -> activationVar (nodeActivation nd_from)
+        TReturn _ -> activationVar (nodeActivation nd_from)
+        TDeliver _ _ -> activationVar (nodeActivation nd_read_from)
+  nd_to' <- case activationProxy $ nodeActivation nd_to of
+    Nothing -> return nd_to
+    Just prx -> do
+      nproxy <- lift $ varNamed ("proxy_"++(case nodeType nd_to of
+                                               RealizedStart { nodeStartName = fun } -> fun
+                                               RealizedEnd { } -> "end"
+                                               RealizedBlock { nodeBlock = blk
+                                                             , nodeBlockName = blkname
+                                                             } -> case blkname of
+                                                 Nothing -> show blk
+                                                 Just name' -> name'))
+      lift $ assert $ prx .==. (cond .||. nproxy)
+      return $ nd_to { nodeActivation = (nodeActivation nd_to) { activationProxy = Just nproxy } }
+  put $ gr { nodeGraph = (in_to,to,nd_to',out_to) Gr.& gr1 }
   
   case nodeType nd_read_from of
     RealizedStart {} -> case nodeType nd_to of
@@ -593,8 +587,11 @@ connectNodes from read_from trans to = do
             RealizedStart { nodeStartName = fname } = nodeType fnd
             fun_descr = (allFunctions gr)!fname
             (_,demoted) = adjustLoopStack (funDescrLoops fun_descr) blk outp
+            demoted' = case demoted of
+              Nothing -> Map.empty
+              Just d -> d
         --trace ("Demoted: "++show demoted) (return ())
-        outp' <- makeDynamic cond demoted outp
+        outp' <- makeDynamic cond demoted' outp
         mergeOutputs cond (outputDynamics outp') (allStatics outp') to
       _ -> return ()
   
@@ -799,9 +796,7 @@ checkGraph gr = do
     then return Nothing
     else (stack $ do
              -- Set all proxies to false (except for the start node)
-             mapM_ (\(nd_id,nd) -> if nd_id == startNode gr
-                                   then return ()
-                                   else assert $ not' $ nodeActivationProxy nd
+             mapM_ (\(nd_id,nd) -> disableActivationExtension (nodeActivation nd)
                    ) (Gr.labNodes (nodeGraph gr))
 
              liftIO $ putStrLn $ "Checking "++show (length errs)++" errors..."
