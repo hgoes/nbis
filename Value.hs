@@ -128,11 +128,9 @@ valBinOp op lhs rhs
 
 valCopy :: String -> Val -> SMT Val
 valCopy name (DirectValue val) = do
-  nval <- varNamedAnn name (extractAnnotation val)
-  assert $ nval .==. val
+  nval <- defConstNamed name val
   return (DirectValue nval)
 valCopy name (ConditionValue c w) = do
-  nc <- varNamed name
-  assert $ nc .==. c
+  nc <- defConstNamed name c
   return (ConditionValue nc w)
 valCopy _ v = return v
