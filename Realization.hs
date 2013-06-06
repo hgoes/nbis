@@ -179,6 +179,13 @@ data BlockFinalization ptr = Jump (CondList (Ptr BasicBlock))
                            | Call String [Either Val ptr] (Ptr Instruction)
                            deriving (Show)
 
+preRealize :: Realization mem ptr a -> (RealizationInfo,RealizationMonad mem ptr a)
+preRealize r = runRealization r (RealizationInfo Set.empty Set.empty Set.empty Set.empty Set.empty)
+
+realizeInstructions :: (Enum ptr,Enum mem) => [InstrDesc Operand] -> Realization mem ptr (BlockFinalization ptr)
+realizeInstructions [instr] = (\(Just fin) -> fin) <$> realizeInstruction instr
+realizeInstructions (instr:instrs) = ((\Nothing -> ()) <$> realizeInstruction instr) *> realizeInstructions instrs
+
 realizeInstruction :: (Enum ptr,Enum mem) => InstrDesc Operand -> Realization mem ptr (Maybe (BlockFinalization ptr))
 realizeInstruction (ITerminator (IRet e)) = Just . Return . Just <$> argToExpr e
 realizeInstruction (ITerminator IRetVoid) = pure $ Just $ Return Nothing
