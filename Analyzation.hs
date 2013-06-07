@@ -4,7 +4,7 @@ import Data.Map as Map hiding (foldl,foldr)
 import Data.Set as Set hiding (foldl,foldr)
 import Prelude hiding (foldl,foldr,concat,all,any,elem)
 import Data.Foldable
-import Data.List as List (mapAccumL,lookup,find)
+import Data.List as List (mapAccumL,lookup,find,filter)
 import InstrDesc
 import TypeDesc
 import LLVM.FFI.Instruction
@@ -40,35 +40,46 @@ getPhis = foldl (\mp instr -> case instr of
                     IAssign trg _ (IPhi blks) -> Map.insert trg blks mp
                     _ -> mp) Map.empty
 
+data ProgramGraph gr = ProgramGraph { programGraph :: gr (Ptr BasicBlock,Maybe String,Integer,[InstrDesc Operand]) ()
+                                    , nodeMap :: Map (Ptr BasicBlock,Integer) Gr.Node }
+
 programAsGraph :: Gr.DynGraph gr => [(Ptr BasicBlock,Maybe String,[[InstrDesc Operand]])]
-                  -> (gr (Ptr BasicBlock,Maybe String,Integer,[InstrDesc Operand]) (),Map (Ptr BasicBlock,Integer) Gr.Node)
-programAsGraph prog = createEdges $ createNodes (Gr.empty,Map.empty) prog
+                  -> ProgramGraph gr
+programAsGraph prog = createEdges $ createNodes (ProgramGraph Gr.empty Map.empty) prog
   where
     createNodes res [] = res
     createNodes res ((blk,blk_name,sblks):rest)
-      = createNodes (foldl (\(cgr,cmp) (instrs,sblk)
-                            -> let [nnode] = Gr.newNodes 1 cgr
-                               in (Gr.insNode (nnode,(blk,blk_name,sblk,instrs)) cgr,Map.insert (blk,sblk) nnode cmp)
+      = createNodes (foldl (\cgr (instrs,sblk)
+                            -> let [nnode] = Gr.newNodes 1 (programGraph cgr)
+                               in ProgramGraph { programGraph = Gr.insNode (nnode,(blk,blk_name,sblk,instrs)) (programGraph cgr)
+                                               , nodeMap = Map.insert (blk,sblk) nnode (nodeMap cgr) }
                            ) res (zip sblks [0..])
                     ) rest
 
-    createEdges (gr,mp) = (Gr.ufold (\(_,node,(blk,blk_name,sblk,instrs),_) cgr
-                                     -> case last instrs of
-                                       ITerminator term -> case term of
-                                         IRetVoid -> cgr
-                                         IRet _ -> cgr
-                                         IBr trg -> case Map.lookup (trg,0) mp of
-                                           Just tnd -> Gr.insEdge (node,tnd,()) cgr
-                                         IBrCond _ l r -> case (Map.lookup (l,0) mp,Map.lookup (r,0) mp) of
-                                           (Just t1,Just t2) -> Gr.insEdges [(node,t1,()),(node,t2,())] cgr
-                                         ISwitch _ def cases -> case Map.lookup (def,0) mp of
-                                           Just tdef -> Gr.insEdge (node,tdef,())
-                                                        (foldl (\cgr' (_,c) -> case Map.lookup (c,0) mp of
-                                                                   Just t -> Gr.insEdge (node,t,()) cgr'
-                                                               ) cgr cases)
-                                         ICall _ _ _ -> case Map.lookup (blk,sblk+1) mp of
-                                           Just trg -> Gr.insEdge (node,trg,()) cgr
-                                    ) gr gr,mp)
+    createEdges gr = gr { programGraph = Gr.ufold (\(_,node,(blk,blk_name,sblk,instrs),_) cgr
+                                                   -> case last instrs of
+                                                     ITerminator term -> case term of
+                                                       IRetVoid -> cgr
+                                                       IRet _ -> cgr
+                                                       IBr trg -> case Map.lookup (trg,0) (nodeMap gr) of
+                                                         Just tnd -> Gr.insEdge (node,tnd,()) cgr
+                                                       IBrCond _ l r -> case (Map.lookup (l,0) (nodeMap gr),Map.lookup (r,0) (nodeMap gr)) of
+                                                         (Just t1,Just t2) -> Gr.insEdges [(node,t1,()),(node,t2,())] cgr
+                                                       ISwitch _ def cases -> case Map.lookup (def,0) (nodeMap gr) of
+                                                         Just tdef -> Gr.insEdge (node,tdef,())
+                                                                      (foldl (\cgr' (_,c) -> case Map.lookup (c,0) (nodeMap gr) of
+                                                                                 Just t -> Gr.insEdge (node,t,()) cgr'
+                                                                             ) cgr cases)
+                                                       ICall _ _ _ -> case Map.lookup (blk,sblk+1) (nodeMap gr) of
+                                                         Just trg -> Gr.insEdge (node,trg,()) cgr
+                                                  ) (programGraph gr) (programGraph gr) }
+
+programSCCs :: Gr.Graph gr => ProgramGraph gr -> [[Ptr BasicBlock]]
+programSCCs pgr = let sccs = Gr.scc (programGraph pgr)
+                      real_sccs = List.filter (\comp -> case comp of
+                                                  [nd] -> nd `elem` (Gr.suc (programGraph pgr) nd)
+                                                  _ -> True) sccs
+                  in fmap (fmap (\nd -> let Just (blk,_,_,_) = Gr.lab (programGraph pgr) nd in blk)) real_sccs
 
 -- | Can there ever only be one connection between two nodes?
 singletonConnection :: Gr.Graph gr => Gr.Node -> Gr.Node -> [[Gr.Node]] -> gr a b -> Bool
