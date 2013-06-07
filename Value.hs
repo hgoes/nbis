@@ -2,6 +2,7 @@
 module Value where
 
 import MemoryModel
+import TypeDesc
 
 import Language.SMTLib2 as SMT2
 import Data.Typeable
@@ -125,6 +126,14 @@ valBinOp op lhs rhs
           SRem -> bvsrem
           _ -> error $ "nbis: Unsupported binary operator "++show op
     in DirectValue (rop lhs' rhs')
+
+valNew :: String -> TypeDesc -> SMT Val
+valNew name (IntegerType 1) = do
+  res <- varNamed name
+  return $ ConditionValue res 1
+valNew name tp = do
+  res <- varNamedAnn name (fromIntegral $ bitWidth tp)
+  return $ DirectValue res
 
 valCopy :: String -> Val -> SMT Val
 valCopy name (DirectValue val) = do

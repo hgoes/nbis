@@ -41,7 +41,8 @@ getPhis = foldl (\mp instr -> case instr of
                     _ -> mp) Map.empty
 
 data ProgramGraph gr = ProgramGraph { programGraph :: gr (Ptr BasicBlock,Maybe String,Integer,[InstrDesc Operand]) ()
-                                    , nodeMap :: Map (Ptr BasicBlock,Integer) Gr.Node }
+                                    , nodeMap :: Map (Ptr BasicBlock,Integer) Gr.Node
+                                    }
 
 programAsGraph :: Gr.DynGraph gr => [(Ptr BasicBlock,Maybe String,[[InstrDesc Operand]])]
                   -> ProgramGraph gr
@@ -74,12 +75,15 @@ programAsGraph prog = createEdges $ createNodes (ProgramGraph Gr.empty Map.empty
                                                          Just trg -> Gr.insEdge (node,trg,()) cgr
                                                   ) (programGraph gr) (programGraph gr) }
 
-programSCCs :: Gr.Graph gr => ProgramGraph gr -> [[Ptr BasicBlock]]
+programSCCs :: Gr.Graph gr => ProgramGraph gr -> [[Gr.Node]]
 programSCCs pgr = let sccs = Gr.scc (programGraph pgr)
-                      real_sccs = List.filter (\comp -> case comp of
-                                                  [nd] -> nd `elem` (Gr.suc (programGraph pgr) nd)
-                                                  _ -> True) sccs
-                  in fmap (fmap (\nd -> let Just (blk,_,_,_) = Gr.lab (programGraph pgr) nd in blk)) real_sccs
+                  in List.filter (\comp -> case comp of
+                                     [nd] -> nd `elem` (Gr.suc (programGraph pgr) nd)
+                                     _ -> True) sccs
+
+programOrder :: Gr.Graph gr => ProgramGraph gr -> [Gr.Node]
+programOrder gr = case Gr.dff [0] (programGraph gr) of
+  [dfs_tree] -> reverse $ Gr.postorder dfs_tree
 
 -- | Can there ever only be one connection between two nodes?
 singletonConnection :: Gr.Graph gr => Gr.Node -> Gr.Node -> [[Gr.Node]] -> gr a b -> Bool
