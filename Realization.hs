@@ -142,7 +142,7 @@ argToExpr :: (Enum ptr,Enum mem) => Operand -> Realization mem ptr (Either Val p
 argToExpr expr = case operandDesc expr of
   ODNull -> let PointerType tp = operandType expr
             in reInject (\(ptr,instr) -> reMemInstr instr >> return (Right ptr)) $
-               liftA3 (\ptr loc nloc -> (ptr,MINull loc tp ptr nloc)) (reLift reNewPtr) (reLift reMemLoc) (reLift reNewMemLoc)
+               liftA (\ptr -> (ptr,MINull tp ptr)) (reLift reNewPtr)
   ODInt v -> pure $ Left $ ConstValue v (bitWidth (operandType expr))
   ODInstr instr _ name -> Realization $ \info -> if Set.member instr (reLocallyDefined info)
                                                  then (info,do
@@ -162,16 +162,14 @@ argToExpr expr = case operandDesc expr of
                                                case Map.lookup arg (reArgs re) of
                                                  Just res -> return res)
   ODGetElementPtr ptr idx -> reInject (\(ptr',instr) -> reMemInstr instr >> return (Right ptr')) $
-                             (\(Right val_ptr) val_idx ptr' loc nloc -> (ptr',MIIndex loc (fmap (\i -> case i of
-                                                                                                    Left (ConstValue bv _) -> Left bv
-                                                                                                    Left (DirectValue bv) -> Right bv
-                                                                                                ) val_idx
-                                                                                          ) val_ptr ptr' nloc)) <$>
+                             (\(Right val_ptr) val_idx ptr' -> (ptr',MIIndex (fmap (\i -> case i of
+                                                                                       Left (ConstValue bv _) -> Left bv
+                                                                                       Left (DirectValue bv) -> Right bv
+                                                                                   ) val_idx
+                                                                             ) val_ptr ptr')) <$>
                              (argToExpr ptr) <*>
                              (traverse argToExpr idx) <*>
-                             (reLift reNewPtr) <*>
-                             (reLift reMemLoc) <*>
-                             (reLift reNewMemLoc)
+                             (reLift reNewPtr)
   ODUndef -> pure (Left $ ConstValue 0 (bitWidth (operandType expr)))
 
 data BlockFinalization ptr = Jump (CondList (Ptr BasicBlock))
@@ -239,37 +237,32 @@ realizeInstruction (IAssign trg name expr)
                                           (argToExpr rhs)
             IICmp op lhs rhs -> case operandType lhs of
               PointerType _ -> reInject (\(val,instr) -> reMemInstr instr >> return val) $
-                               (\(Right lhs') (Right rhs') loc cond
+                               (\(Right lhs') (Right rhs') cond
                                 -> (Left $ ConditionValue (case op of
                                                               I_EQ -> cond
-                                                              I_NE -> not' cond) 1,MICompare loc lhs' rhs' cond)) <$>
+                                                              I_NE -> not' cond) 1,MICompare lhs' rhs' cond)) <$>
                                (argToExpr lhs) <*>
                                (argToExpr rhs) <*>
-                               (reLift reMemLoc) <*>
                                (reLift $ lift $ varNamed "PtrCompare")
               _ -> (\(Left lhs') (Left rhs') -> Left $ valIntComp op lhs' rhs') <$>
                    (argToExpr lhs) <*>
                    (argToExpr rhs)
             IGetElementPtr ptr idx -> reInject (\(ptr',instr) -> reMemInstr instr >> return (Right ptr')) $
-                                      (\(Right val_ptr) val_idx ptr' loc nloc -> (ptr',MIIndex loc (fmap (\i -> case i of
-                                                                                                             Left (ConstValue bv _) -> Left bv
-                                                                                                             Left (DirectValue bv) -> Right bv
-                                                                                                         ) val_idx
-                                                                                                   ) val_ptr ptr' nloc)) <$>
+                                      (\(Right val_ptr) val_idx ptr' -> (ptr',MIIndex (fmap (\i -> case i of
+                                                                                                Left (ConstValue bv _) -> Left bv
+                                                                                                Left (DirectValue bv) -> Right bv
+                                                                                            ) val_idx
+                                                                                      ) val_ptr ptr')) <$>
                                       (argToExpr ptr) <*>
                                       (traverse argToExpr idx) <*>
-                                      (reLift reNewPtr) <*>
-                                      (reLift reMemLoc) <*>
-                                      (reLift reNewMemLoc)
+                                      (reLift reNewPtr)
             IPhi args -> reInject (\args' -> case args' of
                                       Left [(_,v)] -> return (Left v)
                                       Right [(_,p)] -> return (Right p)
                                       Left vs -> return $ Left $ valSwitch (fmap (\(c,v) -> (v,c)) vs)
                                       Right ps -> do
                                         ptr <- reNewPtr
-                                        loc <- reMemLoc
-                                        nloc <- reNewMemLoc
-                                        reMemInstr (MISelect loc ps ptr nloc)
+                                        reMemInstr (MISelect ps ptr)
                                         return $ Right ptr
                                   ) $
                          (\args' -> case catMaybes args' of
@@ -291,10 +284,8 @@ realizeInstruction (IAssign trg name expr)
                          (argToExpr arg)
             IBitCast tp_to arg -> reInject (\(Right ptr) -> do
                                                let PointerType tp_from = operandType arg
-                                               loc <- reMemLoc
                                                ptr' <- reNewPtr
-                                               nloc <- reNewMemLoc
-                                               reMemInstr (MICast loc tp_from tp_to ptr ptr' nloc)
+                                               reMemInstr (MICast tp_from tp_to ptr ptr')
                                                return $ Right ptr')
                                   (argToExpr arg)
             ISExt tp arg -> (\arg' -> case arg' of
@@ -333,9 +324,7 @@ realizeInstruction (IAssign trg name expr)
                                               -> case (ifTArg,ifFArg) of
                                                 (Right ifT',Right ifF') -> do
                                                   ptr <- reNewPtr
-                                                  loc <- reMemLoc
-                                                  nloc <- reNewMemLoc
-                                                  reMemInstr (MISelect loc [(cond',ifT'),(not' cond',ifF')] ptr nloc)
+                                                  reMemInstr (MISelect [(cond',ifT'),(not' cond',ifF')] ptr)
                                                   return $ Right ptr
                                                 (Left ifT',Left ifF') -> return $ Left $ valSwitch [(ifT',cond'),(ifF',cond')]) $
                                     (\(Left argCond) ifT' ifF' -> (valCond argCond,ifT',ifF')) <$>

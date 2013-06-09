@@ -26,16 +26,16 @@ data ErrorDesc = Custom
 type DynNum = Either Integer (SMTExpr (BitVector BVUntyped))
 
 data MemoryInstruction m p
-  = MINull m TypeDesc p m
+  = MINull TypeDesc p
   | MIAlloc m TypeDesc DynNum p m
   | MILoad m p (SMTExpr (BitVector BVUntyped))
   | MILoadPtr m p p m
   | MIStore m (SMTExpr (BitVector BVUntyped)) p m
   | MIStorePtr m p p m
-  | MICompare m p p (SMTExpr Bool)
-  | MISelect m [(SMTExpr Bool,p)] p m
-  | MICast m TypeDesc TypeDesc p p m
-  | MIIndex m [DynNum] p p m
+  | MICompare p p (SMTExpr Bool)
+  | MISelect [(SMTExpr Bool,p)] p
+  | MICast TypeDesc TypeDesc p p
+  | MIIndex [DynNum] p p
   | MICopy m DynNum p p m
   deriving (Show,Eq)
 
@@ -48,30 +48,30 @@ class MemoryModel m mloc ptr where
   connectPointer :: m -> Proxy mloc -> SMTExpr Bool -> ptr -> ptr -> SMT m
   debugMem :: m -> Proxy mloc -> Proxy ptr -> String
 
-memInstrSrc :: MemoryInstruction m p -> m
-memInstrSrc (MINull m _ _ _) = m
-memInstrSrc (MIAlloc m _ _ _ _) = m
-memInstrSrc (MILoad m _ _) = m
-memInstrSrc (MILoadPtr m _ _ _) = m
-memInstrSrc (MIStore m _ _ _) = m
-memInstrSrc (MIStorePtr m _ _ _) = m
-memInstrSrc (MICompare m _ _ _) = m
-memInstrSrc (MISelect m _ _ _) = m
-memInstrSrc (MICast m _ _ _ _ _) = m
-memInstrSrc (MIIndex m _ _ _ _) = m
-memInstrSrc (MICopy m _ _ _ _) = m
+memInstrSrc :: MemoryInstruction m p -> Maybe m
+memInstrSrc (MINull _ _) = Nothing
+memInstrSrc (MIAlloc m _ _ _ _) = Just m
+memInstrSrc (MILoad m _ _) = Just m
+memInstrSrc (MILoadPtr m _ _ _) = Just m
+memInstrSrc (MIStore m _ _ _) = Just m
+memInstrSrc (MIStorePtr m _ _ _) = Just m
+memInstrSrc (MICompare _ _ _) = Nothing
+memInstrSrc (MISelect _ _) = Nothing
+memInstrSrc (MICast _ _ _ _) = Nothing
+memInstrSrc (MIIndex _ _ _) = Nothing
+memInstrSrc (MICopy m _ _ _ _) = Just m
 
 memInstrTrg :: MemoryInstruction m p -> Maybe m
-memInstrTrg (MINull _ _ _ m) = Just m
+memInstrTrg (MINull _ _) = Nothing
 memInstrTrg (MIAlloc _ _ _ _ m) = Just m
 memInstrTrg (MILoad _ _ _) = Nothing
 memInstrTrg (MILoadPtr _ _ _ m) = Just m
 memInstrTrg (MIStore _ _ _ m) = Just m
 memInstrTrg (MIStorePtr _ _ _ m) = Just m
-memInstrTrg (MICompare _ _ _ _) = Nothing
-memInstrTrg (MISelect _ _ _ m) = Just m
-memInstrTrg (MICast _ _ _ _ _ m) = Just m
-memInstrTrg (MIIndex _ _ _ _ m) = Just m
+memInstrTrg (MICompare _ _ _) = Nothing
+memInstrTrg (MISelect _ _) = Nothing
+memInstrTrg (MICast _ _ _ _) = Nothing
+memInstrTrg (MIIndex _ _ _) = Nothing
 memInstrTrg (MICopy _ _ _ _ m) = Just m
 
 flattenMemContent :: MemContent -> [(Integer,Integer)]

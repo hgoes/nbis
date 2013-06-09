@@ -4,7 +4,7 @@ module MemoryModel.Snow.Object where
 import Language.SMTLib2
 import Data.Map as Map
 import Data.List as List
-import Debug.Trace
+--import Debug.Trace
 
 import TypeDesc
 import MemoryModel
@@ -81,7 +81,7 @@ ptrIndexEq ((tp1,idx1):r1) ((tp2,idx2):r2)
 ptrIndexGetAccessor :: Show ptr => Map String [TypeDesc] -> PtrIndex -> ObjAccessor ptr
 ptrIndexGetAccessor _ [] = ObjAccessor id
 ptrIndexGetAccessor structs all@((tp,idx):rest) 
-  = trace (show all) $ indexObject structs (PointerType tp) idx (ptrIndexGetAccessor structs rest)
+  = {-trace (show all) $-} indexObject structs (PointerType tp) idx (ptrIndexGetAccessor structs rest)
 
 ptrIndexGetType :: Map String [TypeDesc] -> PtrIndex -> TypeDesc
 ptrIndexGetType structs ((tp,idx):_) = indexType structs (PointerType tp) idx

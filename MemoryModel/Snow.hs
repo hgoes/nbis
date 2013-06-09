@@ -19,7 +19,7 @@ import Control.Monad.Trans
 import Data.Maybe (catMaybes)
 import Data.Monoid
 import qualified Data.List as List
-import Debug.Trace
+--import Debug.Trace
 
 import MemoryModel.Snow.Object
 
@@ -78,7 +78,7 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
                         , snowNextObject = next
                         }
   addProgram mem act start_loc prog = do
-    trace ("Adding program "++show start_loc++": "++show prog) $ return ()
+    --trace ("Adding program "++show start_loc++": "++show prog) $ return ()
     let mem1 = mem { snowProgram = prog++(snowProgram mem)
                    , snowLocations = case snowProgram mem of
                         [] -> Map.insert start_loc (snowGlobal mem) (snowLocations mem)
@@ -123,8 +123,8 @@ applyUpdates [] [] _ mem = return mem
 applyUpdates ptr_upds obj_upds instrs mem = do
   let ptr_upds' = fmap (\(ptr,upd) -> (ptr,simplifyCondList upd)) ptr_upds
       obj_upds' = fmap (\(loc,obj_p,upd) -> (loc,obj_p,simplifyCondList upd)) obj_upds
-  trace (unlines $ listHeader "Pointer updates: " (fmap show ptr_upds')) (return ())
-  trace (unlines $ listHeader "Object updates: " (fmap show obj_upds')) (return ())
+  --trace (unlines $ listHeader "Pointer updates: " (fmap show ptr_upds')) (return ())
+  --trace (unlines $ listHeader "Object updates: " (fmap show obj_upds')) (return ())
   let mem1 = foldl (\cmem (ptr,assign)
                     -> cmem { snowPointers = Map.insertWith mergeCondList ptr assign (snowPointers cmem)
                             }) mem ptr_upds'
@@ -142,9 +142,11 @@ applyUpdates' :: (Ord ptr,Ord mloc,Show mloc,Show ptr) => [PointerUpdate ptr] ->
 applyUpdates' _ _ _ [] mem = return mem
 applyUpdates' ptr_upds obj_upds done (i:is) mem = do
   let loc = memInstrSrc i
-      loc_objs = case Map.lookup loc (snowLocations mem) of
-        Just (SnowLocation { snowObjects = x }) -> x
+      loc_objs = case loc of
         Nothing -> Map.empty
+        Just rloc -> case Map.lookup rloc (snowLocations mem) of
+          Just (SnowLocation { snowObjects = x }) -> x
+          Nothing -> Map.empty
   r1 <- foldlM (\(cobj_up,cptr_up) ptr_upd -> do
                    (obj_upd',ptr_upd') <- updatePointer (snowStructs mem) (snowPointers mem) loc_objs ptr_upd i
                    return (obj_upd'++cobj_up,
@@ -192,7 +194,7 @@ initUpdates :: Map String [TypeDesc]
                         Maybe (PointerUpdate ptr),
                         Integer)
 initUpdates structs next_obj instr = case instr of
-  MINull mfrom tp ptr mto -> return (Nothing,Just (ptr,[(constant True,Nothing)]),next_obj)
+  MINull tp ptr -> return (Nothing,Just (ptr,[(constant True,Nothing)]),next_obj)
   MIAlloc mfrom tp num ptr mto -> do
     obj <- allocaObject structs tp num
     return (Just (mto,next_obj,[(constant True,obj)]),
@@ -299,7 +301,7 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) instr = case instr o
                        Just objs' = Map.lookup obj_p all_objs
                  ],Nothing)
     | otherwise -> return ([],Nothing)
-  MICompare mfrom p1 p2 res
+  MICompare p1 p2 res
     | p1==new_ptr -> case Map.lookup p2 all_ptrs of
       Just a2 -> compare' new_conds a2
       Nothing -> return ([],Nothing)
@@ -324,18 +326,18 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) instr = case instr o
                   | (c1,ptr1) <- a1,
                     (c2,ptr2) <- a2 ]
         return ([],Nothing)
-  MISelect mfrom cases ptr_to mto -> case List.find (\(_,ptr_from) -> ptr_from==new_ptr) cases of
+  MISelect cases ptr_to -> case List.find (\(_,ptr_from) -> ptr_from==new_ptr) cases of
     Nothing -> return ([],Nothing)
     Just (cond,_) -> return ([],Just (ptr_to,[(cond .&&. cond',src)
                                              | (cond',src) <- new_conds ]))
-  MICast mfrom tp_from tp_to ptr_from ptr_to mto
+  MICast tp_from tp_to ptr_from ptr_to
     | ptr_from==new_ptr 
       -> return ([],Just (ptr_to,[ case src of
                                       Nothing -> (c,Nothing)
-                                      Just (obj_p,idx) -> trace ("Indexing "++show obj_p++" with "++show idx) (c,Just (obj_p,ptrIndexCast structs tp_to idx))
+                                      Just (obj_p,idx) -> {-trace ("Indexing "++show obj_p++" with "++show idx)-} (c,Just (obj_p,ptrIndexCast structs tp_to idx))
                                  | (c,src) <- new_conds ]))
     | otherwise -> return ([],Nothing)
-  MIIndex mfrom idx ptr_from ptr_to mto
+  MIIndex idx ptr_from ptr_to
     | ptr_from==new_ptr
       -> return ([],Just (ptr_to,[ case src of
                                       Nothing -> (c,Nothing)
@@ -437,11 +439,13 @@ updateObject structs all_ptrs all_objs (loc,new_obj,new_conds) instr = case inst
                                   , let ObjAccessor access = ptrIndexGetAccessor structs idx ])],Nothing)
       Nothing -> return ([(mto,new_obj,new_conds)],Nothing)
     | otherwise -> return ([],Nothing)
-  _ -> if memInstrSrc instr==loc
-       then (case memInstrTrg instr of
-                Nothing -> return ([],Nothing)
-                Just trg -> return ([(trg,new_obj,new_conds)],Nothing))
-       else return ([],Nothing)
+  _ -> case memInstrSrc instr of
+    Nothing -> return ([],Nothing)
+    Just sloc -> if sloc==loc
+                 then (case memInstrTrg instr of
+                          Nothing -> return ([],Nothing)
+                          Just trg -> return ([(trg,new_obj,new_conds)],Nothing))
+                 else return ([],Nothing)
 
 snowDebugLocation :: Show ptr => String -> SnowLocation ptr -> [String]
 snowDebugLocation loc_name cont
