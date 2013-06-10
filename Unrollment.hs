@@ -102,7 +102,9 @@ stepUnrollCtx cfg program env cur = case realizationQueue cur of
                                              , mergeInputs = inp
                                              , mergePhis = phis
                                              , mergeLoc = loc },nenv2,
-                            [],ptr_eqs,[ (act',loc',loc) | (_,act',_,loc') <- inc ]))
+                            [],[ (cond,src_p,trg_p) | (_,Just (trg_p,src_ps)) <- Map.toList ptr_eqs
+                                                    , (cond,src_p) <- src_ps ],
+                            [ (act',loc',loc) | (_,act',_,loc') <- inc ]))
            else (do
                     act <- defConstNamed ("act_"++blk_name) (app or' [ act | (_,act,_,_) <- inc ])
                     let (val_eqs,ptr_eqs) = Map.mapEither id $ Map.intersectionWith (\(tp,name) src -> case tp of
@@ -126,7 +128,7 @@ stepUnrollCtx cfg program env cur = case realizationQueue cur of
                             Map.fromList phis,loc,Nothing,nenv2,
                             [MISelect choices trg | (trg,choices) <- Map.elems ptr_eqs' ]++
                             [MIPhi [ (act',loc') | (_,act',_,loc') <- inc ] loc],
-                            Map.empty,[]))
+                            [],[]))
       (fin,nst,outp) <- postRealize (RealizationEnv { reFunction = unrollCtxFunction cur
                                                     , reBlock = blk
                                                     , reSubblock = sblk
@@ -140,8 +142,16 @@ stepUnrollCtx cfg program env cur = case realizationQueue cur of
                         (unrollNextMem nenv)
                         (unrollNextPtr nenv)
                         realize
+      let (prx_loc,prx_ptr) = unrollProxies nenv
+      nmem1 <- addProgram (unrollMemory nenv) act loc (mem_instr++(reMemInstrs outp))
+      nmem2 <- foldlM (\cmem (cond,src,trg) -> connectLocation cmem prx_ptr cond src trg
+                      ) nmem1 mem_eqs
+      nmem3 <- foldlM (\cmem (cond,src_p,trg_p)
+                       -> connectPointer cmem prx_loc cond src_p trg_p
+                      ) nmem2 ptr_eqs
       return (nenv { unrollNextPtr = reNextPtr nst
-                   , unrollNextMem = reCurMemLoc nst },cur)
+                   , unrollNextMem = reCurMemLoc nst
+                   , unrollMemory = nmem3 },cur)
     Just mn -> do
       nprx <- varNamed "proxy"
       assert $ (mergeActivationProxy mn) .==. (app or' ([ act | (_,act,_,_) <- inc ]++[nprx]))
