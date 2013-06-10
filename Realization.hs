@@ -45,6 +45,7 @@ data RealizationEnv ptr
 
 data RealizationState mem ptr
   = RealizationState { reCurMemLoc :: mem
+                     , reNextMemLoc :: mem
                      , reNextPtr :: ptr
                      , reLocals :: Map (Ptr Instruction) (Either Val ptr)
                      }
@@ -116,9 +117,10 @@ reNewPtr = do
 reNewMemLoc :: Enum mem => RealizationMonad mem ptr mem
 reNewMemLoc = do
   rs <- get
-  let loc = reCurMemLoc rs
-  put $ rs { reCurMemLoc = succ loc }
-  return $ succ loc
+  let loc = reNextMemLoc rs
+  put $ rs { reNextMemLoc = succ loc
+           , reCurMemLoc = loc }
+  return loc
 
 reMemLoc :: RealizationMonad mem ptr mem
 reMemLoc = do
@@ -180,10 +182,11 @@ data BlockFinalization ptr = Jump (CondList (Ptr BasicBlock))
 preRealize :: Realization mem ptr a -> (RealizationInfo,RealizationMonad mem ptr a)
 preRealize r = runRealization r (RealizationInfo Set.empty Map.empty Set.empty Set.empty Set.empty)
 
-postRealize :: RealizationEnv ptr -> mem -> ptr -> RealizationMonad mem ptr a -> SMT (a,RealizationState mem ptr,RealizationOutput mem ptr)
-postRealize env next_mem next_ptr act = runRWST act env (RealizationState { reCurMemLoc = next_mem
-                                                                          , reNextPtr = next_ptr
-                                                                          , reLocals = Map.empty })
+postRealize :: RealizationEnv ptr -> mem -> mem -> ptr -> RealizationMonad mem ptr a -> SMT (a,RealizationState mem ptr,RealizationOutput mem ptr)
+postRealize env cur_mem next_mem next_ptr act = runRWST act env (RealizationState { reCurMemLoc = cur_mem
+                                                                                  , reNextMemLoc = next_mem
+                                                                                  , reNextPtr = next_ptr
+                                                                                  , reLocals = Map.empty })
 
 realizeInstructions :: (Enum ptr,Enum mem) => [InstrDesc Operand] -> Realization mem ptr (BlockFinalization ptr)
 realizeInstructions [instr] = (\(Just fin) -> fin) <$> realizeInstruction instr

@@ -36,6 +36,7 @@ data MemoryInstruction m p
   | MISelect [(SMTExpr Bool,p)] p
   | MICast TypeDesc TypeDesc p p
   | MIIndex [DynNum] p p
+  | MIPhi [(SMTExpr Bool,m)] m
   | MICopy m DynNum p p m
   deriving (Show,Eq)
 
@@ -59,6 +60,7 @@ memInstrSrc (MICompare _ _ _) = Nothing
 memInstrSrc (MISelect _ _) = Nothing
 memInstrSrc (MICast _ _ _ _) = Nothing
 memInstrSrc (MIIndex _ _ _) = Nothing
+memInstrSrc (MIPhi _ _) = Nothing
 memInstrSrc (MICopy m _ _ _ _) = Just m
 
 memInstrTrg :: MemoryInstruction m p -> Maybe m
@@ -72,6 +74,7 @@ memInstrTrg (MICompare _ _ _) = Nothing
 memInstrTrg (MISelect _ _) = Nothing
 memInstrTrg (MICast _ _ _ _) = Nothing
 memInstrTrg (MIIndex _ _ _) = Nothing
+memInstrTrg (MIPhi _ m) = Just m
 memInstrTrg (MICopy _ _ _ _ m) = Just m
 
 flattenMemContent :: MemContent -> [(Integer,Integer)]
