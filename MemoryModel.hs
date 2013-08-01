@@ -29,7 +29,7 @@ data MemoryInstruction m p
   = MINull TypeDesc p
   | MIAlloc m TypeDesc DynNum p m
   | MILoad m p (SMTExpr (BitVector BVUntyped))
-  | MILoadPtr m p p m
+  | MILoadPtr m p p
   | MIStore m (SMTExpr (BitVector BVUntyped)) p m
   | MIStorePtr m p p m
   | MICompare p p (SMTExpr Bool)
@@ -53,7 +53,7 @@ memInstrSrc :: MemoryInstruction m p -> Maybe m
 memInstrSrc (MINull _ _) = Nothing
 memInstrSrc (MIAlloc m _ _ _ _) = Just m
 memInstrSrc (MILoad m _ _) = Just m
-memInstrSrc (MILoadPtr m _ _ _) = Just m
+memInstrSrc (MILoadPtr m _ _) = Just m
 memInstrSrc (MIStore m _ _ _) = Just m
 memInstrSrc (MIStorePtr m _ _ _) = Just m
 memInstrSrc (MICompare _ _ _) = Nothing
@@ -67,7 +67,7 @@ memInstrTrg :: MemoryInstruction m p -> Maybe m
 memInstrTrg (MINull _ _) = Nothing
 memInstrTrg (MIAlloc _ _ _ _ m) = Just m
 memInstrTrg (MILoad _ _ _) = Nothing
-memInstrTrg (MILoadPtr _ _ _ m) = Just m
+memInstrTrg (MILoadPtr _ _ _) = Nothing
 memInstrTrg (MIStore _ _ _ m) = Just m
 memInstrTrg (MIStorePtr _ _ _ m) = Just m
 memInstrTrg (MICompare _ _ _) = Nothing

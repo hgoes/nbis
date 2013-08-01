@@ -154,7 +154,9 @@ argToExpr expr = case operandDesc expr of
                                                  else (info { rePossibleInputs = Map.insert instr (operandType expr,name) (rePossibleInputs info) },do
                                                           re <- ask
                                                           case Map.lookup instr (reInputs re) of
-                                                            Just res -> return res)
+                                                            Just res -> return res
+                                                            Nothing -> error $ "Can't find value "++show name
+                                                      )
   ODGlobal g -> Realization $ \info -> (info { rePossibleGlobals = Set.insert g (rePossibleGlobals info) },do
                                            re <- ask
                                            case Map.lookup g (reGlobals re) of
@@ -277,8 +279,7 @@ realizeInstruction (IAssign trg name expr)
                                       case operandType arg of
                                         PointerType (PointerType tp) -> do
                                           ptr2 <- reNewPtr
-                                          nloc <- reNewMemLoc
-                                          reMemInstr (MILoadPtr loc ptr ptr2 nloc)
+                                          reMemInstr (MILoadPtr loc ptr ptr2)
                                           return $ Right ptr2
                                         PointerType tp -> do
                                           loadRes <- lift $ varNamedAnn "LoadRes" ((typeWidth tp)*8)
@@ -306,11 +307,17 @@ realizeInstruction (IAssign trg name expr)
                                 Left arg'' -> let v = valValue arg''
                                                   w = bitWidth (operandType arg)
                                                   d = (bitWidth tp) - w
-                                                  nv = bvconcat (ite (bvslt v (constantAnn (BitVector 0) w::SMTExpr (BitVector BVUntyped)))
-                                                                 (constantAnn (BitVector (-1)) d::SMTExpr (BitVector BVUntyped))
-                                                                 (constantAnn (BitVector 0) (fromIntegral d))) v
+                                                  nv = bvconcat (constantAnn (BitVector 0) (fromIntegral d)::SMTExpr (BitVector BVUntyped)) v
                                               in Left $ DirectValue nv) <$>
                             (argToExpr arg)
+            ITrunc tp arg -> (\arg' -> case arg' of
+                                 Left (ConditionValue v w) -> Left $ ConditionValue v (bitWidth tp)
+                                 Left arg'' -> let v = valValue arg''
+                                                   w = bitWidth (operandType arg)
+                                                   d = w - (bitWidth tp)
+                                                   nv = bvextract' 0 (bitWidth tp) v
+                                               in Left $ DirectValue nv) <$>
+                             (argToExpr arg)
             IAlloca tp sz -> reInject (\size -> do
                                           ptr <- reNewPtr
                                           loc <- reMemLoc
@@ -344,6 +351,7 @@ realizeInstruction (IAssign trg name expr)
                                              ConstValue bv _ -> Left bv
                                              DirectValue bv -> Right bv
                                          ) <$> argToExpr sz
+            _ -> error $ "Unknown expression: "++show expr
         )) *> pure Nothing
 realizeInstruction (IStore val to) = reInject (\(ptr,val) -> do
                                                   loc <- reMemLoc
