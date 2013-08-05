@@ -30,7 +30,7 @@ main = do
       cfg = UnrollCfg { unrollDoMerge = \_ _ _ -> False
                       , unrollStructs = structs
                       , unrollTypes = alltps }
-      pgr = fmap (\(_,_,blks,_,_) -> programAsGraph blks :: ProgramGraph Gr) funs
+      pgr = fmap (\(args,_,blks,_,_) -> programAsGraph blks args:: ProgramGraph Gr) funs
   bug <- withSMTSolver (case solver opts of
                            Nothing -> "~/debug-smt.sh output-" ++ (entryPoint opts) ++ ".smt"
                            Just bin -> bin) $ do
@@ -76,4 +76,4 @@ main = do
       result <- unroll cfg prog nenv ctxs
       case result of
         Left err -> return $ Left err
-        Right (nctxs,nenv2) -> return $ Right ((spawnContexts nctx)++nctxs,nenv2)
+        Right (nctxs,nenv2) -> return $ Right ((spawnContexts prog nctx)++nctxs,nenv2)

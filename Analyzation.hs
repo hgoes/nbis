@@ -42,18 +42,20 @@ getPhis = foldl (\mp instr -> case instr of
 
 data ProgramGraph gr = ProgramGraph { programGraph :: gr (Ptr BasicBlock,Maybe String,Integer,[InstrDesc Operand]) ()
                                     , nodeMap :: Map (Ptr BasicBlock,Integer) Gr.Node
+                                    , arguments :: [(Ptr Argument,TypeDesc)]
                                     }
 
 programAsGraph :: Gr.DynGraph gr => [(Ptr BasicBlock,Maybe String,[[InstrDesc Operand]])]
-                  -> ProgramGraph gr
-programAsGraph prog = createEdges $ createNodes (ProgramGraph Gr.empty Map.empty) prog
+               -> [(Ptr Argument,TypeDesc)]
+               -> ProgramGraph gr
+programAsGraph prog args = createEdges $ createNodes (ProgramGraph Gr.empty Map.empty args) prog
   where
     createNodes res [] = res
     createNodes res ((blk,blk_name,sblks):rest)
       = createNodes (foldl (\cgr (instrs,sblk)
                             -> let [nnode] = Gr.newNodes 1 (programGraph cgr)
-                               in ProgramGraph { programGraph = Gr.insNode (nnode,(blk,blk_name,sblk,instrs)) (programGraph cgr)
-                                               , nodeMap = Map.insert (blk,sblk) nnode (nodeMap cgr) }
+                               in cgr { programGraph = Gr.insNode (nnode,(blk,blk_name,sblk,instrs)) (programGraph cgr)
+                                      , nodeMap = Map.insert (blk,sblk) nnode (nodeMap cgr) }
                            ) res (zip sblks [0..])
                     ) rest
 

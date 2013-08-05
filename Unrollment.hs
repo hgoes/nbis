@@ -2,8 +2,8 @@
 module Unrollment where
 
 import Language.SMTLib2
-import LLVM.FFI.BasicBlock
-import LLVM.FFI.Instruction
+import LLVM.FFI.BasicBlock (BasicBlock)
+import LLVM.FFI.Instruction (Instruction)
 import LLVM.FFI.Value
 import LLVM.FFI.Constant
 
@@ -51,12 +51,26 @@ data UnrollContext mloc ptr = UnrollContext { unrollOrder :: [Ptr BasicBlock]
                                             , nextMergeNodes :: Map (Ptr BasicBlock,Integer) Integer
                                             , realizationQueue :: [Edge mloc ptr]
                                             , outgoingEdges :: [Edge mloc ptr]
+                                            , returns :: [(SMTExpr Bool,Maybe (Either Val ptr),mloc)]
+                                            , returnStack :: [(ReturnInfo ptr,Ptr Instruction)]
+                                            , calls :: [(String,[Either Val ptr],Map (Ptr Instruction) (Either Val ptr),Map (Ptr Argument) (Either Val ptr),mloc,SMTExpr Bool,Ptr BasicBlock,Integer,Ptr Instruction)]
                                             } deriving (Show)
 
 data Edge mloc ptr = Edge { edgeTargetBlock :: Ptr BasicBlock
                           , edgeTargetSubblock :: Integer
                           , edgeConds :: [(Ptr BasicBlock,SMTExpr Bool,Map (Ptr Instruction) (Either Val ptr),mloc)]
                           } deriving (Show)
+
+data ReturnInfo ptr = ReturnCreate { returnCreateFun :: String
+                                   , returnCreateBlk :: Ptr BasicBlock
+                                   , returnCreateSBlk :: Integer
+                                   , returnCreateInputs :: Map (Ptr Instruction) (Either Val ptr)
+                                   , returnCreateArgs :: Map (Ptr Argument) (Either Val ptr)
+                                   , returnCreateMergeNodes :: Map (Ptr BasicBlock,Integer) Integer
+                                   }
+                    | ReturnMerge { returnMergeNode :: Integer
+                                  }
+                    deriving (Show)
 
 data UnrollConfig = UnrollCfg { unrollDoMerge :: String -> Ptr BasicBlock -> Integer -> Bool
                               , unrollStructs :: Map String [TypeDesc]
@@ -128,52 +142,108 @@ adjustMergeNode' env idx f = do
 unrollProxies :: UnrollEnv mem mloc ptr -> (Proxy mloc,Proxy ptr)
 unrollProxies _ = (Proxy,Proxy)
 
+startBlock :: Gr.Graph gr => ProgramGraph gr -> (Ptr BasicBlock,Integer)
+startBlock pgr = (blk,sblk)
+  where
+    (start_node,_) = Gr.nodeRange (programGraph pgr)
+    Just (blk,_,sblk,_) = Gr.lab (programGraph pgr) start_node
+
+initOrder :: Gr.Graph gr => ProgramGraph gr -> [Ptr BasicBlock]
+initOrder pgr = order
+  where
+    (start_node,_) = Gr.nodeRange (programGraph pgr)
+    [dffTree] = Gr.dff [start_node] (programGraph pgr)
+    order = reverse $ List.nub $ fmap (\nd -> let Just (blk,_,sblk,_) = Gr.lab (programGraph pgr) nd in blk) $ Gr.postorder dffTree
+
 startingContext :: (Gr.Graph gr,MemoryModel mem Integer Integer)
                    => UnrollConfig -> Map String (ProgramGraph gr) -> String
                    -> Map (Ptr GlobalVariable) (TypeDesc,Maybe MemContent)
                    -> SMT (UnrollContext Integer Integer,UnrollEnv mem Integer Integer)
 startingContext cfg program fname globs = case Map.lookup fname program of
-  Just gr -> let (start_node,_) = Gr.nodeRange (programGraph gr)
-             in case Gr.lab (programGraph gr) start_node of
-               Just (blk,_,sblk,_) -> do
-                 let [dffTree] = Gr.dff [start_node] (programGraph gr)
-                     order = reverse $ List.nub $ fmap (\nd -> let Just (blk,_,sblk,_) = Gr.lab (programGraph gr) nd in blk) $ Gr.postorder dffTree
-                     ((cptr,prog),globs') = mapAccumL (\(ptr',prog') (tp,cont) 
-                                                       -> ((succ ptr',(ptr',tp,cont):prog'),ptr')
-                                                      ) (0,[]) globs
-                 mem <- memNew (Proxy::Proxy Integer) (unrollTypes cfg) (unrollStructs cfg) [ (ptr,tp,cont) | (ptr,PointerType tp,cont) <- prog ]
-                 return (UnrollContext { unrollOrder = order
-                                       , unrollCtxFunction = fname
-                                       , unrollCtxArgs = Map.empty
-                                       , currentMergeNodes = Map.empty
-                                       , nextMergeNodes = Map.empty
-                                       , realizationQueue = [Edge { edgeTargetBlock = blk
-                                                                  , edgeTargetSubblock = sblk
-                                                                  , edgeConds = [(nullPtr,constant True,Map.empty,0)]
-                                                                  }]
-                                       , outgoingEdges = []
-                                       },UnrollEnv { unrollNextMem = 1
-                                                   , unrollNextPtr = cptr
-                                                   , unrollGlobals = globs'
-                                                   , unrollMemory = mem
-                                                   , unrollMergeNodes = Map.empty
-                                                   , unrollNextMergeNode = 0
-                                                   , unrollGuards = []
-                                                   , unrollWatchpoints = []
-                                                   })
-               Nothing -> error $ "Initial block not found in program graph. "++show (Gr.nodes (programGraph gr))
+  Just gr -> do
+    let order = initOrder gr
+        (blk,sblk) = startBlock gr
+        ((cptr,prog),globs') = mapAccumL (\(ptr',prog') (tp,cont) 
+                                          -> ((succ ptr',(ptr',tp,cont):prog'),ptr')
+                                         ) (0,[]) globs
+    mem <- memNew (Proxy::Proxy Integer) (unrollTypes cfg) (unrollStructs cfg) [ (ptr,tp,cont) | (ptr,PointerType tp,cont) <- prog ]
+    return (UnrollContext { unrollOrder = order
+                          , unrollCtxFunction = fname
+                          , unrollCtxArgs = Map.empty
+                          , currentMergeNodes = Map.empty
+                          , nextMergeNodes = Map.empty
+                          , realizationQueue = [Edge { edgeTargetBlock = blk
+                                                     , edgeTargetSubblock = sblk
+                                                     , edgeConds = [(nullPtr,constant True,Map.empty,0)]
+                                                     }]
+                          , outgoingEdges = []
+                          , returnStack = []
+                          , returns = []
+                          , calls = []
+                          },UnrollEnv { unrollNextMem = 1
+                                      , unrollNextPtr = cptr
+                                      , unrollGlobals = globs'
+                                      , unrollMemory = mem
+                                      , unrollMergeNodes = Map.empty
+                                      , unrollNextMergeNode = 0
+                                      , unrollGuards = []
+                                      , unrollWatchpoints = []
+                                      })
   Nothing -> error $ "Function "++fname++" not found in program graph."
 
-spawnContexts :: UnrollContext mloc ptr -> [UnrollContext mloc ptr]
-spawnContexts ctx = [ UnrollContext { unrollOrder = shiftOrder (==edgeTargetBlock edge) (unrollOrder ctx)
-                                    , unrollCtxFunction = unrollCtxFunction ctx
-                                    , unrollCtxArgs = unrollCtxArgs ctx
-                                    , currentMergeNodes = Map.delete (edgeTargetBlock edge,edgeTargetSubblock edge) (nextMergeNodes ctx)
-                                    , nextMergeNodes = Map.empty
-                                    , realizationQueue = [edge]
-                                    , outgoingEdges = []
-                                    }
-                    | edge <- outgoingEdges ctx ]
+spawnContexts :: Gr.Graph gr => Map String (ProgramGraph gr) -> UnrollContext mloc ptr -> [UnrollContext mloc ptr]
+spawnContexts funs ctx
+  = [ UnrollContext { unrollOrder = shiftOrder (==edgeTargetBlock edge) (unrollOrder ctx)
+                    , unrollCtxFunction = unrollCtxFunction ctx
+                    , unrollCtxArgs = unrollCtxArgs ctx
+                    , currentMergeNodes = Map.delete (edgeTargetBlock edge,edgeTargetSubblock edge) (nextMergeNodes ctx)
+                    , nextMergeNodes = Map.empty
+                    , realizationQueue = [edge]
+                    , outgoingEdges = []
+                    , returnStack = returnStack ctx
+                    , returns = []
+                    , calls = []
+                    }
+    | edge <- outgoingEdges ctx ]++
+    [ UnrollContext { unrollOrder = initOrder (funs!fname)
+                    , unrollCtxFunction = fname
+                    , unrollCtxArgs = Map.fromList [ (arg_ptr,arg_val) | ((arg_ptr,arg_tp),arg_val) <- zip (arguments fgr) args ]
+                    , currentMergeNodes = Map.empty
+                    , nextMergeNodes = Map.empty
+                    , realizationQueue = [ Edge { edgeTargetBlock = blk
+                                                , edgeTargetSubblock = sblk
+                                                , edgeConds = [(nullPtr,cond,Map.empty,loc)]
+                                                } ]
+                    , outgoingEdges = []
+                    , returns = []
+                    , returnStack = (case Map.lookup (ret_blk,ret_sblk) (nextMergeNodes ctx) of
+                                        Just mn -> ReturnMerge mn
+                                        Nothing -> ReturnCreate (unrollCtxFunction ctx) ret_blk ret_sblk inps ret_args (nextMergeNodes ctx),ret_addr):(returnStack ctx)
+                    , calls = []
+                    }
+      | (fname,args,inps,ret_args,loc,cond,ret_blk,ret_sblk,ret_addr) <- calls ctx
+      , let fgr = funs!fname
+      , let (blk,sblk) = startBlock fgr ]++
+    (case returnStack ctx of
+        (ReturnCreate rfun rblk rsblk rvals rargs rmerge,ret_addr):rstack
+          -> [ UnrollContext { unrollOrder = initOrder (funs!rfun)
+                             , unrollCtxFunction = rfun
+                             , unrollCtxArgs = rargs
+                             , currentMergeNodes = rmerge
+                             , nextMergeNodes = Map.empty
+                             , realizationQueue = [ Edge { edgeTargetBlock = rblk
+                                                         , edgeTargetSubblock = rsblk
+                                                         , edgeConds = [(rblk,ret_cond,case ret_val of
+                                                                            Nothing -> rvals
+                                                                            Just rval -> Map.insert ret_addr rval rvals,ret_loc) ]
+                                                         } ]
+                             , outgoingEdges = []
+                             , returns = []
+                             , returnStack = rstack
+                             , calls = []
+                             }
+             | (ret_cond,ret_val,ret_loc) <- returns ctx ]
+        _ -> [])
 
 performUnrollmentCtx :: (Gr.Graph gr,MemoryModel mem mloc ptr,Enum ptr,Enum mloc)
                  => UnrollConfig
@@ -298,7 +368,10 @@ stepUnrollCtx cfg program env cur = case realizationQueue cur of
                                 , edgeTargetSubblock = 0
                                 , edgeConds = [(blk,act .&&. cond,new_vars,reCurMemLoc nst)]
                                 } | (cond,trg) <- trgs ]
-            Return _ -> []
+            _ -> []
+          outCalls = case fin of
+            Call fname args ret -> [(fname,args,new_vars,unrollCtxArgs cur,reCurMemLoc nst,act,blk,sblk+1,ret)]
+            _ -> []
           (nqueue,nout) = case merge_node of
             -- A merge point was created, so each outgoing edge creates a new context
             Just _ -> (rest,
@@ -324,7 +397,8 @@ stepUnrollCtx cfg program env cur = case realizationQueue cur of
                    , unrollGuards = (reGuards outp)++(unrollGuards nenv)
                    , unrollWatchpoints = (reWatchpoints outp)++(unrollWatchpoints nenv)
                    },cur { realizationQueue = nqueue
-                         , outgoingEdges = nout })
+                         , outgoingEdges = nout
+                         , calls = outCalls ++ (calls cur) })
     Just mn -> do
       -- A suitable merge point is available, so just use it.
       ((mnInps,mnLoc),env') <- adjustMergeNode env mn (\mn' -> do
