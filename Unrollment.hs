@@ -372,6 +372,9 @@ stepUnrollCtx cfg program env cur = case realizationQueue cur of
           outCalls = case fin of
             Call fname args ret -> [(fname,args,new_vars,unrollCtxArgs cur,reCurMemLoc nst,act,blk,sblk+1,ret)]
             _ -> []
+          outReturns = case fin of
+            Return val -> [(act,val,reCurMemLoc nst)]
+            _ -> []
           (nqueue,nout) = case merge_node of
             -- A merge point was created, so each outgoing edge creates a new context
             Just _ -> (rest,
@@ -398,7 +401,8 @@ stepUnrollCtx cfg program env cur = case realizationQueue cur of
                    , unrollWatchpoints = (reWatchpoints outp)++(unrollWatchpoints nenv)
                    },cur { realizationQueue = nqueue
                          , outgoingEdges = nout
-                         , calls = outCalls ++ (calls cur) })
+                         , calls = outCalls ++ (calls cur)
+                         , returns = outReturns ++ (returns cur) })
     Just mn -> do
       -- A suitable merge point is available, so just use it.
       ((mnInps,mnLoc),env') <- adjustMergeNode env mn (\mn' -> do
