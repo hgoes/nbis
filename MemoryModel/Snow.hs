@@ -84,6 +84,7 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
                         [] -> Map.insert start_loc (snowGlobal mem) (snowLocations mem)
                         _ -> snowLocations mem
                    }
+        Just start_loc_cont = Map.lookup start_loc (snowLocations mem1)
     mem2 <- foldlM (\cmem instr -> do
                        (obj_upd',ptr_upd',next) <- initUpdates (snowStructs cmem) (snowNextObject cmem) instr
                        let cmem1 = cmem { snowNextObject = next }
@@ -96,7 +97,7 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
                              Just up -> [up]) (snowProgram cmem1) cmem1
            ) mem1 prog
     --return mem2
-    applyUpdates (Map.toList $ snowPointers mem1) [] prog mem2
+    applyUpdates (Map.toList $ snowPointers mem1) [ (start_loc,n,lst) | (n,lst) <- Map.toList $ snowObjects start_loc_cont ] prog mem2
   connectLocation mem _ cond loc_from loc_to = do
     trace ("Connecting location "++show loc_from++" with "++show loc_to) $ return ()
     let cloc = case Map.lookup loc_from (snowLocations mem) of
