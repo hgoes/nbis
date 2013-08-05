@@ -316,7 +316,7 @@ stepUnrollCtx cfg program env cur = case realizationQueue cur of
                                                     , (cond,src_p) <- src_ps ],
                             [ (act',loc',loc) | (_,act',_,loc') <- inc ]))
            else (do
-                    act <- defConstNamed ("act_"++blk_name) (app or' [ act | (_,act,_,_) <- inc ])
+                    act <- defConstNamed ("act_"++(unrollCtxFunction cur)++"_"++blk_name) (app or' [ act | (_,act,_,_) <- inc ])
                     let (val_eqs,ptr_eqs) = Map.mapEither id $ Map.intersectionWith (\(tp,name) src -> case tp of
                                                                                         PointerType _ -> Right (fmap (\(cond,Right src_p) -> (cond,src_p)) src)
                                                                                         _ -> Left (name,fmap (\(cond,Left src_v) -> (src_v,cond)) src)
