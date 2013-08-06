@@ -104,9 +104,9 @@ compareWithOrder order x y = if x==y
   where
     getOrder' [] = error "Elements not in order"
     getOrder' (c:cs) = if c==x
-                       then GT
+                       then LT
                        else (if c==y
-                             then LT
+                             then GT
                              else getOrder' cs)
 
 shiftOrder :: (a -> Bool) -> [a] -> [a]
