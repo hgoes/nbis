@@ -245,28 +245,31 @@ spawnContexts funs ctx
              | (ret_cond,ret_val,ret_loc) <- returns ctx ]
         _ -> [])
 
-performUnrollmentCtx :: (Gr.Graph gr,MemoryModel mem mloc ptr,Enum ptr,Enum mloc)
-                 => UnrollConfig
-                 -> Map String (ProgramGraph gr)
-                 -> UnrollEnv mem mloc ptr
-                 -> UnrollContext mloc ptr
-                 -> SMT (UnrollEnv mem mloc ptr,UnrollContext mloc ptr)
-performUnrollmentCtx cfg program env ctx
+performUnrollmentCtx :: (Gr.Graph gr,MemoryModel mem mloc ptr,Enum ptr,Enum mloc,Show ptr,Show mloc)
+                        => Bool
+                        -> UnrollConfig
+                        -> Map String (ProgramGraph gr)
+                        -> UnrollEnv mem mloc ptr
+                        -> UnrollContext mloc ptr
+                        -> SMT (UnrollEnv mem mloc ptr,UnrollContext mloc ptr)
+performUnrollmentCtx isFirst cfg program env ctx
   | unrollmentDone ctx = return (env,ctx)
   | otherwise = do
-    (env',ctx') <- stepUnrollCtx cfg program env ctx
-    performUnrollmentCtx cfg program env' ctx'
+    --trace ("Step: "++show ctx) (return ())
+    (env',ctx') <- stepUnrollCtx isFirst cfg program env ctx
+    performUnrollmentCtx False cfg program env' ctx'
 
 unrollmentDone :: UnrollContext mloc ptr -> Bool
 unrollmentDone ctx = List.null (realizationQueue ctx)
 
 stepUnrollCtx :: (Gr.Graph gr,MemoryModel mem mloc ptr,Enum ptr,Enum mloc)
-                 => UnrollConfig
+                 => Bool
+                 -> UnrollConfig
                  -> Map String (ProgramGraph gr)
                  -> UnrollEnv mem mloc ptr
                  -> UnrollContext mloc ptr
                  -> SMT (UnrollEnv mem mloc ptr,UnrollContext mloc ptr)
-stepUnrollCtx cfg program env cur = case realizationQueue cur of
+stepUnrollCtx isFirst cfg program env cur = case realizationQueue cur of
   (Edge blk sblk inc):rest -> case Map.lookup (blk,sblk) (currentMergeNodes cur) of
     Nothing -> do
       let pgr = program!(unrollCtxFunction cur)
@@ -278,7 +281,7 @@ stepUnrollCtx cfg program env cur = case realizationQueue cur of
                          Nothing -> show blk
                          Just rname -> rname)++"_"++show sblk
           mergedInps = Map.unionsWith (++) (fmap (\(_,cond,i,_) -> fmap (\v -> [(cond,v)]) i) inc)
-      (act,inp,phis,loc,merge_node,nenv,mem_instr,ptr_eqs,mem_eqs)
+      (act,inp,phis,start_loc,prev_locs,merge_node,nenv,mem_instr,ptr_eqs,mem_eqs)
         <- if mkMerge
            then (do
                     act_proxy <- varNamed $ "proxy_"++blk_name
@@ -307,7 +310,7 @@ stepUnrollCtx cfg program env cur = case realizationQueue cur of
                                      phi <- varNamed "phi"
                                      return (blk',phi)
                                  ) (Set.toList $ rePossiblePhis info)
-                    return (act_static,inp,phis,loc,
+                    return (act_static,inp,phis,loc,[loc],
                             Just $ MergeNode { mergeActivationProxy = act_proxy
                                              , mergeInputs = inp
                                              , mergePhis = phis
@@ -326,10 +329,10 @@ stepUnrollCtx cfg program env cur = case realizationQueue cur of
                                                             _ -> (env' { unrollNextPtr = succ $ unrollNextPtr env' },Right (unrollNextPtr env',ptrs))
                                                         ) env ptr_eqs
                         (ptr_sims,ptr_eqs'') = Map.mapEither id ptr_eqs'
-                        (loc,nenv2,mphis) = case inc of
-                          [(_,_,_,loc')] -> (loc',nenv1,[])
+                        (start_loc,prev_locs,nenv2,mphis) = case inc of
+                          [(_,_,_,loc')] -> (loc',[loc'],nenv1,[])
                           _ -> let loc' = unrollNextMem nenv1
-                               in (loc',nenv1 { unrollNextMem = succ loc' },[MIPhi [ (act',loc') | (_,act',_,loc') <- inc ] loc])
+                               in (loc',[ loc'' | (_,_,_,loc'') <- inc ],nenv1 { unrollNextMem = succ loc' },[MIPhi [ (act'',loc'') | (_,act'',_,loc'') <- inc ] loc'])
                     val_eqs' <- sequence $ Map.mapWithKey (\inp (name,vals) -> do
                                                               let rname = "inp_"++(case name of
                                                                                       Nothing -> show inp
@@ -345,7 +348,7 @@ stepUnrollCtx cfg program env cur = case realizationQueue cur of
                     return (act,Map.unions [fmap Left val_eqs'
                                            ,fmap (Right . fst) ptr_eqs''
                                            ,fmap Right ptr_sims],
-                            Map.fromList $ catMaybes phis,loc,Nothing,nenv2,
+                            Map.fromList $ catMaybes phis,start_loc,prev_locs,Nothing,nenv2,
                             [MISelect choices trg | (trg,choices) <- Map.elems ptr_eqs'' ]++
                             mphis,
                             [],[]))
@@ -358,7 +361,7 @@ stepUnrollCtx cfg program env cur = case realizationQueue cur of
                                                     , reInputs = inp
                                                     , rePhis = phis
                                                     , reStructs = unrollStructs cfg })
-                        loc
+                        start_loc
                         (unrollNextMem nenv)
                         (unrollNextPtr nenv)
                         realize
@@ -386,9 +389,12 @@ stepUnrollCtx cfg program env cur = case realizationQueue cur of
                                  _ -> (cqueue,enqueueEdge (unrollOrder cur) edge cout)
                              ) (rest,outgoingEdges cur) outEdges
           (prx_loc,prx_ptr) = unrollProxies nenv
+      nmem0 <- if isFirst
+               then makeEntry prx_ptr (unrollMemory nenv) start_loc
+               else return (unrollMemory nenv)
       nmem1 <- case mem_instr++(reMemInstrs outp) of
-        [] -> return (unrollMemory nenv)
-        xs -> addProgram (unrollMemory nenv) act loc xs
+        [] -> return nmem0
+        xs -> addProgram nmem0 act prev_locs xs
       nmem2 <- foldlM (\cmem (cond,src,trg) -> connectLocation cmem prx_ptr cond src trg
                       ) nmem1 mem_eqs
       nmem3 <- foldlM (\cmem (cond,src_p,trg_p)

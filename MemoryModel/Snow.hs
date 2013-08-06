@@ -77,14 +77,9 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
                         , snowGlobal = globs
                         , snowNextObject = next
                         }
-  addProgram mem act start_loc prog = do
-    trace ("Adding program "++show start_loc++": "++show prog) $ return ()
-    let mem1 = mem { snowProgram = prog++(snowProgram mem)
-                   , snowLocations = case snowProgram mem of
-                        [] -> Map.insert start_loc (snowGlobal mem) (snowLocations mem)
-                        _ -> snowLocations mem
-                   }
-        Just start_loc_cont = Map.lookup start_loc (snowLocations mem1)
+  makeEntry _ mem loc = return $ mem { snowLocations = Map.insert loc (snowGlobal mem) (snowLocations mem) }
+  addProgram mem act prev_locs prog = do
+    let mem1 = mem { snowProgram = prog++(snowProgram mem) }
     mem2 <- foldlM (\cmem instr -> do
                        (obj_upd',ptr_upd',next) <- initUpdates (snowStructs cmem) (snowNextObject cmem) instr
                        let cmem1 = cmem { snowNextObject = next }
@@ -97,7 +92,10 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
                              Just up -> [up]) (snowProgram cmem1) cmem1
            ) mem1 prog
     --return mem2
-    applyUpdates (Map.toList $ snowPointers mem1) [ (start_loc,n,lst) | (n,lst) <- Map.toList $ snowObjects start_loc_cont ] prog mem2
+    applyUpdates (Map.toList $ snowPointers mem1) [ (prev_loc,n,lst)
+                                                  | prev_loc <- prev_locs,
+                                                    let Just prev_loc_cont = Map.lookup prev_loc (snowLocations mem2),
+                                                    (n,lst) <- Map.toList $ snowObjects prev_loc_cont ] prog mem2
   connectLocation mem _ cond loc_from loc_to = do
     trace ("Connecting location "++show loc_from++" with "++show loc_to) $ return ()
     let cloc = case Map.lookup loc_from (snowLocations mem) of
@@ -439,6 +437,9 @@ updateObject structs all_ptrs all_objs (loc,new_obj,new_conds) instr = case inst
                                   , let ObjAccessor access = ptrIndexGetAccessor structs idx ])],Nothing)
       Nothing -> return ([(mto,new_obj,new_conds)],Nothing)
     | otherwise -> return ([],Nothing)
+  MIPhi inc mto -> case List.find (\(_,mfrom) -> mfrom==loc) inc of
+    Nothing -> return ([],Nothing)
+    Just _ -> return ([(mto,new_obj,new_conds)],Nothing)
   _ -> case memInstrSrc instr of
     Nothing -> return ([],Nothing)
     Just sloc -> if sloc==loc

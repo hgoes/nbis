@@ -44,7 +44,8 @@ type MemoryProgram m p = [MemoryInstruction m p]
 
 class MemoryModel m mloc ptr where
   memNew :: Proxy mloc -> Set TypeDesc -> Map String [TypeDesc] -> [(ptr,TypeDesc,Maybe MemContent)] -> SMT m
-  addProgram :: m -> SMTExpr Bool -> mloc -> MemoryProgram mloc ptr -> SMT m
+  makeEntry :: Proxy ptr -> m -> mloc -> SMT m
+  addProgram :: m -> SMTExpr Bool -> [mloc] -> MemoryProgram mloc ptr -> SMT m
   connectLocation :: m -> Proxy ptr -> SMTExpr Bool -> mloc -> mloc -> SMT m
   connectPointer :: m -> Proxy mloc -> SMTExpr Bool -> ptr -> ptr -> SMT m
   debugMem :: m -> Proxy mloc -> Proxy ptr -> String

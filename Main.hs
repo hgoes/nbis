@@ -37,23 +37,23 @@ main = do
     setOption (PrintSuccess False)
     setOption (ProduceModels True)
     (start,env :: UnrollEnv (SnowMemory Integer Integer) Integer Integer) <- startingContext cfg pgr (entryPoint opts) globs
-    findBug cfg pgr 0 env [start]
+    findBug True cfg pgr 0 env [start]
   case bug of
     Just tr -> do
       putStrLn "Bug found:"
       print tr
     Nothing -> putStrLn "No bug found."
   where
-    findBug cfg prog depth env ctxs = do
+    findBug isFirst cfg prog depth env ctxs = do
       --trace ("Depth: "++show depth) (return ())
-      --trace ("Contexts: "++show ctxs) (return ())
-      result <- unroll cfg prog env ctxs
+      --trace ("Contexts:\n"++(unlines $ fmap show ctxs)) (return ())
+      result <- unroll isFirst cfg prog env ctxs
       case result of
         Left err -> return (Just err)
         Right ([],nenv) -> return Nothing
-        Right (nctxs,nenv) -> findBug cfg prog (depth+1) nenv nctxs
+        Right (nctxs,nenv) -> findBug False cfg prog (depth+1) nenv nctxs
     
-    unroll cfg prog env []
+    unroll isFirst cfg prog env []
       = stack (do
                   let (p1,p2) = unrollProxies env in trace (debugMem (unrollMemory env) p1 p2) (return ())
                   mapM_ (\mn -> assert $ not' $ mergeActivationProxy mn) (unrollMergeNodes env)
@@ -71,9 +71,9 @@ main = do
                                           ) (unrollWatchpoints env)
                              return $ Left $ catMaybes outp)
                     else return (Right ([],env)))
-    unroll cfg prog env (ctx:ctxs) = do
-      (nenv,nctx) <- performUnrollmentCtx cfg prog env ctx
-      result <- unroll cfg prog nenv ctxs
+    unroll isFirst cfg prog env (ctx:ctxs) = do
+      (nenv,nctx) <- performUnrollmentCtx isFirst cfg prog env ctx
+      result <- unroll False cfg prog nenv ctxs
       case result of
         Left err -> return $ Left err
         Right (nctxs,nenv2) -> return $ Right ((spawnContexts prog nctx)++nctxs,nenv2)
