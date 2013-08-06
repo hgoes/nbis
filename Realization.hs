@@ -383,7 +383,7 @@ intrinsics :: (Enum ptr,Enum mem) => String -> Maybe (Bool,[(Either Val ptr,Type
 --intrinsics "llvm.memcpy.p0i8.p0i8.i32" = Just intr_memcpy
 --intrinsics "llvm.memset.p0i8.i32" = Just intr_memset
 --intrinsics "llvm.memset.p0i8.i64" = Just intr_memset
-intrinsics "llvm.stacksave" = Just (False,intr_stacksave)
+intrinsics "llvm.stacksave" = Just (True,intr_stacksave)
 intrinsics "llvm.stackrestore" = Just (False,intr_stackrestore)
 intrinsics "nbis_restrict" = Just (False,intr_restrict)
 intrinsics "nbis_assert" = Just (False,intr_assert)
@@ -447,5 +447,8 @@ intr_nondet width [] = do
   v <- lift $ varNamedAnn "nondetVar" width
   return (Just $ Left $ DirectValue v)
 
-intr_stacksave _ = return Nothing
+intr_stacksave _ = do
+  ptr <- reNewPtr
+  reMemInstr (MINull (IntegerType 8) ptr)
+  return (Just $ Right ptr)
 intr_stackrestore _ = return Nothing
