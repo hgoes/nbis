@@ -339,7 +339,7 @@ stepUnrollCtx isFirst cfg program env cur = case realizationQueue cur of
                                                                                       Just n -> n)
                                                               valCopy rname (valSwitch vals)
                                                           ) val_eqs
-                    phis <- mapM (\blk' -> case [ act | (blk'',cond,_,_) <- inc, blk''==blk' ] of
+                    phis <- mapM (\blk' -> case [ cond | (blk'',cond,_,_) <- inc, blk''==blk' ] of
                                      [] -> return Nothing
                                      xs -> do
                                        phi <- defConstNamed "phi" (app or' xs)
