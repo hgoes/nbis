@@ -162,11 +162,15 @@ indexUnbounded :: Show ptr => Map String [TypeDesc] -> TypeDesc -> [DynNum]
                   -> (Object ptr -> (Object ptr,a,[(ErrorDesc,SMTExpr Bool)]))
                   -> UnboundedObject ptr
                   -> (UnboundedObject ptr,a,[(ErrorDesc,SMTExpr Bool)])
-indexUnbounded structs tp (Right i:is) f dynarr@(DynFlatArrayObject { dynFlatArrayBound = sz
-                                                                    , dynFlatArray = arrs
-                                                                    })
-  = let (nobj,res,errs) = indexBounded structs tp is f (assembleObject structs tp [ select arr i | arr <- arrs ])
-    in (dynarr { dynFlatArray = [ store arr i v | (arr,v) <- zip arrs (disassembleObject nobj) ] },res,{-(Overrun,sz .<=. i):-}errs)
+indexUnbounded structs tp (i:is) f dynarr@(DynFlatArrayObject { dynFlatArrayBound = sz
+                                                              , dynFlatArray = arrs
+                                                              , dynFlatArrayIndexSize = idx_sz
+                                                              })
+  = let i' = case i of
+          Right x -> x
+          Left x -> constantAnn (BitVector x) idx_sz
+        (nobj,res,errs) = indexBounded structs tp is f (assembleObject structs tp [ select arr i' | arr <- arrs ])
+    in (dynarr { dynFlatArray = [ store arr i' v | (arr,v) <- zip arrs (disassembleObject nobj) ] },res,{-(Overrun,sz .<=. i):-}errs)
 indexUnbounded _ tp idx _ obj = error $ "indexUnbounded unimplemented for "++show tp++" "++show idx++" ("++show obj++") in Snow memory model"
 
 assembleObject :: Map String [TypeDesc] -> TypeDesc -> [SMTExpr (BitVector BVUntyped)] -> BoundedObject ptr
