@@ -2,14 +2,15 @@
 module MemoryModel.Snow.Object where
 
 import Language.SMTLib2
-import Data.Map as Map
+import Data.Map (Map)
+import qualified Data.Map as Map
 import Data.List as List
 --import Debug.Trace
 
 import TypeDesc
 import MemoryModel
 
-data Object ptr 
+data Object ptr
   = Bounded (BoundedObject ptr)
   | Unbounded (UnboundedObject ptr)
   deriving (Show,Eq)
@@ -34,9 +35,9 @@ data BoundedObject ptr
   | AnyPointer
   deriving (Show,Eq)
 
-data ObjAccessor ptr = ObjAccessor (forall a. (Object ptr -> (Object ptr,a,[(ErrorDesc,SMTExpr Bool)])) 
+data ObjAccessor ptr = ObjAccessor (forall a. (Object ptr -> (Object ptr,[(a,SMTExpr Bool)],[(ErrorDesc,SMTExpr Bool)]))
                                     -> Object ptr
-                                    -> (Object ptr,a,[(ErrorDesc,SMTExpr Bool)]))
+                                    -> (Object ptr,[(a,SMTExpr Bool)],[(ErrorDesc,SMTExpr Bool)]))
 
 type PtrIndex = [(TypeDesc,[DynNum])]
 
@@ -80,7 +81,7 @@ ptrIndexEq ((tp1,idx1):r1) ((tp2,idx2):r2)
 
 ptrIndexGetAccessor :: Show ptr => Map String [TypeDesc] -> PtrIndex -> ObjAccessor ptr
 ptrIndexGetAccessor _ [] = ObjAccessor id
-ptrIndexGetAccessor structs all@((tp,idx):rest) 
+ptrIndexGetAccessor structs all@((tp,idx):rest)
   = {-trace (show all) $-} indexObject structs (PointerType tp) idx (ptrIndexGetAccessor structs rest)
 
 ptrIndexGetType :: Map String [TypeDesc] -> PtrIndex -> TypeDesc
@@ -106,25 +107,43 @@ changeAt 0 f (x:xs) = let (x',y,z) = f x
 changeAt n f (x:xs) = let (xs',y,z) = changeAt (n-1) f xs
                       in (x:xs',y,z)
 
-indexObject :: Show ptr => Map String [TypeDesc] -> TypeDesc 
+changeAtDyn :: SMTExpr (BitVector BVUntyped) -> (a -> SMTExpr Bool -> (a,b,c)) -> [a] -> ([a],[b],[c])
+changeAtDyn idx f xs = change' 0 xs
+  where
+    idx_sz = extractAnnotation idx
+
+    change' i [] = ([],[],[])
+    change' i (x:xs) = let (nx,r,e) = f x (idx .==. (constantAnn (BitVector i) idx_sz))
+                           (nxs,rs,es) = change' (i+1) xs
+                       in (nx:nxs,r:rs,e:es)
+
+indexObject :: Show ptr => Map String [TypeDesc] -> TypeDesc
                -> [DynNum]
                -> ObjAccessor ptr -> ObjAccessor ptr
 indexObject _ _ [] access = access
 -- Static array access
 indexObject structs (PointerType tp) (i:idx) (ObjAccessor access)
-  = ObjAccessor 
+  = ObjAccessor
     (\f obj -> access (\obj' -> case (obj',i) of
-                          (Bounded (StaticArrayObject objs),Left i') 
-                            -> let (nobjs,res,errs) 
-                                     = changeAt i' 
+                          (Bounded (StaticArrayObject objs),Left i')
+                            -> let (nobjs,res,errs)
+                                     = changeAt i'
                                        (indexBounded structs tp idx f) objs
                                in (Bounded (StaticArrayObject nobjs),res,errs)
-                          (Bounded obj,Left 0) 
-                            -> let (nobj,res,errs) 
+                          (Bounded (StaticArrayObject objs),Right i')
+                            -> let (nobjs,res,errs) = changeAtDyn i' (\el cond -> let (nel,res,errs) = indexBounded structs tp idx f el
+                                                                                      nerrs = fmap (\(desc,cond') -> (desc,cond .&&. cond')) errs
+                                                                                  in (iteBounded cond nel el,(res,cond),nerrs)
+                                                                     ) objs
+                                   nres = concat $ fmap (\(lst,c) -> fmap (\(x,c') -> (x,c' .&&. c)) lst) res
+                               in (Bounded (StaticArrayObject nobjs),nres,concat errs)
+                          (Bounded obj,Left 0)
+                            -> let (nobj,res,errs)
                                      = indexBounded structs tp idx f obj
                                in (Bounded nobj,res,errs)
                           (Unbounded obj,_) -> let (nobj,res,errs) = indexUnbounded structs tp (i:idx) f obj
                                                in (Unbounded nobj,res,errs)
+                          _ -> error $ "indexObject of "++show obj'++" with "++show i++" unimplemented"
                       ) obj)
 indexObject structs (StructType desc) (Left i:idx) (ObjAccessor access)
   = let tps = case desc of
@@ -252,13 +271,13 @@ loadPtr (Bounded AnyPointer) = (Nothing,[]) -- FIXME: What to do here?
 loadPtr obj = error $ "Cant load pointer from "++show obj
 
 storeObject :: Show ptr => SMTExpr (BitVector BVUntyped) -> Object ptr -> (Object ptr,[(ErrorDesc,SMTExpr Bool)])
-storeObject bv (Bounded obj) 
+storeObject bv (Bounded obj)
   = let (noff,nobj,errs) = storeObject' 0 bv obj
     in (Bounded nobj,errs)
 
-storeObject' :: Show ptr => Integer 
-                -> SMTExpr (BitVector BVUntyped) 
-                -> BoundedObject ptr 
+storeObject' :: Show ptr => Integer
+                -> SMTExpr (BitVector BVUntyped)
+                -> BoundedObject ptr
                 -> (Integer,BoundedObject ptr,[(ErrorDesc,SMTExpr Bool)])
 storeObject' off bv (WordObject v)
   = let bvsize = extractAnnotation bv
@@ -274,15 +293,15 @@ storeObject' off bv (WordObject v)
                     (bvextract' (bvsize-off) (vsize-bvsize+off) v),[])
       GT -> (off+vsize,WordObject $
                        bvextract' off vsize bv,[])
-storeObject' off bv (StructObject objs) 
+storeObject' off bv (StructObject objs)
   = let (noff,nobjs,errs) = storeObjects' off bv objs
     in (noff,StructObject nobjs,errs)
 storeObject' off bv (StaticArrayObject objs)
   = let (noff,nobjs,errs) = storeObjects' off bv objs
     in (noff,StaticArrayObject nobjs,errs)
 storeObject' _ _ obj = error $ "storeObject' not implemented for "++show obj
-            
-storeObjects' :: Show ptr => Integer -> SMTExpr (BitVector BVUntyped) 
+
+storeObjects' :: Show ptr => Integer -> SMTExpr (BitVector BVUntyped)
                  -> [BoundedObject ptr]
                  -> (Integer,[BoundedObject ptr],[(ErrorDesc,SMTExpr Bool)])
 storeObjects' off bv [] = (off,[],[])
@@ -300,3 +319,6 @@ storePtr' :: ptr -> BoundedObject ptr -> (BoundedObject ptr,[(ErrorDesc,SMTExpr 
 storePtr' ptr (ValidPointer _) = (ValidPointer ptr,[])
 storePtr' ptr NullPointer = (ValidPointer ptr,[])
 storePtr' ptr AnyPointer = (ValidPointer ptr,[])
+
+iteBounded :: SMTExpr Bool -> BoundedObject ptr -> BoundedObject ptr -> BoundedObject ptr
+iteBounded cond (WordObject w1) (WordObject w2) = WordObject (ite cond w1 w2)

@@ -183,7 +183,7 @@ connectObjectUpdate :: Ord mloc
                        -> [ObjectUpdate mloc ptr]
 connectObjectUpdate mp x@(loc,obj_p,assign) = case Map.lookup loc mp of
   Nothing -> [x]
-  Just locs -> x:(concat $ fmap (connectObjectUpdate mp) 
+  Just locs -> x:(concat $ fmap (connectObjectUpdate mp)
                   [ (loc',obj_p,[ (cond .&&. cond',obj) | (cond',obj) <- assign ]) | (loc',cond) <- locs ])
 
 initUpdates :: Map String [TypeDesc]
@@ -222,13 +222,13 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) instr = case instr o
                     Nothing -> return () -- TODO: Is this sound?
                     Just objs -> do
                       mapM_ (\(cond',obj) -> do
-                                let (_,loaded,errs) = access 
+                                let (_,loaded,errs) = access
                                                       (\obj' -> let (res,errs) = loadObject sz obj'
-                                                                in (obj',res,errs)
+                                                                in (obj',[(res,constant True)],errs)
                                                       ) obj
                                 comment $ "Load from "++show ptr
-                                assert $ (and' `app` [cond,cond']
-                                         ) .=>. (res .==. loaded)
+                                mapM_ (\(loaded',cond'') -> assert $ (and' `app` [cond,cond',cond'']) .=>. (res .==. loaded')
+                                      ) loaded
                             ) objs
             ) new_conds
       return ([],Nothing)
@@ -244,14 +244,14 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) instr = case instr o
                                    -> fmap (\(cond',obj)
                                             -> let (_,loaded,errs) = access
                                                                       (\obj' -> let (res,errs) = loadPtr obj'
-                                                                                in (obj',res,errs)
+                                                                                in (obj',[(res,constant True)],errs)
                                                                       ) obj
-                                                in case loaded of
-                                                  Nothing -> [(and' `app` ([cond,cond']),Nothing)]
-                                                  Just p -> case Map.lookup p all_ptrs of
-                                                    Just dests
-                                                      -> [(and' `app` ([cond,cond',c]),d)
-                                                         | (c,d) <- dests ]
+                                                in concat [ case loaded' of
+                                                               Nothing -> [(and' `app` [cond,cond',cond''],Nothing)]
+                                                               Just p -> case Map.lookup p all_ptrs of
+                                                                 Just dests -> [(and' `app` [cond,cond',cond'',cond'''],d)
+                                                                               | (cond''',d) <- dests ]
+                                                          | (loaded',cond'') <- loaded ]
                                            ) objs'
                                  Nothing -> [] -- TODO: Is this sound?
                       ) new_conds
@@ -264,7 +264,7 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) instr = case instr o
       -> return ([ (mto,obj_p,[ (cond .&&. cond',nobj)
                               | (cond',obj) <- objs',
                                 let (nobj,_,errs) = access (\obj' -> let (res,errs) = storeObject val obj'
-                                                                     in (res,(),errs)
+                                                                     in (res,[((),constant True)],errs)
                                                            ) obj
                               ])
                  | (cond,Just (obj_p,idx)) <- new_conds,
@@ -280,7 +280,7 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) instr = case instr o
       Just dests -> return ([ (mto,obj_p,[ (cond .&&. cond',nobj)
                                          | (cond',obj) <- objs',
                                            let (nobj,_,errs) = access (\obj' -> let (res,errs) = storePtr ptr_from obj'
-                                                                                in (res,(),errs)
+                                                                                in (res,[((),constant True)],errs)
                                                                       ) obj
                                          ])
                             | (cond,Just (obj_p,idx)) <- dests,
@@ -292,7 +292,7 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) instr = case instr o
       -> return ([ (mto,obj_p,[ (cond .&&. cond',nobj)
                               | (cond',obj) <- objs',
                                 let (nobj,_,errs) = access (\obj' -> let (res,errs) = storePtr ptr_from obj'
-                                                                     in (res,(),errs)
+                                                                     in (res,[((),constant True)],errs)
                                                            ) obj
                               ])
                  | (cond,Just (obj_p,idx)) <- new_conds,
@@ -311,7 +311,7 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) instr = case instr o
     where
       compare' a1 a2 = do
         comment $ "Compare "++show p1++" and "++show p2
-        sequence_ [ assert $ (c1 .&&. c2) .=>. 
+        sequence_ [ assert $ (c1 .&&. c2) .=>.
                     (case (ptr1,ptr2) of
                         (Nothing,Nothing) -> res
                         (Just (o1,i1),Just (o2,i2))
@@ -330,7 +330,7 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) instr = case instr o
     Just (cond,_) -> return ([],Just (ptr_to,[(cond .&&. cond',src)
                                              | (cond',src) <- new_conds ]))
   MICast tp_from tp_to ptr_from ptr_to
-    | ptr_from==new_ptr 
+    | ptr_from==new_ptr
       -> return ([],Just (ptr_to,[ case src of
                                       Nothing -> (c,Nothing)
                                       Just (obj_p,idx) -> {-trace ("Indexing "++show obj_p++" with "++show idx)-} (c,Just (obj_p,ptrIndexCast structs tp_to idx))
@@ -362,11 +362,12 @@ updateObject structs all_ptrs all_objs (loc,new_obj,new_conds) instr = case inst
                   Just (obj_p,idx) -> if obj_p==new_obj
                                       then mapM_ (\(cond',obj) -> do
                                                      let ObjAccessor access = ptrIndexGetAccessor structs idx
-                                                         (_,loaded,errs) = access 
+                                                         (_,loaded,errs) = access
                                                                            (\obj' -> let (res,errs) = loadObject sz obj'
-                                                                                     in (obj',res,errs)
+                                                                                     in (obj',[(res,constant True)],errs)
                                                                            ) obj
-                                                     assert $ (cond .&&. cond') .=>. (res .==. loaded)
+                                                     mapM_ (\(loaded',cond'') -> assert $ (and' `app` [cond,cond',cond'']) .=>. (res .==. loaded')
+                                                           ) loaded
                                                  ) new_conds
                                       else return ()
               ) srcs
@@ -382,17 +383,18 @@ updateObject structs all_ptrs all_objs (loc,new_obj,new_conds) instr = case inst
             nptr = [ case src of
                         Nothing -> []
                         Just (obj_p,idx) -> if obj_p==new_obj
-                                            then [ case loaded of
-                                                      Nothing -> [(cond .&&. cond',Nothing)]
+                                            then [ case loaded' of
+                                                      Nothing -> [(and' `app` [cond,cond',cond''],Nothing)]
                                                       Just p -> case Map.lookup p all_ptrs of
-                                                        Just dests -> [ (and' `app` [cond,cond',cond''],dest) 
-                                                                      | (cond'',dest) <- dests ]
+                                                        Just dests -> [ (and' `app` [cond,cond',cond'',cond'''],dest)
+                                                                      | (cond''',dest) <- dests ]
                                                  | (cond',obj) <- new_conds
                                                  , let ObjAccessor access = ptrIndexGetAccessor structs idx
                                                        (_,loaded,errs) = access
                                                                          (\obj' -> let (res,errs) = loadPtr obj'
-                                                                                   in (obj',res,errs)
+                                                                                   in (obj',[(res,constant True)],errs)
                                                                          ) obj
+                                                 , (loaded',cond'') <- loaded
                                                  ]
                                             else []
                    | (cond,src) <- srcs
@@ -411,7 +413,7 @@ updateObject structs all_ptrs all_objs (loc,new_obj,new_conds) instr = case inst
                                            ,(cond .&&. cond',nobj)]
                                          | (cond',obj) <- new_conds
                                          , let (nobj,_,errs) = access (\obj' -> let (res,errs) = storeObject val obj'
-                                                                                in (res,(),errs)
+                                                                                in (res,[((),constant True)],errs)
                                                                       ) obj
                                          ]
                                     else [ (cond .&&. cond',obj) | (cond',obj) <- new_conds ]
@@ -429,7 +431,7 @@ updateObject structs all_ptrs all_objs (loc,new_obj,new_conds) instr = case inst
                                            ,(cond .&&. cond',nobj)]
                                          | (cond',obj) <- new_conds
                                          , let (nobj,_,errs) = access (\obj' -> let (res,errs) = storePtr ptr_from obj'
-                                                                                in (res,(),errs)
+                                                                                in (res,[((),constant True)],errs)
                                                                       ) obj
                                          ]
                                     else [ (cond .&&. cond',obj) | (cond',obj) <- new_conds ]
@@ -463,7 +465,7 @@ listHeader x (y:ys) = let l = (length x)+1
                       in (x++" "++y):(fmap ((replicate l ' ')++) ys)
 
 snowDebug :: (Show ptr,Show mloc) => SnowMemory mloc ptr -> String
-snowDebug mem = unlines $ 
+snowDebug mem = unlines $
                 (concat
                  [ snowDebugLocation (show loc) cont
                  | (loc,cont) <- Map.toList (snowLocations mem)
@@ -479,7 +481,7 @@ snowDebug mem = unlines $
                 (listHeader "Pointer connects:"
                  [ concat $
                    listHeader (show ptr++":")
-                   [ show cond ++ " ~> " ++ show oth 
+                   [ show cond ++ " ~> " ++ show oth
                    | (oth,cond) <- conns ]
                  | (ptr,conns) <- Map.toList (snowPointerConnections mem)
                  ])
