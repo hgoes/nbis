@@ -19,7 +19,7 @@ import qualified Data.Set as Set
 import Data.Traversable
 import Data.Foldable
 import Foreign.Ptr
-import Prelude hiding (foldr)
+import Prelude hiding (foldr,all)
 import Data.Maybe (catMaybes)
 
 import LLVM.FFI.Value
@@ -190,11 +190,11 @@ postRealize env cur_mem next_mem next_ptr act = runRWST act env (RealizationStat
                                                                                   , reNextPtr = next_ptr
                                                                                   , reLocals = Map.empty })
 
-realizeInstructions :: (Enum ptr,Enum mem) => [InstrDesc Operand] -> Realization mem ptr (BlockFinalization ptr)
+realizeInstructions :: (Eq ptr,Enum ptr,Enum mem) => [InstrDesc Operand] -> Realization mem ptr (BlockFinalization ptr)
 realizeInstructions [instr] = (\(Just fin) -> fin) <$> realizeInstruction instr
 realizeInstructions (instr:instrs) = ((\Nothing -> ()) <$> realizeInstruction instr) *> realizeInstructions instrs
 
-realizeInstruction :: (Enum ptr,Enum mem) => InstrDesc Operand -> Realization mem ptr (Maybe (BlockFinalization ptr))
+realizeInstruction :: (Eq ptr,Enum ptr,Enum mem) => InstrDesc Operand -> Realization mem ptr (Maybe (BlockFinalization ptr))
 realizeInstruction (ITerminator (IRet e)) = Just . Return . Just <$> argToExpr e
 realizeInstruction (ITerminator IRetVoid) = pure $ Just $ Return Nothing
 realizeInstruction (ITerminator (IBr to)) = pure $ Just $ Jump [(constant True,to)]
@@ -263,12 +263,13 @@ realizeInstruction (IAssign trg name expr)
                                       (reLift reNewPtr)
             IPhi args -> reInject (\args' -> case args' of
                                       Left [(_,v)] -> return (Left v)
-                                      Right [(_,p)] -> return (Right p)
                                       Left vs -> return $ Left $ valSwitch (fmap (\(c,v) -> (v,c)) vs)
-                                      Right ps -> do
-                                        ptr <- reNewPtr
-                                        reMemInstr (MISelect ps ptr)
-                                        return $ Right ptr
+                                      Right ps@((_,p):ps') -> if all (\(_,p') -> p==p') ps'
+                                                              then return (Right p)
+                                                              else (do
+                                                                       ptr <- reNewPtr
+                                                                       reMemInstr (MISelect ps ptr)
+                                                                       return $ Right ptr)
                                   ) $
                          (\args' -> case catMaybes args' of
                              all@((_,Right _):_) -> Right (fmap (\(cond,Right p) -> (cond,p)) all)
@@ -332,10 +333,12 @@ realizeInstruction (IAssign trg name expr)
                                              ) <$> argToExpr sz')
             ISelect cond ifT ifF -> reInject (\(cond',ifTArg,ifFArg)
                                               -> case (ifTArg,ifFArg) of
-                                                (Right ifT',Right ifF') -> do
-                                                  ptr <- reNewPtr
-                                                  reMemInstr (MISelect [(cond',ifT'),(not' cond',ifF')] ptr)
-                                                  return $ Right ptr
+                                                (Right ifT',Right ifF') -> if ifT'==ifF'
+                                                                           then return (Right ifT')
+                                                                           else (do
+                                                                                    ptr <- reNewPtr
+                                                                                    reMemInstr (MISelect [(cond',ifT'),(not' cond',ifF')] ptr)
+                                                                                    return $ Right ptr)
                                                 (Left ifT',Left ifF') -> return $ Left $ valSwitch [(ifT',cond'),(ifF',cond')]) $
                                     (\(Left argCond) ifT' ifF' -> (valCond argCond,ifT',ifF')) <$>
                                     (argToExpr cond) <*>

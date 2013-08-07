@@ -24,7 +24,7 @@ import qualified Data.Graph.Inductive as Gr
 import Data.Traversable
 import Data.Foldable
 import Data.Proxy
-import Prelude hiding (sequence,mapM,mapM_,foldl)
+import Prelude hiding (sequence,mapM,mapM_,foldl,all)
 import Data.Ord
 import Data.Maybe (catMaybes)
 
@@ -245,7 +245,7 @@ spawnContexts funs ctx
              | (ret_cond,ret_val,ret_loc) <- returns ctx ]
         _ -> [])
 
-performUnrollmentCtx :: (Gr.Graph gr,MemoryModel mem mloc ptr,Enum ptr,Enum mloc,Show ptr,Show mloc)
+performUnrollmentCtx :: (Gr.Graph gr,MemoryModel mem mloc ptr,Eq ptr,Enum ptr,Eq mloc,Enum mloc,Show ptr,Show mloc)
                         => Bool
                         -> UnrollConfig
                         -> Map String (ProgramGraph gr)
@@ -262,7 +262,7 @@ performUnrollmentCtx isFirst cfg program env ctx
 unrollmentDone :: UnrollContext mloc ptr -> Bool
 unrollmentDone ctx = List.null (realizationQueue ctx)
 
-stepUnrollCtx :: (Gr.Graph gr,MemoryModel mem mloc ptr,Enum ptr,Enum mloc)
+stepUnrollCtx :: (Gr.Graph gr,MemoryModel mem mloc ptr,Eq ptr,Enum ptr,Eq mloc,Enum mloc)
                  => Bool
                  -> UnrollConfig
                  -> Map String (ProgramGraph gr)
@@ -324,15 +324,17 @@ stepUnrollCtx isFirst cfg program env cur = case realizationQueue cur of
                                                                                         PointerType _ -> Right (fmap (\(cond,Right src_p) -> (cond,src_p)) src)
                                                                                         _ -> Left (name,fmap (\(cond,Left src_v) -> (src_v,cond)) src)
                                                                                     ) (rePossibleInputs info) mergedInps
-                        (nenv1,ptr_eqs') = Map.mapAccum (\env' ptrs -> case ptrs of
-                                                            [(_,ptr)] -> (env',Left ptr)
-                                                            _ -> (env' { unrollNextPtr = succ $ unrollNextPtr env' },Right (unrollNextPtr env',ptrs))
+                        (nenv1,ptr_eqs') = Map.mapAccum (\env' ptrs@((_,ptr):ptrs')
+                                                         -> if all (\(_,ptr') -> ptr==ptr') ptrs'
+                                                            then (env',Left ptr)
+                                                            else (env' { unrollNextPtr = succ $ unrollNextPtr env' },Right (unrollNextPtr env',ptrs))
                                                         ) env ptr_eqs
                         (ptr_sims,ptr_eqs'') = Map.mapEither id ptr_eqs'
                         (start_loc,prev_locs,nenv2,mphis) = case inc of
-                          [(_,_,_,loc')] -> (loc',[loc'],nenv1,[])
-                          _ -> let loc' = unrollNextMem nenv1
-                               in (loc',[ loc'' | (_,_,_,loc'') <- inc ],nenv1 { unrollNextMem = succ loc' },[MIPhi [ (act'',loc'') | (_,act'',_,loc'') <- inc ] loc'])
+                          (_,_,_,loc'):inc' -> if all (\(_,_,_,loc'') -> loc'==loc'') inc'
+                                               then (loc',[loc'],nenv1,[])
+                                               else (let loc'' = unrollNextMem nenv1
+                                                     in (loc'',[ loc''' | (_,_,_,loc''') <- inc ],nenv1 { unrollNextMem = succ loc'' },[MIPhi [ (act'',loc''') | (_,act'',_,loc''') <- inc ] loc'']))
                     val_eqs' <- sequence $ Map.mapWithKey (\inp (name,vals) -> do
                                                               let rname = "inp_"++(case name of
                                                                                       Nothing -> show inp
