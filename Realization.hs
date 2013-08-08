@@ -145,7 +145,9 @@ argToExpr expr = case operandDesc expr of
   ODNull -> let PointerType tp = operandType expr
             in reInject (\(ptr,instr) -> reMemInstr instr >> return (Right ptr)) $
                liftA (\ptr -> (ptr,MINull tp ptr)) (reLift reNewPtr)
-  ODInt v -> pure $ Left $ ConstValue v (bitWidth (operandType expr))
+  ODInt v -> case operandType expr of
+    IntegerType 1 -> pure $ Left $ ConstCondition (v/=0)
+    IntegerType w -> pure $ Left $ ConstValue v w
   ODInstr instr _ name -> Realization $ \info -> if Set.member instr (reLocallyDefined info)
                                                  then (info,do
                                                           rs <- get
