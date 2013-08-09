@@ -15,7 +15,7 @@ data Val = ConstValue { asConst :: Integer
          | ConditionValue { asCondition :: SMTExpr Bool
                           , conditionWidth :: Integer }
          | ConstCondition { asConstCondition :: Bool }
-         deriving (Typeable)
+         deriving (Typeable,Eq)
 
 instance Show Val where
   show (ConstValue c _) = show c
