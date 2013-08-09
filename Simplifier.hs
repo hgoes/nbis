@@ -1,6 +1,7 @@
 module Simplifier where
 
 import Data.Typeable
+import Data.List (nub)
 
 import Language.SMTLib2
 import Language.SMTLib2.Internals
@@ -28,7 +29,7 @@ simplifier (App f xs)
       Nothing -> Const True ()
       Just [] -> Const False ()
       Just [x] -> x
-      Just xs -> App Or xs
+      Just xs -> App Or (nub xs)
   Just _ -> App f xs
   Nothing -> case cast f of
     Just Not -> case cast xs of
