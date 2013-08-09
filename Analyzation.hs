@@ -151,3 +151,12 @@ getVariableInfo f g gr = updateGraph (Gr.nmap (\(nd,reach) -> (nd,reach,Variable
                                      ) gr1 paths
                         ) gr deps
         in updateGraph ngr nds
+
+programGraphGraphviz :: Gr.DynGraph gr => ProgramGraph gr -> String
+programGraphGraphviz pgr
+  = Gr.graphviz' $
+    Gr.emap (const ()) $
+    Gr.nmap (\(blk,blk_name,sblk,instrs) -> (blk,sblk,case blk_name of
+                                                Nothing -> ""
+                                                Just n -> n)) $
+    programGraph pgr
