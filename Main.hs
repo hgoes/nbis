@@ -6,14 +6,18 @@ import Realization (isIntrinsic)
 import Unrollment
 import Analyzation
 import MemoryModel.Snow
+import Circuit
 
 import Control.Monad (when)
 import System.Exit
 import Language.SMTLib2
 import Data.Graph.Inductive (Gr)
+import qualified Data.Graph.Inductive as Gr
 import Data.Maybe (catMaybes)
 import Data.Foldable (mapM_)
 import Prelude hiding (mapM_)
+import qualified Data.Map as Map
+import qualified Data.Set as Set
 
 import Debug.Trace
 import MemoryModel (debugMem)
@@ -27,10 +31,16 @@ main = do
   progs <- mapM (getProgram isIntrinsic) (files opts)
   print "done."
   let (funs,globs,alltps,structs) = foldl1 mergePrograms progs
-      cfg = UnrollCfg { unrollDoMerge = \_ _ _ -> False
+      pgr = fmap (\(args,_,blks,_,_) -> programAsGraph blks args:: ProgramGraph Gr) funs
+      merge_info = fmap (\gr -> let merges = safeMergePoints (programGraph gr)
+                                in Set.fromList $ fmap (\nd -> case Gr.lab (programGraph gr) nd of
+                                                           Just (blk,_,sblk,_) -> (blk,sblk)
+                                                       ) merges
+                        ) pgr
+      cfg = UnrollCfg { unrollDoMerge = \fun blk sblk -> case Map.lookup fun merge_info of
+                           Just merges -> Set.member (blk,sblk) merges
                       , unrollStructs = structs
                       , unrollTypes = alltps }
-      pgr = fmap (\(args,_,blks,_,_) -> programAsGraph blks args:: ProgramGraph Gr) funs
   bug <- withSMTSolver (case solver opts of
                            Nothing -> "~/debug-smt.sh output-" ++ (entryPoint opts) ++ ".smt"
                            Just bin -> bin) $ do

@@ -2,7 +2,7 @@
      The algorithm here is adapted from the paper "Finding all the elementary
      circuits of a directed graph" by Donald B. Johnson.
 -}
-module Circuit (circuits) where
+module Circuit (circuits,safeMergePoints) where
 
 import Data.Graph.Inductive as Gr
 import Data.Set (Set)
@@ -11,6 +11,7 @@ import Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.List as List
 import Data.Traversable
+import Data.Ord (comparing)
 
 -- | Finds all elementary circuits of a given graph.
 circuits :: Graph gr => gr a b -> [[Node]]
@@ -53,6 +54,37 @@ unblock u blocked b = case Map.updateLookupWithKey (\_ _ -> Nothing) u b of
                                                           then unblock w cblocked cb
                                                           else (cblocked,cb)
                                      ) (blocked',b')
+
+-- | Find all nodes which can be reached within one step from a circuit, but aren't part of it
+circuitExits :: Graph gr => gr a b -> [Node] -> [Node]
+circuitExits gr circ = exits' circ
+  where
+    exits' [] = []
+    exits' (x:xs) = (filter (\nd -> not $ elem nd circ) $ Gr.suc gr x) ++ (exits' xs)
+
+safeMergePoints :: Graph gr => gr a b -> [Node]
+safeMergePoints gr = get_merges possible_merges
+  where
+    circs = circuits gr
+    possible_merges = [ [ circ_succ | circ_nd <- circ
+                                    , circ_succ <- Gr.suc gr circ_nd
+                                    , not $ elem circ_succ circ
+                                    , all (\circ' -> if elem circ_succ circ'
+                                                     then all (\circ_nd' -> elem circ_nd' circ') circ
+                                                     else True
+                                          ) circs ]
+                      | circ <- circs ]
+    count_apperance = foldl (foldl (\cmp' nd -> Map.insertWith (+) nd 1 cmp')) Map.empty
+    get_most_appering mp = fst $ List.maximumBy (comparing $ \(_,n) -> n) $ Map.toList mp
+    remove_merge nd (x:xs) = if elem nd x
+                             then remove_merge nd xs
+                             else x:remove_merge nd xs
+    remove_merge nd [] = []
+    get_merges lst = case filter (not . null) lst of
+      [] -> []
+      xs -> let nd = get_most_appering (count_apperance lst)
+                lst' = remove_merge nd lst
+            in nd:get_merges lst'
 
 -- | The test graph from the paper "Enumerating Circuits and Loops in Graphs with Self-Arcs and Multiple-Arcs".
 testGraph1 :: Gr.Gr () ()

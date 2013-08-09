@@ -419,10 +419,19 @@ stepUnrollCtx isFirst cfg program env cur = case realizationQueue cur of
                    , unrollMemory = nmem3
                    , unrollGuards = (reGuards outp)++(unrollGuards nenv)
                    , unrollWatchpoints = (reWatchpoints outp)++(unrollWatchpoints nenv)
+                   , unrollMergeNodes = case merge_node of
+                     Nothing -> unrollMergeNodes nenv
+                     Just mn -> Map.insert (unrollNextMergeNode nenv) mn (unrollMergeNodes nenv)
+                   , unrollNextMergeNode = case merge_node of
+                     Nothing -> unrollNextMergeNode nenv
+                     Just _ -> succ (unrollNextMergeNode nenv)
                    },cur { realizationQueue = nqueue
                          , outgoingEdges = nout
                          , calls = outCalls ++ (calls cur)
-                         , returns = outReturns ++ (returns cur) })
+                         , returns = outReturns ++ (returns cur)
+                         , nextMergeNodes = case merge_node of
+                           Nothing -> nextMergeNodes cur
+                           Just _ -> Map.insert (blk,sblk) (unrollNextMergeNode nenv) (nextMergeNodes cur) })
     Just mn -> do
       -- A suitable merge point is available, so just use it.
       ((mnInps,mnLoc),env') <- adjustMergeNode env mn (\mn' -> do
@@ -445,3 +454,6 @@ stepUnrollCtx isFirst cfg program env cur = case realizationQueue cur of
       let (_,prx_ptr) = unrollProxies env
       nmem2 <- foldlM (\cmem (_,act,_,loc) -> connectLocation cmem prx_ptr act loc mnLoc) nmem1 inc
       return (env' { unrollMemory = nmem2 },cur { realizationQueue = rest })
+
+allProxies :: UnrollEnv mem mloc ptr -> [SMTExpr Bool]
+allProxies env = [ mergeActivationProxy nd | nd <- Map.elems (unrollMergeNodes env) ]
