@@ -441,7 +441,7 @@ updateObject structs all_ptrs all_objs (loc,new_obj,new_conds) instr = case inst
     | otherwise -> return ([],Nothing)
   MIPhi inc mto -> case List.find (\(_,mfrom) -> mfrom==loc) inc of
     Nothing -> return ([],Nothing)
-    Just _ -> return ([(mto,new_obj,new_conds)],Nothing)
+    Just (cond,_) -> return ([(mto,new_obj,[ (cond' .&&. cond,obj) | (cond',obj) <-  new_conds ])],Nothing)
   _ -> case memInstrSrc instr of
     Nothing -> return ([],Nothing)
     Just sloc -> if sloc==loc
