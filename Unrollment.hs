@@ -53,18 +53,18 @@ data UnrollContext mloc ptr = UnrollContext { unrollOrder :: [Ptr BasicBlock]
                                             , outgoingEdges :: [Edge mloc ptr]
                                             , returns :: [(SMTExpr Bool,Maybe (Either Val ptr),mloc)]
                                             , returnStack :: [(ReturnInfo ptr,Ptr Instruction)]
-                                            , calls :: [(String,[Either Val ptr],Map (Ptr Instruction) (Either Val ptr),Map (Ptr Argument) (Either Val ptr),mloc,SMTExpr Bool,Ptr BasicBlock,Integer,Ptr Instruction)]
+                                            , calls :: [(String,[Either Val ptr],Map (Ptr Instruction) [(Either Val ptr,SMTExpr Bool)],Map (Ptr Argument) (Either Val ptr),mloc,SMTExpr Bool,Ptr BasicBlock,Integer,Ptr Instruction)]
                                             } deriving (Show)
 
 data Edge mloc ptr = Edge { edgeTargetBlock :: Ptr BasicBlock
                           , edgeTargetSubblock :: Integer
-                          , edgeConds :: [(Ptr BasicBlock,SMTExpr Bool,Map (Ptr Instruction) (Either Val ptr),mloc)]
+                          , edgeConds :: [(Ptr BasicBlock,SMTExpr Bool,Map (Ptr Instruction) [(Either Val ptr,SMTExpr Bool)],mloc)]
                           } deriving (Show)
 
 data ReturnInfo ptr = ReturnCreate { returnCreateFun :: String
                                    , returnCreateBlk :: Ptr BasicBlock
                                    , returnCreateSBlk :: Integer
-                                   , returnCreateInputs :: Map (Ptr Instruction) (Either Val ptr)
+                                   , returnCreateInputs :: Map (Ptr Instruction) [(Either Val ptr,SMTExpr Bool)]
                                    , returnCreateArgs :: Map (Ptr Argument) (Either Val ptr)
                                    , returnCreateMergeNodes :: Map (Ptr BasicBlock,Integer) Integer
                                    }
@@ -235,7 +235,7 @@ spawnContexts funs ctx
                                                          , edgeTargetSubblock = rsblk
                                                          , edgeConds = [(rblk,ret_cond,case ret_val of
                                                                             Nothing -> rvals
-                                                                            Just rval -> Map.insert ret_addr rval rvals,ret_loc) ]
+                                                                            Just rval -> Map.insert ret_addr [(rval,constant True)] rvals,ret_loc) ]
                                                          } ]
                              , outgoingEdges = []
                              , returns = []
@@ -280,7 +280,7 @@ stepUnrollCtx isFirst cfg program env cur = case realizationQueue cur of
           blk_name = (case name of
                          Nothing -> show blk
                          Just rname -> rname)++"_"++show sblk
-          mergedInps = Map.unionsWith (++) (fmap (\(_,cond,i,_) -> fmap (\v -> [(cond,v)]) i) inc)
+          mergedInps = Map.unionsWith (++) (fmap (\(_,cond,i,_) -> fmap (\opts -> fmap (\(v,cond') -> (v,cond .&&. cond')) opts) i) inc)
       (act,inp,phis,start_loc,prev_locs,merge_node,nenv,mem_instr,ptr_eqs,mem_eqs)
         <- if mkMerge
            then (do
@@ -301,9 +301,9 @@ stepUnrollCtx isFirst cfg program env cur = case realizationQueue cur of
                     ptr_eqs <- sequence $
                                Map.intersectionWith (\trg src -> case trg of
                                                         Left trg_v -> do
-                                                          mapM_ (\(cond,Left src_v) -> assert $ cond .=>. (valEq trg_v src_v)) src
+                                                          mapM_ (\(Left src_v,cond) -> assert $ cond .=>. (valEq trg_v src_v)) src
                                                           return Nothing
-                                                        Right trg_p -> return (Just (trg_p,fmap (\(cond,Right src_p) -> (cond,src_p)) src))
+                                                        Right trg_p -> return (Just (trg_p,fmap (\(Right src_p,cond) -> (cond,src_p)) src))
                                                     ) inp mergedInps
                     phis <- fmap Map.fromList $
                             mapM (\blk' -> do
@@ -321,8 +321,8 @@ stepUnrollCtx isFirst cfg program env cur = case realizationQueue cur of
            else (do
                     act <- defConstNamed ("act_"++(unrollCtxFunction cur)++"_"++blk_name) (app or' [ act | (_,act,_,_) <- inc ])
                     let (val_eqs,ptr_eqs) = Map.mapEither id $ Map.intersectionWith (\(tp,name) src -> case tp of
-                                                                                        PointerType _ -> Right (fmap (\(cond,Right src_p) -> (cond,src_p)) src)
-                                                                                        _ -> Left (name,fmap (\(cond,Left src_v) -> (src_v,cond)) src)
+                                                                                        PointerType _ -> Right (fmap (\(Right src_p,cond) -> (cond,src_p)) src)
+                                                                                        _ -> Left (name,fmap (\(Left src_v,cond) -> (src_v,cond)) src)
                                                                                     ) (rePossibleInputs info) mergedInps
                         (nenv1,ptr_eqs') = Map.mapAccum (\env' ptrs@((_,ptr):ptrs')
                                                          -> if all (\(_,ptr') -> ptr==ptr') ptrs'
@@ -367,7 +367,7 @@ stepUnrollCtx isFirst cfg program env cur = case realizationQueue cur of
                         (unrollNextMem nenv)
                         (unrollNextPtr nenv)
                         realize
-      let new_vars = Map.union (reLocals nst) (Map.unions [ vars | (_,_,vars,_) <- inc ])
+      let new_vars = Map.union (fmap (\v -> [(v,constant True)]) (reLocals nst)) mergedInps
           outEdges = case fin of
             Jump trgs -> [ Edge { edgeTargetBlock = trg
                                 , edgeTargetSubblock = 0
@@ -421,11 +421,11 @@ stepUnrollCtx isFirst cfg program env cur = case realizationQueue cur of
                        -> foldlM (\cmem (trg,src)
                                   -> case trg of
                                     Left trg_v -> case src of
-                                      Left src_v -> do
+                                      [(Left src_v,_)] -> do
                                         assert $ act' .=>. (valEq trg_v src_v)
                                         return cmem
                                     Right trg_p -> case src of
-                                      Right src_p -> do
+                                      [(Right src_p,_)] -> do
                                         let (prx_mloc,_) = unrollProxies env
                                         connectPointer cmem prx_mloc act' src_p trg_p
                                  ) cmem (Map.intersectionWith (\trg src -> (trg,src)) mnInps inp')
