@@ -199,7 +199,7 @@ spawnContexts funs ctx
   = [ UnrollContext { unrollOrder = shiftOrder (==edgeTargetBlock edge) (unrollOrder ctx)
                     , unrollCtxFunction = unrollCtxFunction ctx
                     , unrollCtxArgs = unrollCtxArgs ctx
-                    , currentMergeNodes = Map.delete (edgeTargetBlock edge,edgeTargetSubblock edge) (nextMergeNodes ctx)
+                    , currentMergeNodes = Map.delete (edgeTargetBlock edge,edgeTargetSubblock edge) (Map.union (nextMergeNodes ctx) (currentMergeNodes ctx))
                     , nextMergeNodes = Map.empty
                     , realizationQueue = [edge]
                     , outgoingEdges = []
