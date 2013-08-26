@@ -18,6 +18,7 @@ import Data.Foldable (mapM_)
 import Prelude hiding (mapM_)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+import Control.Monad.State (runStateT)
 
 import Debug.Trace
 import MemoryModel (debugMem)
@@ -82,7 +83,7 @@ main = do
                              return $ Left $ catMaybes outp)
                     else return (Right ([],env)))
     unroll isFirst cfg prog env (ctx:ctxs) = do
-      (nenv,nctx) <- performUnrollmentCtx isFirst cfg prog env ctx
+      (nctx,nenv) <- runStateT (performUnrollmentCtx isFirst cfg prog ctx) env
       result <- unroll False cfg prog nenv ctxs
       case result of
         Left err -> return $ Left err

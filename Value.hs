@@ -143,3 +143,20 @@ valCopy name (ConditionValue c w) = do
   nc <- defConstNamed name c
   return (ConditionValue nc w)
 valCopy _ v = return v
+
+valNewSameType :: String -> Val -> SMT Val
+valNewSameType name (ConstValue { constWidth = w }) = do
+  var <- varNamedAnn name w
+  return (DirectValue var)
+valNewSameType name (DirectValue v) = do
+  var <- varNamedAnn name (extractAnnotation v)
+  return (DirectValue var)
+valNewSameType name (ConditionValue { asCondition = c
+                                    , conditionWidth = w }) = do
+  var <- varNamed name
+  return (ConditionValue { asCondition = var
+                         , conditionWidth = w })
+valNewSameType name (ConstCondition c) = do
+  var <- varNamed name
+  return (ConditionValue { asCondition = var
+                         , conditionWidth = 1 })
