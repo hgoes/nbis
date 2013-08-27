@@ -28,21 +28,22 @@ import Data.Proxy
 import Prelude hiding (sequence,mapM,mapM_,foldl,all)
 import Data.Ord
 import Data.Maybe (catMaybes)
-import Control.Monad.Trans (lift)
-import Control.Monad.State (get,put,modify,StateT,runStateT)
+import Control.Monad.Trans (lift,liftIO)
+import Control.Monad.State.Strict (get,put,modify,StateT,runStateT)
+import Control.Monad.ST
+import Data.IORef
 
 data MergeNode mloc ptr = MergeNode { mergeActivationProxy :: SMTExpr Bool
-                                    , mergeInputs :: Map (Ptr Instruction) MergeValueRef
+                                    , mergeInputs :: Map (Ptr Instruction) (MergeValueRef ptr)
                                     , mergePhis :: Map (Ptr BasicBlock) (SMTExpr Bool)
                                     , mergeLoc :: mloc
                                     }
 
-newtype MergeValueRef = MergeValueRef Integer deriving (Eq,Ord,Show,Enum)
+type MergeValueRef ptr = IORef (MergeValue ptr)
 
 data MergeValue ptr = MergedValue Bool (Either Val ptr)
-                    | UnmergedValue String Bool [(MergeValueRef,SMTExpr Bool)]
+                    | UnmergedValue String Bool [(MergeValueRef ptr,SMTExpr Bool)]
 
-type MergeValues ptr = Map MergeValueRef (MergeValue ptr)
 
 data UnrollEnv mem mloc ptr = UnrollEnv { unrollNextMem :: mloc
                                         , unrollNextPtr :: ptr
@@ -50,41 +51,38 @@ data UnrollEnv mem mloc ptr = UnrollEnv { unrollNextMem :: mloc
                                         , unrollMemory :: mem
                                         , unrollMergeNodes :: Map Integer (MergeNode mloc ptr)
                                         , unrollNextMergeNode :: Integer
-                                        , unrollMergeValues :: Map MergeValueRef (MergeValue ptr)
-                                        , unrollNextMergeValue :: MergeValueRef
                                         , unrollGuards :: [Guard]
                                         , unrollWatchpoints :: [Watchpoint]
                                         }
 
-type ValueMap = Map (Ptr Instruction) MergeValueRef
+type ValueMap ptr = Map (Ptr Instruction) (MergeValueRef ptr)
 
-data UnrollContext mloc ptr = UnrollContext { unrollOrder :: [Ptr BasicBlock]
+data UnrollContext mloc ptr = UnrollContext { unrollOrder :: [(Ptr BasicBlock,Integer)]
                                             , unrollCtxFunction :: String
                                             , unrollCtxArgs :: Map (Ptr Argument) (Either Val ptr)
                                             , currentMergeNodes :: Map (Ptr BasicBlock,Integer) Integer
                                             , nextMergeNodes :: Map (Ptr BasicBlock,Integer) Integer
                                             , realizationQueue :: [Edge mloc ptr]
                                             , outgoingEdges :: [Edge mloc ptr]
-                                            , returns :: [(SMTExpr Bool,Maybe MergeValueRef,mloc)]
+                                            , returns :: [(SMTExpr Bool,Maybe (MergeValueRef ptr),mloc)]
                                             , returnStack :: [(ReturnInfo ptr,Ptr Instruction)]
-                                            , calls :: [(String,[Either Val ptr],ValueMap,Map (Ptr Argument) (Either Val ptr),mloc,SMTExpr Bool,Ptr BasicBlock,Integer,Ptr Instruction)]
-                                            } deriving (Show)
+                                            , calls :: [(String,[Either Val ptr],ValueMap ptr,Map (Ptr Argument) (Either Val ptr),mloc,SMTExpr Bool,Ptr BasicBlock,Integer,Ptr Instruction)]
+                                            }
 
 data Edge mloc ptr = Edge { edgeTargetBlock :: Ptr BasicBlock
                           , edgeTargetSubblock :: Integer
-                          , edgeConds :: [(Ptr BasicBlock,SMTExpr Bool,ValueMap,mloc)]
-                          } deriving (Show)
+                          , edgeConds :: [(Ptr BasicBlock,SMTExpr Bool,ValueMap ptr,mloc)]
+                          }
 
 data ReturnInfo ptr = ReturnCreate { returnCreateFun :: String
                                    , returnCreateBlk :: Ptr BasicBlock
                                    , returnCreateSBlk :: Integer
-                                   , returnCreateInputs :: ValueMap
+                                   , returnCreateInputs :: ValueMap ptr
                                    , returnCreateArgs :: Map (Ptr Argument) (Either Val ptr)
                                    , returnCreateMergeNodes :: Map (Ptr BasicBlock,Integer) Integer
                                    }
                     | ReturnMerge { returnMergeNode :: Integer
                                   }
-                    deriving (Show)
 
 data UnrollConfig = UnrollCfg { unrollDoMerge :: String -> Ptr BasicBlock -> Integer -> Bool
                               , unrollStructs :: Map String [TypeDesc]
@@ -93,92 +91,99 @@ data UnrollConfig = UnrollCfg { unrollDoMerge :: String -> Ptr BasicBlock -> Int
 
 type UnrollMonad mem mloc ptr = StateT (UnrollEnv mem mloc ptr) SMT
 
-mergeValueMaps :: Bool -> [(SMTExpr Bool,ValueMap)] -> UnrollMonad mem mloc ptr ValueMap
+mergeValueMaps :: Bool -> [(SMTExpr Bool,ValueMap ptr)] -> UnrollMonad mem mloc ptr (ValueMap ptr)
 mergeValueMaps extensible mps = do
   let merge_map = Map.unionsWith (++) $ fmap (\(c,mp) -> fmap (\ref -> [(ref,c)]) mp) mps
-  sequence $ Map.mapWithKey (\instr entrs -> do
-                                env <- get
-                                put $ env { unrollMergeValues = Map.insert (unrollNextMergeValue env) (UnmergedValue "inp" extensible entrs) (unrollMergeValues env)
-                                          , unrollNextMergeValue = succ (unrollNextMergeValue env)
-                                          }
-                                return $ unrollNextMergeValue env
+  sequence $ Map.mapWithKey (\instr entrs -> liftIO $ newIORef (UnmergedValue "inp" extensible entrs)
                             ) merge_map
 
-addMerge :: (MemoryModel mem mloc ptr,Enum ptr) => Bool -> SMTExpr Bool -> ValueMap -> ValueMap -> UnrollMonad mem mloc ptr ValueMap
+addMerge :: (MemoryModel mem mloc ptr,Enum ptr) => Bool -> SMTExpr Bool -> ValueMap ptr -> ValueMap ptr -> UnrollMonad mem mloc ptr (ValueMap ptr)
 addMerge extensible cond mp_new mp_old
   = mapM (\entr -> case entr of
-             Left (Left x) -> do
-               env <- get
-               put $ env { unrollMergeValues = Map.insert (unrollNextMergeValue env) (UnmergedValue "inp" extensible [(x,cond)]) (unrollMergeValues env)
-                         , unrollNextMergeValue = succ (unrollNextMergeValue env) }
-               return $ unrollNextMergeValue env
+             Left (Left x) -> liftIO $ newIORef (UnmergedValue "inp" extensible [(x,cond)])
              Left (Right x) -> return x
              Right (new,old) -> do
                mergeValues old new cond
                return old) $
     Map.unionWith (\(Left (Left x)) (Left (Right y)) -> Right (x,y)) (fmap (Left . Left) mp_new) (fmap (Left . Right) mp_old)
 
-dumpMergeValue :: MergeValueRef -> UnrollMonad mem mloc ptr String
-dumpMergeValue ref@(MergeValueRef n) = do
-  env <- get
-  case Map.lookup ref (unrollMergeValues env) of
-    Just (MergedValue ext v) -> return $ show n++"@(Merged "++
-                                (if ext then "extensible " else "")++
-                                (case v of
-                                    Left v' -> show v'
-                                    Right _ -> "pointer")++")"
-    Just (UnmergedValue name ext vals) -> do
+dumpMergeValue :: MergeValueRef ptr -> UnrollMonad mem mloc ptr String
+dumpMergeValue ref = do
+  res <- liftIO $ readIORef ref
+  case res of
+    MergedValue ext v -> return $ "Merged "++
+                         (if ext then "extensible " else "")++
+                         (case v of
+                             Left v' -> show v'
+                             Right _ -> "pointer")
+    UnmergedValue name ext vals -> do
       rvals <- mapM (\(ref,cond) -> do
                         rval <- dumpMergeValue ref
                         return $ show cond++" ~> "++rval) vals
-      return $ show n++"@(Unmerged "++
+      return $ "Unmerged "++
         (if ext then "extensible " else "")++
-        ("{"++List.intercalate ", " rvals++"})")
+        ("{"++List.intercalate ", " rvals++"}")
 
-getMergeValue :: (MemoryModel mem mloc ptr,Enum ptr) => MergeValueRef -> UnrollMonad mem mloc ptr (Either Val ptr)
+checkLoops :: MergeValueRef ptr -> UnrollMonad mem mloc ptr ()
+checkLoops ref = checkLoops' ref []
+  where
+    checkLoops' cur visited = if List.elem cur visited
+                              then error "Loop detected"
+                              else (do
+                                       res <- liftIO $ readIORef cur
+                                       case res of
+                                         MergedValue _ _ -> return ()
+                                         UnmergedValue _ _ vals -> mapM_ (\(val,_) -> checkLoops' val (cur:visited)) vals)
+
+getMergeValue :: (MemoryModel mem mloc ptr,Enum ptr) => MergeValueRef ptr -> UnrollMonad mem mloc ptr (Either Val ptr)
 getMergeValue ref = do
-  env <- get
-  case Map.lookup ref (unrollMergeValues env) of
-    Just (MergedValue _ v) -> return v
-    Just (UnmergedValue name extensible vals) -> do
-      rvals <- mapM (\(ref,cond) -> do
-                        val <- getMergeValue ref
-                        return (val,cond)
-                    ) vals
-      lift $ comment $ "Merging value "++show ref
-      res <- case rvals of
-        ((Left v,_):_) -> if extensible
-                          then (do
-                                   nval <- lift $ valNewSameType name v
-                                   mapM_ (\(Left val,cond) -> lift $ assert $ cond .=>. (valEq nval val)) rvals
-                                   return $ Left nval)
-                          else (do
-                                   nval <- lift $ valCopy name (valSwitch $ fmap (\(Left val,cond) -> (val,cond)) rvals)
-                                   return $ Left nval)
-        ((Right p,_):_) -> do
+  res <- liftIO $ readIORef ref
+  case res of
+    MergedValue _ v -> return v
+    UnmergedValue name extensible (refs@((ref',_):_)) -> do
+      val <- getMergeValue ref'
+      ret <- case val of
+        Left v -> if extensible
+                  then (do
+                           liftIO $ putStrLn "Extensible value"
+                           nval <- lift $ valNewSameType name v
+                           mapM_ (\(ref,cond) -> do
+                                     Left val <- getMergeValue ref
+                                     lift $ assert $ cond .=>. (valEq nval val)) refs
+                           return $ Left nval)
+                  else (do
+                           liftIO $ putStrLn "Nonextensible value"
+                           lst <- mapM (\(ref,cond) -> do
+                                           Left val <- getMergeValue ref
+                                           return (val,cond)) refs
+                           nval <- lift $ valCopy name (valSwitch lst)
+                           return $ Left nval)
+        Right p -> do
           env <- get
-          let (prx,_) = unrollProxies env
-              nptr = unrollNextPtr env
-          nmem <- lift $ foldlM (\cmem (Right ptr,cond) -> connectPointer cmem prx cond ptr nptr) (unrollMemory env) rvals
-          put $ env { unrollNextPtr = succ nptr
-                    , unrollMemory = nmem }
+          let nptr = unrollNextPtr env
+          put $ env { unrollNextPtr = succ nptr }
+          mapM_ (\(ref,cond) -> do
+                    Right ptr <- getMergeValue ref
+                    env <- get
+                    let (prx,_) = unrollProxies env
+                    nmem <- lift $ connectPointer (unrollMemory env) prx cond ptr nptr
+                    put $ env { unrollMemory = nmem }
+                ) refs
           return (Right nptr)
-      modify $ \env -> env { unrollMergeValues = Map.insert ref (MergedValue extensible res) (unrollMergeValues env) }
-      return res
+      liftIO $ writeIORef ref (MergedValue extensible ret)
+      return ret
 
-mergeValues :: (MemoryModel mem mloc ptr,Enum ptr) => MergeValueRef -> MergeValueRef -> SMTExpr Bool -> UnrollMonad mem mloc ptr ()
+mergeValues :: (MemoryModel mem mloc ptr,Enum ptr) => MergeValueRef ptr -> MergeValueRef ptr -> SMTExpr Bool -> UnrollMonad mem mloc ptr ()
 mergeValues ref val cond = do
-  env <- get
-  case Map.lookup ref (unrollMergeValues env) of
-    Just mn -> do
-      nmn <- mergeValue val cond mn
-      modify $ \env -> env { unrollMergeValues = Map.insert ref nmn (unrollMergeValues env) }
+  mn <- liftIO $ readIORef ref
+  nmn <- mergeValue val cond mn
+  liftIO $ writeIORef ref nmn
 
-mergeValue :: (MemoryModel mem mloc ptr,Enum ptr) => MergeValueRef -> SMTExpr Bool -> MergeValue ptr -> UnrollMonad mem mloc ptr (MergeValue ptr)
+mergeValue :: (MemoryModel mem mloc ptr,Enum ptr) => MergeValueRef ptr -> SMTExpr Bool -> MergeValue ptr -> UnrollMonad mem mloc ptr (MergeValue ptr)
 mergeValue val cond (UnmergedValue name extensible uvals)
   = if extensible
     then return $ UnmergedValue name extensible ((val,cond):uvals)
-    else error $ "Merging "++show val++" into non-extensible value "++name++" "++show uvals
+    else error $ "Merging into non-extensible value "++name
 mergeValue val cond (MergedValue extensible mval) = do
   rval <- getMergeValue val
   case (rval,mval) of
@@ -192,21 +197,15 @@ mergeValue val cond (MergedValue extensible mval) = do
       put $ env { unrollMemory = nmem }
   return (MergedValue extensible mval)
 
-createMergeValues :: Bool -> Map (Ptr Instruction) (Either Val ptr) -> UnrollMonad mem mloc ptr ValueMap
+createMergeValues :: Bool -> Map (Ptr Instruction) (Either Val ptr) -> UnrollMonad mem mloc ptr (ValueMap ptr)
 createMergeValues extensible
-  = mapM (\val -> do
-             env <- get
-             put $ env { unrollMergeValues = Map.insert (unrollNextMergeValue env) (MergedValue extensible val) (unrollMergeValues env)
-                       , unrollNextMergeValue = succ $ unrollNextMergeValue env
-                       }
-             return $ unrollNextMergeValue env
-         )
+  = mapM (\val -> liftIO $ newIORef (MergedValue extensible val))
 
-enqueueEdge :: [Ptr BasicBlock] -> Edge mloc ptr -> [Edge mloc ptr] -> [Edge mloc ptr]
+enqueueEdge :: [(Ptr BasicBlock,Integer)] -> Edge mloc ptr -> [Edge mloc ptr] -> [Edge mloc ptr]
 enqueueEdge = insertWithOrder (\x y -> if edgeTargetBlock x == edgeTargetBlock y
                                        then Just $ comparing edgeTargetSubblock x y
                                        else Nothing)
-              (\e1 e2 -> e1 { edgeConds = (edgeConds e1)++(edgeConds e2) }) edgeTargetBlock
+              (\e1 e2 -> e1 { edgeConds = (edgeConds e1)++(edgeConds e2) }) (\x -> (edgeTargetBlock x,edgeTargetSubblock x))
 
 insertWithOrder :: Eq b => (a -> a -> Maybe Ordering) -> (a -> a -> a) -> (a -> b) -> [b] -> a -> [a] -> [a]
 insertWithOrder cmp comb f order el [] = [el]
@@ -277,12 +276,12 @@ startBlock pgr = (blk,sblk)
     (start_node,_) = Gr.nodeRange (programGraph pgr)
     Just (blk,_,sblk,_) = Gr.lab (programGraph pgr) start_node
 
-initOrder :: Gr.Graph gr => ProgramGraph gr -> [Ptr BasicBlock]
-initOrder pgr = order
+initOrder :: Gr.Graph gr => ProgramGraph gr -> [(Ptr BasicBlock,Integer)]
+initOrder pgr = trace ("ORDER: "++show order) order
   where
     (start_node,_) = Gr.nodeRange (programGraph pgr)
     [dffTree] = Gr.dff [start_node] (programGraph pgr)
-    order = reverse $ List.nub $ fmap (\nd -> let Just (blk,_,sblk,_) = Gr.lab (programGraph pgr) nd in blk) $ Gr.postorder dffTree
+    order = reverse $ fmap (\nd -> let Just (blk,_,sblk,_) = Gr.lab (programGraph pgr) nd in (blk,sblk)) $ Gr.postorder dffTree
 
 startingContext :: (Gr.Graph gr,MemoryModel mem Integer Integer)
                    => UnrollConfig -> Map String (ProgramGraph gr) -> String
@@ -314,9 +313,7 @@ startingContext cfg program fname globs = case Map.lookup fname program of
                                       , unrollGlobals = globs'
                                       , unrollMemory = mem
                                       , unrollMergeNodes = Map.empty
-                                      , unrollMergeValues = Map.empty
                                       , unrollNextMergeNode = 0
-                                      , unrollNextMergeValue = MergeValueRef 0
                                       , unrollGuards = []
                                       , unrollWatchpoints = []
                                       })
@@ -324,10 +321,10 @@ startingContext cfg program fname globs = case Map.lookup fname program of
 
 spawnContexts :: Gr.Graph gr => Map String (ProgramGraph gr) -> UnrollContext mloc ptr -> [UnrollContext mloc ptr]
 spawnContexts funs ctx
-  = [ UnrollContext { unrollOrder = shiftOrder (==edgeTargetBlock edge) (unrollOrder ctx)
+  = [ UnrollContext { unrollOrder = shiftOrder (==(edgeTargetBlock edge,edgeTargetSubblock edge)) (unrollOrder ctx)
                     , unrollCtxFunction = unrollCtxFunction ctx
                     , unrollCtxArgs = unrollCtxArgs ctx
-                    , currentMergeNodes = Map.delete (edgeTargetBlock edge,edgeTargetSubblock edge) (Map.union (nextMergeNodes ctx) (currentMergeNodes ctx))
+                    , currentMergeNodes = Map.difference (Map.union (nextMergeNodes ctx) (currentMergeNodes ctx)) (Map.fromList $ fmap (\x -> (x,())) (takeWhile (/=(edgeTargetBlock edge,edgeTargetSubblock edge)) (unrollOrder ctx)))
                     , nextMergeNodes = Map.empty
                     , realizationQueue = [edge]
                     , outgoingEdges = []
@@ -525,16 +522,14 @@ stepUnrollCtx isFirst cfg program cur = case realizationQueue cur of
                          foldl (flip $ enqueueEdge (unrollOrder cur)) (outgoingEdges cur) outEdges)
               -- Not a merge point, so an edge only creates a new context when it already appeared in this context.
               -- This is achieved by checking if it appears before the current node in the block-order.
-              Nothing -> foldl (\(cqueue,cout) edge -> case compareWithOrder (unrollOrder cur) blk (edgeTargetBlock edge) of
+              Nothing -> foldl (\(cqueue,cout) edge -> case compareWithOrder (unrollOrder cur) (blk,sblk) (edgeTargetBlock edge,edgeTargetSubblock edge) of
                                    LT -> (enqueueEdge (unrollOrder cur) edge cqueue,cout)
                                    _ -> (cqueue,enqueueEdge (unrollOrder cur) edge cout)
                                ) (rest,outgoingEdges cur) outEdges
         outReturns <- case fin of
           Return (Just val) -> do
-            env <- get
-            put $ env { unrollMergeValues = Map.insert (unrollNextMergeValue env) (MergedValue False val) (unrollMergeValues env)
-                      , unrollNextMergeValue = succ $ unrollNextMergeValue env }
-            return [(act,Just $ unrollNextMergeValue env,reCurMemLoc nst)]
+            ref <- liftIO $ newIORef (MergedValue False val)
+            return [(act,Just ref,reCurMemLoc nst)]
           Return Nothing -> return [(act,Nothing,reCurMemLoc nst)]
           _ -> return []
         if isFirst
