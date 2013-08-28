@@ -14,6 +14,7 @@ import Analyzation
 import TypeDesc
 import MemoryModel
 import ConditionList
+import Circuit
 
 import Data.Map (Map,(!))
 import qualified Data.Map as Map
@@ -84,12 +85,90 @@ data ReturnInfo ptr = ReturnCreate { returnCreateFun :: String
                     | ReturnMerge { returnMergeNode :: Integer
                                   }
 
-data UnrollConfig = UnrollCfg { unrollDoMerge :: String -> Ptr BasicBlock -> Integer -> Bool
-                              , unrollStructs :: Map String [TypeDesc]
-                              , unrollTypes :: Set TypeDesc
-                              }
+data UnrollConfig mloc ptr = UnrollCfg { unrollDoMerge :: String -> Ptr BasicBlock -> Integer -> Bool
+                                       , unrollStructs :: Map String [TypeDesc]
+                                       , unrollTypes :: Set TypeDesc
+                                       , unrollFunctions :: Map String (UnrollFunInfo mloc ptr)
+                                       , unrollCfgGlobals :: Map (Ptr GlobalVariable) (TypeDesc, Maybe MemContent)
+                                       }
+
+data UnrollFunInfo mloc ptr = UnrollFunInfo { unrollFunInfoBlocks :: Map (Ptr BasicBlock,Integer) (Maybe String,RealizationInfo,RealizationMonad mloc ptr (BlockFinalization ptr),Set (Ptr Instruction))
+                                            , unrollFunInfoStartBlock :: (Ptr BasicBlock,Integer)
+                                            , unrollFunInfoBlockOrder :: [(Ptr BasicBlock,Integer)]
+                                            , unrollFunInfoArguments :: [(Ptr Argument, TypeDesc)]
+                                            }
 
 type UnrollMonad mem mloc ptr = StateT (UnrollEnv mem mloc ptr) SMT
+
+defaultConfig :: (Eq ptr,Enum ptr,Enum mloc) => ProgDesc -> UnrollConfig mloc ptr
+defaultConfig (funs,globs,alltps,structs)
+  = UnrollCfg { unrollStructs = structs
+              , unrollTypes = alltps
+              , unrollFunctions = fmap fst ext_funs
+              , unrollDoMerge = \fname blk sblk -> case Map.lookup fname ext_funs of
+                Just (_,mp) -> Set.member (blk,sblk) mp
+              , unrollCfgGlobals = globs
+              }
+  where
+    ext_funs = fmap (\(args,_,blks,_,_) -> let (start_blk,_,_) = head blks
+                                               blk_mp = Map.fromList [ (key,(realize,nd))
+                                                                     | ((key,realize),nd) <- zip [ ((blk,sblk),(name,info,real))
+                                                                                                 | (blk,name,subs) <- blks, (sblk,instrs) <- zip [0..] subs
+                                                                                                 , let (info,real) = preRealize $ realizeInstructions instrs ]
+                                                                                             [0..] ]
+                                               gr = Gr.mkGraph [ (nd,key) | (key,(_,nd)) <- Map.toList blk_mp ]
+                                                    [ (nd,nd_nxt,()) | (key,((_,info,_),nd)) <- Map.toList blk_mp,
+                                                      nxt <- Set.toList (reSuccessors info),
+                                                      let Just (_,nd_nxt) = Map.lookup (nxt,0) blk_mp ] :: Gr.Gr (Ptr BasicBlock,Integer) ()
+                                               [dffTree] = Gr.dff [0] gr
+                                               order = reverse $ fmap (\nd -> let Just inf = Gr.lab gr nd in inf) $ Gr.postorder dffTree
+                                               mergePoints = fmap (\nd -> let Just inf = Gr.lab gr nd in inf) $ safeMergePoints gr
+                                               rblk_mp = fmap fst blk_mp
+                                               reach_info = reachabilityInfo rblk_mp
+                                               defs = definitionMap rblk_mp
+                                               trans_mp = Map.foldlWithKey (\cmp blk (_,info,_)
+                                                                            -> let Just reach = Map.lookup blk reach_info
+                                                                               in foldl (\cmp instr -> let Just def_blk = Map.lookup instr defs
+                                                                                                           Just trans = Map.lookup def_blk reach
+                                                                                                       in foldl (\cmp trans_blk -> Map.insertWith Set.union trans_blk (Set.singleton instr) cmp
+                                                                                                                ) cmp trans
+                                                                                        ) cmp (Map.keys $ rePossibleInputs info)
+                                                                           ) (fmap (const Set.empty) rblk_mp) rblk_mp
+                                           in (UnrollFunInfo { unrollFunInfoBlocks = Map.intersectionWith (\(name,info,realize) trans -> (name,info,realize,trans)) rblk_mp trans_mp
+                                                             , unrollFunInfoStartBlock = (start_blk,0)
+                                                             , unrollFunInfoBlockOrder = order
+                                                             , unrollFunInfoArguments = args
+                                                             },Set.fromList mergePoints)
+                    ) funs
+
+reachabilityInfo :: Map (Ptr BasicBlock,Integer) (Maybe String,RealizationInfo,RealizationMonad mloc ptr (BlockFinalization ptr))
+                    -> Map (Ptr BasicBlock,Integer) (Map (Ptr BasicBlock,Integer) (Set (Ptr BasicBlock,Integer)))
+reachabilityInfo info = Map.foldlWithKey (\cmp entr (_,info',_)
+                                          -> foldl (\cmp succ -> addReach cmp entr (succ,0) Set.empty) cmp (reSuccessors info')
+                                         ) Map.empty info
+  where
+    addReach mp src trg via
+      = let r = case Map.lookup trg mp of
+              Just r -> r
+              Nothing -> Map.empty
+            cvia = Map.lookup src r
+            nvia = case cvia of
+              Nothing -> via
+              Just cvia' -> Set.union via cvia'
+            nmp = Map.insert trg (Map.insert src nvia r) mp
+            Just (_,info',_) = Map.lookup trg info
+            new_info = case cvia of
+              Nothing -> True
+              Just cvia' -> Set.size nvia > Set.size cvia'
+        in if new_info
+           then (if src==trg
+                 then nmp
+                 else foldl (\cmp succ -> addReach cmp src (succ,0) (Set.insert trg nvia)) nmp (reSuccessors info'))
+           else mp
+
+definitionMap :: Map (Ptr BasicBlock,Integer) (Maybe String,RealizationInfo,RealizationMonad mloc ptr (BlockFinalization ptr))
+              -> Map (Ptr Instruction) (Ptr BasicBlock,Integer)
+definitionMap = Map.foldlWithKey (\cmp blk (_,info,_) -> foldl (\cmp instr -> Map.insert instr blk cmp) cmp (reLocallyDefined info)) Map.empty
 
 mergeValueMaps :: Bool -> [(SMTExpr Bool,ValueMap ptr)] -> UnrollMonad mem mloc ptr (ValueMap ptr)
 mergeValueMaps extensible mps = do
@@ -145,14 +224,12 @@ getMergeValue ref = do
       ret <- case val of
         Left v -> if extensible
                   then (do
-                           liftIO $ putStrLn "Extensible value"
                            nval <- lift $ valNewSameType name v
                            mapM_ (\(ref,cond) -> do
                                      Left val <- getMergeValue ref
                                      lift $ assert $ cond .=>. (valEq nval val)) refs
                            return $ Left nval)
                   else (do
-                           liftIO $ putStrLn "Nonextensible value"
                            lst <- mapM (\(ref,cond) -> do
                                            Left val <- getMergeValue ref
                                            return (val,cond)) refs
@@ -283,17 +360,16 @@ initOrder pgr = trace ("ORDER: "++show order) order
     [dffTree] = Gr.dff [start_node] (programGraph pgr)
     order = reverse $ fmap (\nd -> let Just (blk,_,sblk,_) = Gr.lab (programGraph pgr) nd in (blk,sblk)) $ Gr.postorder dffTree
 
-startingContext :: (Gr.Graph gr,MemoryModel mem Integer Integer)
-                   => UnrollConfig -> Map String (ProgramGraph gr) -> String
-                   -> Map (Ptr GlobalVariable) (TypeDesc,Maybe MemContent)
+startingContext :: (MemoryModel mem Integer Integer)
+                   => UnrollConfig Integer Integer -> String
                    -> SMT (UnrollContext Integer Integer,UnrollEnv mem Integer Integer)
-startingContext cfg program fname globs = case Map.lookup fname program of
-  Just gr -> do
-    let order = initOrder gr
-        (blk,sblk) = startBlock gr
+startingContext cfg fname = case Map.lookup fname (unrollFunctions cfg) of
+  Just info -> do
+    let order = unrollFunInfoBlockOrder info
+        (blk,sblk) = unrollFunInfoStartBlock info
         ((cptr,prog),globs') = mapAccumL (\(ptr',prog') (tp,cont) 
                                           -> ((succ ptr',(ptr',tp,cont):prog'),ptr')
-                                         ) (0,[]) globs
+                                         ) (0,[]) (unrollCfgGlobals cfg)
     mem <- memNew (Proxy::Proxy Integer) (unrollTypes cfg) (unrollStructs cfg) [ (ptr,tp,cont) | (ptr,PointerType tp,cont) <- prog ]
     return (UnrollContext { unrollOrder = order
                           , unrollCtxFunction = fname
@@ -319,8 +395,8 @@ startingContext cfg program fname globs = case Map.lookup fname program of
                                       })
   Nothing -> error $ "Function "++fname++" not found in program graph."
 
-spawnContexts :: Gr.Graph gr => Map String (ProgramGraph gr) -> UnrollContext mloc ptr -> [UnrollContext mloc ptr]
-spawnContexts funs ctx
+spawnContexts :: UnrollConfig mloc ptr -> UnrollContext mloc ptr -> [UnrollContext mloc ptr]
+spawnContexts cfg ctx
   = [ UnrollContext { unrollOrder = shiftOrder (==(edgeTargetBlock edge,edgeTargetSubblock edge)) (unrollOrder ctx)
                     , unrollCtxFunction = unrollCtxFunction ctx
                     , unrollCtxArgs = unrollCtxArgs ctx
@@ -333,9 +409,9 @@ spawnContexts funs ctx
                     , calls = []
                     }
     | edge <- outgoingEdges ctx ]++
-    [ UnrollContext { unrollOrder = initOrder (funs!fname)
+    [ UnrollContext { unrollOrder = unrollFunInfoBlockOrder fgr
                     , unrollCtxFunction = fname
-                    , unrollCtxArgs = Map.fromList [ (arg_ptr,arg_val) | ((arg_ptr,arg_tp),arg_val) <- zip (arguments fgr) args ]
+                    , unrollCtxArgs = Map.fromList [ (arg_ptr,arg_val) | ((arg_ptr,arg_tp),arg_val) <- zip (unrollFunInfoArguments fgr) args ]
                     , currentMergeNodes = Map.empty
                     , nextMergeNodes = Map.empty
                     , realizationQueue = [ Edge { edgeTargetBlock = blk
@@ -350,11 +426,11 @@ spawnContexts funs ctx
                     , calls = []
                     }
       | (fname,args,inps,ret_args,loc,cond,ret_blk,ret_sblk,ret_addr) <- calls ctx
-      , let fgr = funs!fname
-      , let (blk,sblk) = startBlock fgr ]++
+      , let fgr = (unrollFunctions cfg)!fname
+      , let (blk,sblk) = unrollFunInfoStartBlock fgr ]++
     (case returnStack ctx of
         (ReturnCreate rfun rblk rsblk rvals rargs rmerge,ret_addr):rstack
-          -> [ UnrollContext { unrollOrder = initOrder (funs!rfun)
+          -> [ UnrollContext { unrollOrder = unrollFunInfoBlockOrder ((unrollFunctions cfg)!rfun)
                              , unrollCtxFunction = rfun
                              , unrollCtxArgs = rargs
                              , currentMergeNodes = rmerge
@@ -373,29 +449,27 @@ spawnContexts funs ctx
              | (ret_cond,ret_val,ret_loc) <- returns ctx ]
         _ -> [])
 
-performUnrollmentCtx :: (Gr.Graph gr,MemoryModel mem mloc ptr,Eq ptr,Enum ptr,Eq mloc,Enum mloc,Show ptr,Show mloc)
+performUnrollmentCtx :: (MemoryModel mem mloc ptr,Eq ptr,Enum ptr,Eq mloc,Enum mloc,Show ptr,Show mloc)
                         => Bool
-                        -> UnrollConfig
-                        -> Map String (ProgramGraph gr)
+                        -> UnrollConfig mloc ptr
                         -> UnrollContext mloc ptr
                         -> UnrollMonad mem mloc ptr (UnrollContext mloc ptr)
-performUnrollmentCtx isFirst cfg program ctx
+performUnrollmentCtx isFirst cfg ctx
   | unrollmentDone ctx = return ctx
   | otherwise = do
     --trace ("Step: "++show ctx) (return ())
-    ctx' <- stepUnrollCtx isFirst cfg program ctx
-    performUnrollmentCtx False cfg program ctx'
+    ctx' <- stepUnrollCtx isFirst cfg ctx
+    performUnrollmentCtx False cfg ctx'
 
 unrollmentDone :: UnrollContext mloc ptr -> Bool
 unrollmentDone ctx = List.null (realizationQueue ctx)
 
-stepUnrollCtx :: (Gr.Graph gr,MemoryModel mem mloc ptr,Eq ptr,Enum ptr,Eq mloc,Enum mloc)
+stepUnrollCtx :: (MemoryModel mem mloc ptr,Eq ptr,Enum ptr,Eq mloc,Enum mloc)
                  => Bool
-                 -> UnrollConfig
-                 -> Map String (ProgramGraph gr)
+                 -> UnrollConfig mloc ptr
                  -> UnrollContext mloc ptr
                  -> UnrollMonad mem mloc ptr (UnrollContext mloc ptr)
-stepUnrollCtx isFirst cfg program cur = case realizationQueue cur of
+stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
   (Edge blk sblk inc):rest -> do
     let mergeNode = Map.lookup (blk,sblk) (currentMergeNodes cur)
         mergeNodeCreate = unrollDoMerge cfg (unrollCtxFunction cur) blk sblk
@@ -506,7 +580,8 @@ stepUnrollCtx isFirst cfg program cur = case realizationQueue cur of
         put $ env { unrollNextPtr = reNextPtr nst
                   , unrollNextMem = reNextMemLoc nst }
         outp' <- createMergeValues False (reLocals nst)
-        let new_vars = Map.union outp' inp'
+        let trans_vars = Map.fromList [ (var,()) | var <- Set.toList trans ]
+            new_vars = Map.union outp' (Map.intersection inp' trans_vars)
             outEdges = case fin of
               Jump trgs -> [ Edge { edgeTargetBlock = trg
                                   , edgeTargetSubblock = 0

@@ -19,7 +19,7 @@ import qualified Data.Set as Set
 import Data.Traversable
 import Data.Foldable
 import Foreign.Ptr
-import Prelude hiding (foldr,all)
+import Prelude hiding (foldr,foldl,all)
 import Data.Maybe (catMaybes)
 
 import LLVM.FFI.Value
@@ -60,7 +60,8 @@ data RealizationInfo = RealizationInfo { rePossiblePhis :: Set (Ptr BasicBlock)
                                        , rePossibleInputs :: Map (Ptr Instruction) (TypeDesc,Maybe String)
                                        , rePossibleArgs :: Set (Ptr Argument)
                                        , rePossibleGlobals :: Set (Ptr GlobalVariable)
-                                       , reLocallyDefined :: Set (Ptr Instruction) }
+                                       , reLocallyDefined :: Set (Ptr Instruction)
+                                       , reSuccessors :: Set (Ptr BasicBlock) }
 
 type RealizationMonad mem ptr = RWST (RealizationEnv ptr) (RealizationOutput mem ptr) (RealizationState mem ptr) SMT
 
@@ -106,6 +107,9 @@ reDefineVar instr name genval = Realization $ \info -> let (info1,rgen) = runRea
                                                                Right ptr -> return (Right ptr)
                                                              modify (\st -> st { reLocals = Map.insert instr nval (reLocals st) })
                                                           )
+
+reAddSuccessor :: Ptr BasicBlock -> Realization mem ptr ()
+reAddSuccessor succ = Realization $ \info -> (info { reSuccessors = Set.insert succ (reSuccessors info) },return ())
 
 reNewPtr :: Enum ptr => RealizationMonad mem ptr ptr
 reNewPtr = do
@@ -184,7 +188,7 @@ data BlockFinalization ptr = Jump (CondList (Ptr BasicBlock))
                            deriving (Show)
 
 preRealize :: Realization mem ptr a -> (RealizationInfo,RealizationMonad mem ptr a)
-preRealize r = runRealization r (RealizationInfo Set.empty Map.empty Set.empty Set.empty Set.empty)
+preRealize r = runRealization r (RealizationInfo Set.empty Map.empty Set.empty Set.empty Set.empty Set.empty)
 
 postRealize :: RealizationEnv ptr -> mem -> mem -> ptr -> RealizationMonad mem ptr a -> SMT (a,RealizationState mem ptr,RealizationOutput mem ptr)
 postRealize env cur_mem next_mem next_ptr act = runRWST act env (RealizationState { reCurMemLoc = cur_mem
@@ -199,29 +203,32 @@ realizeInstructions (instr:instrs) = ((\Nothing -> ()) <$> realizeInstruction in
 realizeInstruction :: (Eq ptr,Enum ptr,Enum mem) => InstrDesc Operand -> Realization mem ptr (Maybe (BlockFinalization ptr))
 realizeInstruction (ITerminator (IRet e)) = Just . Return . Just <$> argToExpr e
 realizeInstruction (ITerminator IRetVoid) = pure $ Just $ Return Nothing
-realizeInstruction (ITerminator (IBr to)) = pure $ Just $ Jump [(constant True,to)]
+realizeInstruction (ITerminator (IBr to)) = (reAddSuccessor to) *> (pure $ Just $ Jump [(constant True,to)])
 realizeInstruction (ITerminator (IBrCond cond ifT ifF))
-  = (\cond' -> case cond' of
-        Left (ConstCondition cond'') -> Just $ Jump [(constant True,if cond''
-                                                                    then ifT
-                                                                    else ifF)]
-        Left v -> Just $ Jump [(valCond v,ifT)
-                              ,(not' $ valCond v,ifF)]) <$>
-    (argToExpr cond)
+  = (reAddSuccessor ifT) *>
+    (reAddSuccessor ifF) *>
+    ((\cond' -> case cond' of
+         Left (ConstCondition cond'') -> Just $ Jump [(constant True,if cond''
+                                                                     then ifT
+                                                                     else ifF)]
+         Left v -> Just $ Jump [(valCond v,ifT)
+                               ,(not' $ valCond v,ifF)]) <$>
+     (argToExpr cond))
 realizeInstruction (ITerminator (ISwitch val def args))
-  = (\val' args' -> case val' of
-        Left (ConstValue v _)
-          -> case [ to | (Left (ConstValue v' _),to) <- args', v==v' ] of
-          [] -> Just $ Jump [(constant True,def)]
-          [to] -> Just $ Jump [(constant True,to)]
-        Left v -> let (jumps,cond') = foldr (\(Left cmp_v,to) (lst,cond)
-                                             -> let res = valEq cmp_v v
-                                                in ((res .&&. cond,to):lst,(not' res) .&&. cond)
-                                            ) ([],constant True) args'
-                      jumps' = (cond',def):jumps
-                  in Just $ Jump jumps') <$>
-    (argToExpr val) <*>
-    (traverse (\(cmp_v,to) -> (\r -> (r,to)) <$> (argToExpr cmp_v)) args)
+  = foldl (\cur (_,to) -> cur *> reAddSuccessor to) (reAddSuccessor def) args *>
+    ((\val' args' -> case val' of
+         Left (ConstValue v _)
+           -> case [ to | (Left (ConstValue v' _),to) <- args', v==v' ] of
+           [] -> Just $ Jump [(constant True,def)]
+           [to] -> Just $ Jump [(constant True,to)]
+         Left v -> let (jumps,cond') = foldr (\(Left cmp_v,to) (lst,cond)
+                                              -> let res = valEq cmp_v v
+                                                 in ((res .&&. cond,to):lst,(not' res) .&&. cond)
+                                             ) ([],constant True) args'
+                       jumps' = (cond',def):jumps
+                   in Just $ Jump jumps') <$>
+     (argToExpr val) <*>
+     (traverse (\(cmp_v,to) -> (\r -> (r,to)) <$> (argToExpr cmp_v)) args))
 realizeInstruction (IAssign trg name expr)
   = let rname = case name of
           Just name' -> "assign_"++name'
