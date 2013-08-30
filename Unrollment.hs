@@ -235,7 +235,9 @@ getMergeValue ref = do
                            lst <- mapM (\(ref,cond) -> do
                                            Left val <- getMergeValue ref
                                            return (val,cond)) refs
-                           nval <- lift $ valCopy name (valSwitch lst)
+                           nval <- case lst of
+                             [(v,_)] -> return v
+                             _ -> lift $ valCopy name (valSwitch lst)
                            return $ Left nval)
         Right p -> do
           env <- get
