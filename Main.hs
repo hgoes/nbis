@@ -79,4 +79,4 @@ main = do
       result <- unroll False cfg nenv ctxs
       case result of
         Left err -> return $ Left err
-        Right (nctxs,nenv2) -> return $ Right ((spawnContexts cfg nctx)++nctxs,nenv2)
+        Right (nctxs,nenv2) -> return $ Right (nctxs++(spawnContexts cfg nctx),nenv2)
