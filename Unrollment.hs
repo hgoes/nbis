@@ -611,16 +611,10 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
             outCalls = case fin of
               Call fname args ret -> [(fname,args,new_vars,unrollCtxArgs cur,reCurMemLoc nst,act,blk,sblk+1,ret)]
               _ -> []
-            (nqueue,nout) = case merge_node of
-              -- A merge point was created, so each outgoing edge creates a new context
-              Just _ -> (rest,
-                         foldl (flip $ enqueueEdge (unrollOrder cur)) (outgoingEdges cur) outEdges)
-              -- Not a merge point, so an edge only creates a new context when it already appeared in this context.
-              -- This is achieved by checking if it appears before the current node in the block-order.
-              Nothing -> foldl (\(cqueue,cout) edge -> case compareWithOrder (unrollOrder cur) (blk,sblk) (edgeTargetBlock edge,edgeTargetSubblock edge) of
-                                   LT -> (enqueueEdge (unrollOrder cur) edge cqueue,cout)
-                                   _ -> (cqueue,enqueueEdge (unrollOrder cur) edge cout)
-                               ) (rest,outgoingEdges cur) outEdges
+            (nqueue,nout) = foldl (\(cqueue,cout) edge -> case compareWithOrder (unrollOrder cur) (blk,sblk) (edgeTargetBlock edge,edgeTargetSubblock edge) of
+                                      LT -> (enqueueEdge (unrollOrder cur) edge cqueue,cout)
+                                      _ -> (cqueue,enqueueEdge (unrollOrder cur) edge cout)
+                                  ) (rest,outgoingEdges cur) outEdges
         outReturns <- case fin of
           Return (Just val) -> do
             ref <- liftIO $ newIORef (MergedValue False val)
