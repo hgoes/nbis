@@ -122,7 +122,9 @@ defaultConfig (funs,globs,alltps,structs)
                                                trans_mp = Map.foldlWithKey (\cmp blk (_,info,_)
                                                                             -> let Just reach = Map.lookup blk reach_info
                                                                                in foldl (\cmp instr -> let Just def_blk = Map.lookup instr defs
-                                                                                                           Just trans = Map.lookup def_blk reach
+                                                                                                           trans = case Map.lookup def_blk reach of
+                                                                                                             Just t -> t
+                                                                                                             Nothing -> Set.empty
                                                                                                        in foldl (\cmp trans_blk -> Map.insertWith Set.union trans_blk (Set.singleton instr) cmp
                                                                                                                 ) cmp trans
                                                                                         ) cmp (Map.keys $ rePossibleInputs info)
@@ -170,7 +172,11 @@ defaultConfig (funs,globs,alltps,structs)
 reachabilityInfo :: Map (Ptr BasicBlock,Integer) (Maybe String,RealizationInfo,RealizationMonad mloc ptr (BlockFinalization ptr))
                     -> Map (Ptr BasicBlock,Integer) (Map (Ptr BasicBlock,Integer) (Set (Ptr BasicBlock,Integer)))
 reachabilityInfo info = Map.foldlWithKey (\cmp entr (_,info',_)
-                                          -> foldl (\cmp succ -> addReach cmp entr (succ,0) Set.empty) cmp (reSuccessors info')
+                                          -> let cmp1 = foldl (\cmp succ -> addReach cmp entr (succ,0) Set.empty) cmp (reSuccessors info')
+                                                 cmp2 = if Set.null (reCalls info')
+                                                        then cmp1
+                                                        else addReach cmp1 entr (fst entr,snd entr+1) Set.empty
+                                             in cmp2
                                          ) Map.empty info
   where
     addReach mp src trg via
@@ -182,19 +188,28 @@ reachabilityInfo info = Map.foldlWithKey (\cmp entr (_,info',_)
               Nothing -> via
               Just cvia' -> Set.union via cvia'
             nmp = Map.insert trg (Map.insert src nvia r) mp
-            Just (_,info',_) = Map.lookup trg info
+            info' = case Map.lookup trg info of
+              Just (_,i,_) -> i
+              Nothing -> error $ "Unable to find block informations for "++show trg++" "++show (fmap (\(name,inf,_) -> (name,inf)) info)
             new_info = case cvia of
               Nothing -> True
               Just cvia' -> Set.size nvia > Set.size cvia'
         in if new_info
            then (if src==trg
                  then nmp
-                 else foldl (\cmp succ -> addReach cmp src (succ,0) (Set.insert trg nvia)) nmp (reSuccessors info'))
+                 else (let nmp1 = foldl (\cmp succ -> addReach cmp src (succ,0) (Set.insert trg nvia)) nmp (reSuccessors info')
+                           nmp2 = if Set.null (reCalls info')
+                                  then nmp1
+                                  else addReach nmp1 src (fst trg,snd trg+1) (Set.insert trg nvia)
+                       in nmp2))
            else mp
 
 definitionMap :: Map (Ptr BasicBlock,Integer) (Maybe String,RealizationInfo,RealizationMonad mloc ptr (BlockFinalization ptr))
               -> Map (Ptr Instruction) (Ptr BasicBlock,Integer)
-definitionMap = Map.foldlWithKey (\cmp blk (_,info,_) -> foldl (\cmp instr -> Map.insert instr blk cmp) cmp (reLocallyDefined info)) Map.empty
+definitionMap = Map.foldlWithKey (\cmp blk (_,info,_) -> let cmp1 = foldl (\cmp (_,ret_addr) -> Map.insert ret_addr (fst blk,snd blk+1) cmp) cmp (reCalls info)
+                                                             cmp2 = foldl (\cmp instr -> Map.insert instr blk cmp) cmp1 (reLocallyDefined info)
+                                                         in cmp2
+                                 ) Map.empty
 
 mergeValueMaps :: Bool -> [(SMTExpr Bool,ValueMap ptr)] -> UnrollMonad mem mloc ptr (ValueMap ptr)
 mergeValueMaps extensible mps = do
