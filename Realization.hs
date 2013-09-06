@@ -37,8 +37,7 @@ data RealizationEnv ptr
                    , reSubblock :: Integer
                    , reActivation :: SMTExpr Bool
                    , reGlobals :: Map (Ptr GlobalVariable) ptr
-                   , reArgs :: Map (Ptr Argument) (Either Val ptr)
-                   , reInputs :: Map (Ptr Instruction) (Either Val ptr)
+                   , reInputs :: Map (Either (Ptr Argument) (Ptr Instruction)) (Either Val ptr)
                    , rePhis :: Map (Ptr BasicBlock) (SMTExpr Bool)
                    , reStructs :: Map String [TypeDesc]
                    }
@@ -61,7 +60,9 @@ data RealizationInfo = RealizationInfo { rePossiblePhis :: Set (Ptr BasicBlock)
                                        , rePossibleArgs :: Set (Ptr Argument)
                                        , rePossibleGlobals :: Set (Ptr GlobalVariable)
                                        , reLocallyDefined :: Set (Ptr Instruction)
-                                       , reSuccessors :: Set (Ptr BasicBlock) }
+                                       , reSuccessors :: Set (Ptr BasicBlock)
+                                       , reCalls :: Set String
+                                       , reReturns :: Bool }
 
 type RealizationMonad mem ptr = RWST (RealizationEnv ptr) (RealizationOutput mem ptr) (RealizationState mem ptr) SMT
 
@@ -111,6 +112,12 @@ reDefineVar instr name genval = Realization $ \info -> let (info1,rgen) = runRea
 reAddSuccessor :: Ptr BasicBlock -> Realization mem ptr ()
 reAddSuccessor succ = Realization $ \info -> (info { reSuccessors = Set.insert succ (reSuccessors info) },return ())
 
+reAddCall :: String -> Realization mem ptr ()
+reAddCall fun = Realization $ \info -> (info { reCalls = Set.insert fun (reCalls info) },return ())
+
+reSetReturn :: Realization mem ptr ()
+reSetReturn = Realization $ \info -> (info { reReturns = True },return ())
+
 reNewPtr :: Enum ptr => RealizationMonad mem ptr ptr
 reNewPtr = do
   rs <- get
@@ -159,7 +166,7 @@ argToExpr expr = case operandDesc expr of
                                                             Just res -> return res)
                                                  else (info { rePossibleInputs = Map.insert instr (operandType expr,name) (rePossibleInputs info) },do
                                                           re <- ask
-                                                          case Map.lookup instr (reInputs re) of
+                                                          case Map.lookup (Right instr) (reInputs re) of
                                                             Just res -> return res
                                                             Nothing -> error $ "Can't find value "++show name
                                                       )
@@ -169,7 +176,7 @@ argToExpr expr = case operandDesc expr of
                                              Just res -> return $ Right res)
   ODArgument arg -> Realization $ \info -> (info { rePossibleArgs = Set.insert arg (rePossibleArgs info) },do
                                                re <- ask
-                                               case Map.lookup arg (reArgs re) of
+                                               case Map.lookup (Left arg) (reInputs re) of
                                                  Just res -> return res)
   ODGetElementPtr ptr idx -> reInject (\(ptr',instr) -> reMemInstr instr >> return (Right ptr')) $
                              (\(Right val_ptr) val_idx ptr' -> (ptr',MIIndex (fmap (\i -> case i of
@@ -188,7 +195,7 @@ data BlockFinalization ptr = Jump (CondList (Ptr BasicBlock))
                            deriving (Show)
 
 preRealize :: Realization mem ptr a -> (RealizationInfo,RealizationMonad mem ptr a)
-preRealize r = runRealization r (RealizationInfo Set.empty Map.empty Set.empty Set.empty Set.empty Set.empty)
+preRealize r = runRealization r (RealizationInfo Set.empty Map.empty Set.empty Set.empty Set.empty Set.empty Set.empty False)
 
 postRealize :: RealizationEnv ptr -> mem -> mem -> ptr -> RealizationMonad mem ptr a -> SMT (a,RealizationState mem ptr,RealizationOutput mem ptr)
 postRealize env cur_mem next_mem next_ptr act = runRWST act env (RealizationState { reCurMemLoc = cur_mem
@@ -201,8 +208,8 @@ realizeInstructions [instr] = (\(Just fin) -> fin) <$> realizeInstruction instr
 realizeInstructions (instr:instrs) = ((\Nothing -> ()) <$> realizeInstruction instr) *> realizeInstructions instrs
 
 realizeInstruction :: (Eq ptr,Enum ptr,Enum mem) => InstrDesc Operand -> Realization mem ptr (Maybe (BlockFinalization ptr))
-realizeInstruction (ITerminator (IRet e)) = Just . Return . Just <$> argToExpr e
-realizeInstruction (ITerminator IRetVoid) = pure $ Just $ Return Nothing
+realizeInstruction (ITerminator (IRet e)) = reSetReturn *> (Just . Return . Just <$> argToExpr e)
+realizeInstruction (ITerminator IRetVoid) = reSetReturn *> (pure $ Just $ Return Nothing)
 realizeInstruction (ITerminator (IBr to)) = (reAddSuccessor to) *> (pure $ Just $ Jump [(constant True,to)])
 realizeInstruction (ITerminator (IBrCond cond ifT ifF))
   = (reAddSuccessor ifT) *>
@@ -378,7 +385,7 @@ realizeInstruction (IStore val to) = reInject (\(ptr,val) -> do
 realizeInstruction (ITerminator (ICall trg f args)) = case operandDesc f of
   ODFunction rtp fn argtps -> let args' = traverse (\arg -> (\r -> (r,operandType arg)) <$> argToExpr arg) args
                               in case intrinsics fn of
-                                Nothing -> (\args'' -> Just $ Call fn (fmap fst args'') trg) <$> args'
+                                Nothing -> reAddCall fn *> ((\args'' -> Just $ Call fn (fmap fst args'') trg) <$> args')
                                 Just (def,intr) -> (if def
                                                     then reDefineVar trg (fn++"Result") (reInject (\args'' -> do
                                                                                                       Just res <- intr args''
