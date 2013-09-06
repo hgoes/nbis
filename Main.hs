@@ -21,9 +21,25 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Control.Monad.State.Strict (runStateT)
 import System.Random
+import Control.Monad.Trans (liftIO)
 
 import Debug.Trace
 import MemoryModel (debugMem)
+
+data BlkInfo = BlkInfo String
+
+instance Show BlkInfo where
+  show (BlkInfo x) = x
+
+instance UnrollInfo (Gr.Gr BlkInfo ()) where
+  type UnrollNodeInfo (Gr.Gr BlkInfo ()) = Gr.Node
+  unrollInfoInit = Gr.empty
+  unrollInfoNewNode gr ndInfo name = let [nd] = Gr.newNodes 1 gr
+                                         ngr = Gr.insNode (nd,case name of
+                                                              Nothing -> BlkInfo ""
+                                                              Just n -> BlkInfo n) gr
+                                     in (nd,ngr)
+  unrollInfoConnect gr nd1 nd2 = Gr.insEdge (nd1,nd2,()) gr
 
 main = do
   opts <- getOptions
@@ -42,7 +58,7 @@ main = do
                            Just bin -> bin) $ do
     setOption (PrintSuccess False)
     setOption (ProduceModels True)
-    (start,env :: UnrollEnv (SnowMemory Integer Integer) Integer Integer) <- startingContext cfg (entryPoint opts)
+    (start,env :: UnrollEnv (Gr.Gr BlkInfo ()) (SnowMemory Integer Integer) Integer Integer) <- startingContext cfg (entryPoint opts)
     findBug True cfg 0 env [start]
   case bug of
     Just tr -> do
@@ -67,6 +83,7 @@ main = do
                   res <- checkSat
                   if res
                     then (do
+                             liftIO $ writeFile ("state-space.dot") $ Gr.graphviz' (unrollInfo env)
                              outp <- mapM (\(name,cond,args) -> do
                                               v <- getValue cond
                                               if v
@@ -78,8 +95,9 @@ main = do
                              return $ Left $ catMaybes outp)
                     else return (Right ([],env)))
     unroll isFirst cfg env (ctx:ctxs) = do
+      --let (p1,p2) = unrollProxies env in trace (debugMem (unrollMemory env) p1 p2) (return ())
       (nctx,nenv) <- runStateT (performUnrollmentCtx isFirst cfg ctx) env
       result <- unroll False cfg nenv ctxs
       case result of
         Left err -> return $ Left err
-        Right (nctxs,nenv2) -> return $ Right (nctxs++(spawnContexts cfg nctx),nenv2)
+        Right (nctxs,nenv2) -> return $ Right ((spawnContexts cfg nctx)++nctxs,nenv2)
