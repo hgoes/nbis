@@ -61,8 +61,8 @@ data RealizationInfo = RealizationInfo { rePossiblePhis :: Set (Ptr BasicBlock)
                                        , rePossibleGlobals :: Set (Ptr GlobalVariable)
                                        , reLocallyDefined :: Set (Ptr Instruction)
                                        , reSuccessors :: Set (Ptr BasicBlock)
-                                       , reCalls :: Set String
-                                       , reReturns :: Bool }
+                                       , reCalls :: Set (String,Ptr Instruction)
+                                       , reReturns :: Bool } deriving (Show)
 
 type RealizationMonad mem ptr = RWST (RealizationEnv ptr) (RealizationOutput mem ptr) (RealizationState mem ptr) SMT
 
@@ -112,8 +112,8 @@ reDefineVar instr name genval = Realization $ \info -> let (info1,rgen) = runRea
 reAddSuccessor :: Ptr BasicBlock -> Realization mem ptr ()
 reAddSuccessor succ = Realization $ \info -> (info { reSuccessors = Set.insert succ (reSuccessors info) },return ())
 
-reAddCall :: String -> Realization mem ptr ()
-reAddCall fun = Realization $ \info -> (info { reCalls = Set.insert fun (reCalls info) },return ())
+reAddCall :: String -> Ptr Instruction -> Realization mem ptr ()
+reAddCall fun ret_addr = Realization $ \info -> (info { reCalls = Set.insert (fun,ret_addr) (reCalls info) },return ())
 
 reSetReturn :: Realization mem ptr ()
 reSetReturn = Realization $ \info -> (info { reReturns = True },return ())
@@ -385,7 +385,7 @@ realizeInstruction (IStore val to) = reInject (\(ptr,val) -> do
 realizeInstruction (ITerminator (ICall trg f args)) = case operandDesc f of
   ODFunction rtp fn argtps -> let args' = traverse (\arg -> (\r -> (r,operandType arg)) <$> argToExpr arg) args
                               in case intrinsics fn of
-                                Nothing -> reAddCall fn *> ((\args'' -> Just $ Call fn (fmap fst args'') trg) <$> args')
+                                Nothing -> reAddCall fn trg *> ((\args'' -> Just $ Call fn (fmap fst args'') trg) <$> args')
                                 Just (def,intr) -> (if def
                                                     then reDefineVar trg (fn++"Result") (reInject (\args'' -> do
                                                                                                       Just res <- intr args''
