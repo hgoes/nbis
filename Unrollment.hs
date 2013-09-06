@@ -34,6 +34,7 @@ import Control.Monad.Trans (lift,liftIO)
 import Control.Monad.State.Strict (get,put,modify,StateT,runStateT)
 import Control.Monad.ST
 import Data.IORef
+import System.Random
 
 data MergeNode mloc ptr = MergeNode { mergeActivationProxy :: SMTExpr Bool
                                     , mergeInputs :: Map (Either (Ptr Argument) (Ptr Instruction)) (MergeValueRef ptr)
@@ -100,8 +101,14 @@ data UnrollFunInfo mloc ptr = UnrollFunInfo { unrollFunInfoBlocks :: Map (Ptr Ba
 
 type UnrollMonad mem mloc ptr = StateT (UnrollEnv mem mloc ptr) SMT
 
-defaultConfig :: (Eq ptr,Enum ptr,Enum mloc) => ProgDesc -> UnrollConfig mloc ptr
-defaultConfig (funs,globs,alltps,structs)
+defaultConfig :: (Eq ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> UnrollConfig mloc ptr
+defaultConfig entr desc = mergePointConfig entr desc safeMergePoints
+
+randomMergePointConfig :: (Eq ptr,Enum ptr,Enum mloc,RandomGen g) => String -> ProgDesc -> g -> UnrollConfig mloc ptr
+randomMergePointConfig entr desc gen = mergePointConfig entr desc (randomMergePoints gen)
+
+mergePointConfig :: (Eq ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> ([[Gr.Node]] -> [Gr.Node]) -> UnrollConfig mloc ptr
+mergePointConfig entry (funs,globs,alltps,structs) select
   = UnrollCfg { unrollStructs = structs
               , unrollTypes = alltps
               , unrollFunctions = ext_funs

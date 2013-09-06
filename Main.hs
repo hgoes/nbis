@@ -20,6 +20,7 @@ import Prelude hiding (mapM_)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Control.Monad.State.Strict (runStateT)
+import System.Random
 
 import Debug.Trace
 import MemoryModel (debugMem)
@@ -32,8 +33,10 @@ main = do
   print "Get program..."
   progs <- mapM (getProgram isIntrinsic) (files opts)
   print "done."
+  gen <- getStdGen
   let program = foldl1 mergePrograms progs
-      cfg = defaultConfig program
+      cfg = defaultConfig (entryPoint opts) program
+      --cfg = randomMergePointConfig (entryPoint opts) program gen
   bug <- withSMTSolver (case solver opts of
                            Nothing -> "~/debug-smt.sh output-" ++ (entryPoint opts) ++ ".smt"
                            Just bin -> bin) $ do

@@ -2,7 +2,7 @@
      The algorithm here is adapted from the paper "Finding all the elementary
      circuits of a directed graph" by Donald B. Johnson.
 -}
-module Circuit (circuits,safeMergePoints) where
+module Circuit (circuits,possibleMergePoints,safeMergePoints,randomMergePoints) where
 
 import Data.Graph.Inductive as Gr
 import Data.Set (Set)
@@ -12,6 +12,7 @@ import qualified Data.Map as Map
 import qualified Data.List as List
 import Data.Traversable
 import Data.Ord (comparing)
+import System.Random
 
 -- | Finds all elementary circuits of a given graph.
 circuits :: Graph gr => gr a b -> [[Node]]
@@ -62,18 +63,22 @@ circuitExits gr circ = exits' circ
     exits' [] = []
     exits' (x:xs) = (filter (\nd -> not $ elem nd circ) $ Gr.suc gr x) ++ (exits' xs)
 
-safeMergePoints :: Graph gr => gr a b -> [Node]
-safeMergePoints gr = get_merges possible_merges
+possibleMergePoints :: Graph gr => gr a b -> [[Node]]
+possibleMergePoints gr = List.filter (not . List.null)
+                         [ [ circ_succ | circ_nd <- circ
+                                       , circ_succ <- Gr.suc gr circ_nd
+                                       , not $ elem circ_succ circ
+                                       , all (\circ' -> if elem circ_succ circ'
+                                                        then all (\circ_nd' -> elem circ_nd' circ') circ
+                                                        else True
+                                             ) circs ]
+                         | circ <- circs ]
   where
     circs = circuits gr
-    possible_merges = [ [ circ_succ | circ_nd <- circ
-                                    , circ_succ <- Gr.suc gr circ_nd
-                                    , not $ elem circ_succ circ
-                                    , all (\circ' -> if elem circ_succ circ'
-                                                     then all (\circ_nd' -> elem circ_nd' circ') circ
-                                                     else True
-                                          ) circs ]
-                      | circ <- circs ]
+
+safeMergePoints :: [[Node]] -> [Node]
+safeMergePoints possible_merges = get_merges possible_merges
+  where
     count_apperance = foldl (foldl (\cmp' nd -> Map.insertWith (+) nd 1 cmp')) Map.empty
     get_most_appering mp = fst $ List.maximumBy (comparing $ \(_,n) -> n) $ Map.toList mp
     remove_merge nd (x:xs) = if elem nd x
@@ -85,6 +90,16 @@ safeMergePoints gr = get_merges possible_merges
       xs -> let nd = get_most_appering (count_apperance lst)
                 lst' = remove_merge nd lst
             in nd:get_merges lst'
+
+randomMergePoints :: RandomGen g => g -> [[Node]] -> [Node]
+randomMergePoints _ [] = []
+randomMergePoints gen nds = case random gen of
+  (False,_) -> []
+  (True,gen1) -> let (sel_circ,gen2) = randomR (0,length nds-1) gen1
+                     selectedCirc = nds!!sel_circ
+                     (sel_nd,gen3) = randomR (0,length selectedCirc-1) gen2
+                     selectedNd = selectedCirc!!sel_nd
+                 in selectedNd:(randomMergePoints gen3 $ List.filter (not . (List.elem selectedNd)) nds)
 
 -- | The test graph from the paper "Enumerating Circuits and Loops in Graphs with Self-Arcs and Multiple-Arcs".
 testGraph1 :: Gr.Gr () ()
