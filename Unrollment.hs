@@ -173,7 +173,7 @@ mergePointConfig entry (funs,globs,alltps,structs) select
                              ITerminator (ICall _ (Operand { operandDesc = ODFunction _ f _ }) _) -> [f]
                              _ -> []
                         , let Just (nd_to,_) = Map.lookup (fun,blk,sblk+1) blk_mp
-                        , nd_from <- [ nd | ((fun',_,_),(nd,instrs)) <- Map.toList blk_mp, case last instrs of
+                        , nd_from <- [ nd | ((fun',_,_),(nd,instrs)) <- Map.toList blk_mp, fun'==nxt_fun, case last instrs of
                                           ITerminator (IRet _) -> True
                                           ITerminator IRetVoid -> True
                                           _ -> False ] ]
