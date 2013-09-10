@@ -39,7 +39,7 @@ import System.Random
 class UnrollInfo a where
   type UnrollNodeInfo a
   unrollInfoInit :: a
-  unrollInfoNewNode :: a -> NodeId -> Maybe String -> (UnrollNodeInfo a,a)
+  unrollInfoNewNode :: a -> NodeId -> Maybe String -> Bool -> (UnrollNodeInfo a,a)
   unrollInfoConnect :: a -> UnrollNodeInfo a -> UnrollNodeInfo a -> a
 
 data MergeNode a mloc ptr = MergeNode { mergeActivationProxy :: SMTExpr Bool

@@ -34,11 +34,21 @@ instance Show BlkInfo where
 instance UnrollInfo (Gr.Gr BlkInfo ()) where
   type UnrollNodeInfo (Gr.Gr BlkInfo ()) = Gr.Node
   unrollInfoInit = Gr.empty
-  unrollInfoNewNode gr ndInfo name = let [nd] = Gr.newNodes 1 gr
-                                         ngr = Gr.insNode (nd,case name of
-                                                              Nothing -> BlkInfo ""
-                                                              Just n -> BlkInfo n) gr
-                                     in (nd,ngr)
+  unrollInfoNewNode gr ndInfo name isMerge
+    = let [nd] = Gr.newNodes 1 gr
+          ngr = Gr.insNode (nd,case name of
+                               Nothing -> BlkInfo ""
+                               Just n -> let prefix = if nodeIdFunction ndInfo=="main"
+                                                      then ""
+                                                      else (nodeIdFunction ndInfo)++"."
+                                             postfix = if nodeIdSubblock ndInfo==0
+                                                       then ""
+                                                       else "."++show (nodeIdSubblock ndInfo)
+                                             postfix2 = if isMerge
+                                                        then "(m)"
+                                                        else ""
+                                         in BlkInfo (prefix++n++postfix++postfix2)) gr
+      in (nd,ngr)
   unrollInfoConnect gr nd1 nd2 = Gr.insEdge (nd1,nd2,()) gr
 
 main = do
@@ -51,8 +61,9 @@ main = do
   print "done."
   gen <- getStdGen
   let program = foldl1 mergePrograms progs
-      cfg = defaultConfig (entryPoint opts) program
-      --cfg = randomMergePointConfig (entryPoint opts) program gen
+      --cfg = defaultConfig (entryPoint opts) program
+      cfg = randomMergePointConfig (entryPoint opts) program gen
+      --cfg = noMergePointConfig (entryPoint opts) program
   bug <- withSMTSolver (case solver opts of
                            Nothing -> "~/debug-smt.sh output-" ++ (entryPoint opts) ++ ".smt"
                            Just bin -> bin) $ do
