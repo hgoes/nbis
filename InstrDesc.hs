@@ -212,6 +212,14 @@ reifyInstr tl dl ptr
                 ifF <- selectInstGetFalseValue sel >>= reifyOperand
                 return $ IAssign ptr name (ISelect cond ifT ifF)
             ) (castDown ptr)
+      ,fmap (\switch -> do
+                cond <- switchInstGetCondition switch >>= reifyOperand
+                def_blk <- switchInstCaseDefault switch >>= caseItGetCaseSuccessor
+                begin <- switchInstCaseBegin switch
+                end <- switchInstCaseEnd switch
+                cases <- unravelCases begin end
+                return $ ITerminator (ISwitch cond def_blk cases)
+            ) (castDown ptr)
       ]
   where
     mkSwitch ((Just act):_) = act
@@ -219,6 +227,24 @@ reifyInstr tl dl ptr
     mkSwitch [] = do
       valueDump ptr
       error "Unknown instruction."
+
+    unravelCase caseit = do
+      val <- caseItGetCaseValue caseit >>= constantIntGetValue
+      valVal <- apIntGetSExtValue val
+      valWidth <- apIntGetBitWidth val
+      blk <- caseItGetCaseSuccessor caseit
+      return $ (Operand { operandType = IntegerType (fromIntegral valWidth)
+                        , operandDesc = ODInt (fromIntegral valVal) },blk)
+
+    unravelCases caseit end = do
+      isEnd <- caseItEq caseit end
+      if isEnd
+        then return []
+        else (do
+                 x <- unravelCase caseit
+                 nxt <- caseItNext caseit
+                 xs <- unravelCases nxt end
+                 return (x:xs))
 
 getInstrType :: Map String [TypeDesc] -> InstrDesc Operand -> TypeDesc
 getInstrType structs (IAssign _ _ desc) = case desc of
