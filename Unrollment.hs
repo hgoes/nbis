@@ -76,12 +76,14 @@ type ValueMap ptr = Map (Either (Ptr Argument) (Ptr Instruction)) (MergeValueRef
 data UnrollContext a mloc ptr = UnrollContext { unrollOrder :: [(String,Ptr BasicBlock,Integer)]
                                               , currentMergeNodes :: Map NodeId Integer
                                               , nextMergeNodes :: Map NodeId Integer
+                                              , usedMergeNodes :: Map NodeId ()
                                               , realizationQueue :: [Edge a mloc ptr]
                                               , outgoingEdges :: [Edge a mloc ptr]
                                               }
 
 data Edge a mloc ptr = Edge { edgeTarget :: NodeId
                             , edgeConds :: [(String,Ptr BasicBlock,Integer,SMTExpr Bool,[ValueMap ptr],mloc,Maybe (UnrollNodeInfo a))]
+                            , edgeCreatedMergeNodes :: Set NodeId
                             }
 
 data ReturnInfo ptr = ReturnCreate { returnCreateFun :: String
@@ -351,7 +353,9 @@ enqueueEdge = insertWithOrder (\x y -> if nodeIdFunction (edgeTarget x) == nodeI
                                           nodeIdSubblock (edgeTarget x) == nodeIdSubblock (edgeTarget y)
                                        then Just $ comparing (nodeIdCallStack . edgeTarget) x y
                                        else Nothing)
-              (\e1 e2 -> e1 { edgeConds = (edgeConds e1)++(edgeConds e2) }) (\x -> (nodeIdFunction $ edgeTarget x,nodeIdBlock $ edgeTarget x,nodeIdSubblock $ edgeTarget x))
+              (\e1 e2 -> e1 { edgeConds = (edgeConds e1)++(edgeConds e2)
+                            , edgeCreatedMergeNodes = Set.union (edgeCreatedMergeNodes e1) (edgeCreatedMergeNodes e2)
+                            }) (\x -> (nodeIdFunction $ edgeTarget x,nodeIdBlock $ edgeTarget x,nodeIdSubblock $ edgeTarget x))
 
 insertWithOrder :: Eq b => (a -> a -> Maybe Ordering) -> (a -> a -> a) -> (a -> b) -> [b] -> a -> [a] -> [a]
 insertWithOrder cmp comb f order el [] = [el]
@@ -443,11 +447,13 @@ startingContext cfg fname = case Map.lookup fname (unrollFunctions cfg) of
     return (UnrollContext { unrollOrder = order
                           , currentMergeNodes = Map.empty
                           , nextMergeNodes = Map.empty
+                          , usedMergeNodes = Map.empty
                           , realizationQueue = [Edge { edgeTarget = NodeId { nodeIdFunction = fname
                                                                            , nodeIdBlock = blk
                                                                            , nodeIdSubblock = sblk
                                                                            , nodeIdCallStack = Nothing }
                                                      , edgeConds = [(fname,nullPtr,0,constant True,[Map.empty],0,Nothing)]
+                                                     , edgeCreatedMergeNodes = Set.empty
                                                      }]
                           , outgoingEdges = []
                           },UnrollEnv { unrollNextMem = 1
@@ -465,10 +471,11 @@ startingContext cfg fname = case Map.lookup fname (unrollFunctions cfg) of
 spawnContexts :: UnrollConfig mloc ptr -> UnrollContext a mloc ptr -> [UnrollContext a mloc ptr]
 spawnContexts cfg ctx
   = [ UnrollContext { unrollOrder = norder
-                    , currentMergeNodes = Map.filterWithKey (\key _ -> Set.member (nodeIdFunction key,nodeIdBlock key,nodeIdSubblock key) suitableMerges)
+                    , currentMergeNodes = Map.filterWithKey (\key _ -> not $ Set.member key (edgeCreatedMergeNodes edge))
                                           (Map.union (nextMergeNodes ctx) (currentMergeNodes ctx))
                     , nextMergeNodes = Map.empty
-                    , realizationQueue = [edge]
+                    , usedMergeNodes = Map.empty
+                    , realizationQueue = [edge { edgeCreatedMergeNodes = Set.empty }]
                     , outgoingEdges = []
                     }
     | edge <- outgoingEdges ctx
@@ -506,7 +513,7 @@ stepUnrollCtx :: (MemoryModel mem mloc ptr,UnrollInfo a,Eq ptr,Enum ptr,Eq mloc,
                  -> UnrollContext a mloc ptr
                  -> UnrollMonad a mem mloc ptr (UnrollContext a mloc ptr)
 stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
-  (Edge trg inc):rest -> do
+  (Edge trg inc createdMerges):rest -> do
     let mergeNode = Map.lookup trg (currentMergeNodes cur)
         mergeNodeCreate = unrollDoMerge cfg (nodeIdFunction trg) (nodeIdBlock trg) (nodeIdSubblock trg)
         extensible = case mergeNode of
@@ -535,7 +542,8 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                     Nothing -> return ()
                     Just phi -> lift $ assert $ act .=>. (app and' $ phi:[ not' phi' | (blk',phi') <- Map.toList (mergePhis rmn), blk'/=blk ])
               ) inc
-        return (cur { realizationQueue = rest })
+        return (cur { realizationQueue = rest
+                    , usedMergeNodes = Map.insert trg () (usedMergeNodes cur) })
       Nothing -> do
         let pgr = (unrollFunctions cfg)!(nodeIdFunction trg)
             (name,info,realize,trans) = (unrollFunInfoBlocks pgr)!(nodeIdBlock trg,nodeIdSubblock trg)
@@ -543,7 +551,7 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                            Nothing -> show (nodeIdBlock trg)
                            Just rname -> rname)++"_"++show (nodeIdSubblock trg)
         env <- get
-        let (newNodeInfo,newInfo) = unrollInfoNewNode (unrollInfo env) trg name
+        let (newNodeInfo,newInfo) = unrollInfoNewNode (unrollInfo env) trg name mergeNodeCreate
             newInfo' = foldl (\info srcNd -> unrollInfoConnect info srcNd newNodeInfo) newInfo [ srcNd | (_,_,_,_,_,_,Just srcNd) <- inc ]
         put $ env { unrollInfo = newInfo' }
         (act,inp,inp',inp_rest,phis,start_loc,prev_locs,merge_node,mem_instr,mem_eqs)
@@ -634,12 +642,16 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                                              _ -> False
                                          ) inp'
             new_vars = Map.union (Map.union outp' (Map.intersection inp' trans_vars)) arg_vars
+            nCreatedMerges = if mergeNodeCreate
+                             then Set.insert trg createdMerges
+                             else createdMerges
         outEdges <- case fin of
           Jump trgs -> return [ Edge { edgeTarget = NodeId { nodeIdFunction = nodeIdFunction trg
                                                            , nodeIdBlock = trg_blk
                                                            , nodeIdSubblock = 0
                                                            , nodeIdCallStack = nodeIdCallStack trg }
                                      , edgeConds = [(nodeIdFunction trg,nodeIdBlock trg,nodeIdSubblock trg,act .&&. cond,new_vars:inp_rest,reCurMemLoc nst,Just newNodeInfo)]
+                                     , edgeCreatedMergeNodes = nCreatedMerges
                                      } | (cond,trg_blk) <- trgs ]
           Call fname args ret -> do
             let fun_info = (unrollFunctions cfg)!fname
@@ -651,6 +663,7 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                                                 , nodeIdCallStack = Just (trg { nodeIdSubblock = succ $ nodeIdSubblock trg },ret)
                                                 }
                           , edgeConds = [(nodeIdFunction trg,nodeIdBlock trg,nodeIdSubblock trg,act,arg_vars:new_vars:inp_rest,reCurMemLoc nst,Just newNodeInfo)]
+                          , edgeCreatedMergeNodes = nCreatedMerges
                           } ]
           Return rval -> case nodeIdCallStack trg of
             Just (prev,trg_instr) -> do
@@ -662,6 +675,7 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                     return $ (Map.insert (Right trg_instr) val' x):xs
               return [ Edge { edgeTarget = prev
                             , edgeConds = [(nodeIdFunction trg,nodeIdBlock trg,nodeIdSubblock trg,act,nvars,reCurMemLoc nst,Just newNodeInfo)]
+                            , edgeCreatedMergeNodes = nCreatedMerges
                             } ]
             Nothing -> return []
         let (nqueue,nout) = foldl (\(cqueue,cout) edge -> case compareWithOrder (unrollOrder cur)
