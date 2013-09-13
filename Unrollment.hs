@@ -589,7 +589,9 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                                                              return $ Right $ unrollNextPtr env
                                                            _ -> do
                                                              let rname = case name of
-                                                                   Nothing -> show vname
+                                                                   Nothing -> "inp_"++(case vname of
+                                                                                          Left arg -> show arg
+                                                                                          Right arg -> show arg)
                                                                    Just n -> n
                                                              v <- lift $ valNew rname tp
                                                              return (Left v)) (Map.mapKeys Right $ rePossibleInputs info)
