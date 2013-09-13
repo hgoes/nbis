@@ -18,6 +18,7 @@ data Options = Options
                , checkUser :: Bool
                , checkMemoryAccess :: Bool
                , showHelp :: Bool
+               , manualMergeNodes :: Maybe [(String,String,Integer)]
                } deriving (Eq,Ord,Show)
 
 nbisInfo :: String
@@ -31,7 +32,8 @@ defaultOptions = Options { entryPoint = "main"
                          , solver = Nothing
                          , checkUser = False
                          , checkMemoryAccess = False
-                         , showHelp = False }
+                         , showHelp = False
+                         , manualMergeNodes = Nothing }
 
 optionDescr :: [OptDescr (Options -> Options)]
 optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoint = str }) "function") "Specify the main function to test"
@@ -46,6 +48,7 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
               ,Option [] ["solver"] (ReqArg (\str opt -> opt { solver = Just str }) "smt-binary") "The SMT solver to use to solve the generated instance"
               ,Option [] ["check-user"] (NoArg (\opt -> opt { checkUser = True })) "Validate user assertions"
               ,Option [] ["check-mem"] (NoArg (\opt -> opt { checkMemoryAccess = True })) "Validate memory accesses"
+              ,Option [] ["merge-nodes"] (ReqArg (\str opt -> opt { manualMergeNodes = Just (read str) }) "list") "A list of merge nodes to use"
               ,Option ['h'] ["help"] (NoArg (\opt -> opt { showHelp = True })) "Show this help"
               ]
 

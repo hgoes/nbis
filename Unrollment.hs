@@ -117,12 +117,35 @@ defaultConfig entr desc = mergePointConfig entr desc safeMergePoints
 randomMergePointConfig :: (Eq ptr,Enum ptr,Enum mloc,RandomGen g) => String -> ProgDesc -> g -> UnrollConfig mloc ptr
 randomMergePointConfig entr desc gen = mergePointConfig entr desc (randomMergePoints gen)
 
+noMergePointConfig :: (Eq ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> UnrollConfig mloc ptr
+noMergePointConfig entr desc = mergePointConfig entr desc (const [])
+
+explicitMergePointConfig :: (Eq ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> [(String,String,Integer)] -> UnrollConfig mloc ptr
+explicitMergePointConfig entry prog merges
+  = mergePointConfig' entry prog
+    (\funs _ -> Set.fromList [ case Map.lookup fun funs of
+                                  Just info -> case List.find (\(_,(name,_,_,_)) -> case name of
+                                                                  Just name' -> name'==blk
+                                                                  Nothing -> False) (Map.toList $ unrollFunInfoBlocks info) of
+                                    Just ((blk',_),_) -> (fun,blk',sblk)
+                                    Nothing -> error $ "Merge-point "++show (fun,blk,sblk)++" not found."
+                             | (fun,blk,sblk) <- merges ])
+
 mergePointConfig :: (Eq ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> ([[Gr.Node]] -> [Gr.Node]) -> UnrollConfig mloc ptr
-mergePointConfig entry (funs,globs,alltps,structs) select
-  = UnrollCfg { unrollStructs = structs
+mergePointConfig entry prog select = mergePointConfig' entry prog $
+                                     \_ prog_gr -> Set.fromList $ fmap (\nd -> let Just inf = Gr.lab prog_gr nd in inf) $
+                                                   select (possibleMergePoints prog_gr)
+
+mergePointConfig' :: (Eq ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> (Map String (UnrollFunInfo mloc ptr) -> Gr.Gr (String,Ptr BasicBlock,Integer) () -> Set (String,Ptr BasicBlock,Integer)) -> UnrollConfig mloc ptr
+mergePointConfig' entry (funs,globs,alltps,structs) select
+  = trace ("Program: "++show prog_gr) $
+    trace ("Possible merges: "++show (possibleMergePoints prog_gr)) $
+    trace ("Order: "++show order) $
+    trace ("Selected merges: "++show selectedMergePoints) $
+    UnrollCfg { unrollStructs = structs
               , unrollTypes = alltps
               , unrollFunctions = ext_funs
-              , unrollDoMerge = \fname blk sblk -> Set.member (fname,blk,sblk) mergePoints
+              , unrollDoMerge = \fname blk sblk -> Set.member (fname,blk,sblk) selectedMergePoints
               , unrollCfgGlobals = globs
               , unrollBlockOrder = order
               }
@@ -184,7 +207,7 @@ mergePointConfig entry (funs,globs,alltps,structs) select
     Just (start_nd,_) = Map.lookup (entry,start_blk,0) blk_mp
     [dffTree] = Gr.dff [start_nd] prog_gr
     order = reverse $ fmap (\nd -> let Just inf = Gr.lab prog_gr nd in inf) $ Gr.postorder dffTree
-    mergePoints = Set.fromList $ fmap (\nd -> let Just inf = Gr.lab prog_gr nd in inf) $ select (possibleMergePoints prog_gr)
+    selectedMergePoints = select ext_funs prog_gr
 
 reachabilityInfo :: Map (Ptr BasicBlock,Integer) (Maybe String,RealizationInfo,RealizationMonad mloc ptr (BlockFinalization ptr))
                     -> Map (Ptr BasicBlock,Integer) (Map (Ptr BasicBlock,Integer) (Set (Ptr BasicBlock,Integer)))

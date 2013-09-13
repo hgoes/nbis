@@ -61,8 +61,10 @@ main = do
   print "done."
   gen <- getStdGen
   let program = foldl1 mergePrograms progs
-      --cfg = defaultConfig (entryPoint opts) program
-      cfg = randomMergePointConfig (entryPoint opts) program gen
+      cfg = case manualMergeNodes opts of
+        Nothing -> defaultConfig (entryPoint opts) program
+        Just nodes -> explicitMergePointConfig (entryPoint opts) program nodes
+      --cfg = randomMergePointConfig (entryPoint opts) program gen
       --cfg = noMergePointConfig (entryPoint opts) program
   bug <- withSMTSolver (case solver opts of
                            Nothing -> "~/debug-smt.sh output-" ++ (entryPoint opts) ++ ".smt"
