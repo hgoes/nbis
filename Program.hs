@@ -275,6 +275,14 @@ getConstant val
               els <- mapM (\i -> constantDataSequentialGetElementAsConstant seq i >>= getConstant) [0..(sz-1)]
               return $ MemArray els
           ) (castDown val)
+    ,fmap (\(arr::Ptr ConstantAggregateZero) -> do
+              tp <- getType arr
+              case castDown tp of
+                Just arrTp -> do
+                  sz <- arrayTypeGetNumElements arrTp
+                  els <- mapM (\i -> constantGetAggregateElement arr i >>= getConstant) [0..(sz-1)]
+                  return $ MemArray els
+          ) (castDown val)
     ]
     where
       mkSwitch ((Just act):_) = act
