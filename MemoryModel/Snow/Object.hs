@@ -82,7 +82,7 @@ ptrIndexEq ((tp1,idx1):r1) ((tp2,idx2):r2)
 ptrIndexGetAccessor :: Show ptr => Map String [TypeDesc] -> PtrIndex -> ObjAccessor ptr
 ptrIndexGetAccessor _ [] = ObjAccessor id
 ptrIndexGetAccessor structs all@((tp,idx):rest)
-  = {-trace (show all) $-} indexObject structs (PointerType tp) idx (ptrIndexGetAccessor structs rest)
+  = {-trace (show all) $-} indexObject structs (PointerType tp) (normalizeIndex (PointerType tp) idx) (ptrIndexGetAccessor structs rest)
 
 ptrIndexGetType :: Map String [TypeDesc] -> PtrIndex -> TypeDesc
 ptrIndexGetType structs ((tp,idx):_) = indexType structs (PointerType tp) idx
@@ -116,6 +116,33 @@ changeAtDyn idx f xs = change' 0 xs
     change' i (x:xs) = let (nx,r,e) = f x (idx .==. (constantAnn (BitVector i) idx_sz))
                            (nxs,rs,es) = change' (i+1) xs
                        in (nx:nxs,r:rs,e:es)
+
+normalizeIndex :: TypeDesc -> [DynNum] -> [DynNum]
+normalizeIndex tp is = case normalizeIndex' tp is of
+  (Nothing,nis) -> nis
+  (Just _,_) -> is
+
+normalizeIndex' :: TypeDesc -> [DynNum] -> (Maybe DynNum,[DynNum])
+normalizeIndex' tp [] = (Nothing,[])
+normalizeIndex' (ArrayType n tp) (i:is) = case normalizeIndex' tp is of
+  (Nothing,nis) -> case i of
+    Left i' -> let (upd,rest) = i' `divMod` n
+               in if upd==0
+                  then (Nothing,i:nis)
+                  else (Just (Left upd),Left rest:nis)
+    Right _ -> (Nothing,i:nis)
+  (Just upd,nis) -> case (i,upd) of
+    (Left i',Left upd') -> let (nupd,rest) = (i'+upd') `divMod` n
+                           in if nupd==0
+                              then (Nothing,Left rest:nis)
+                              else (Just (Left nupd),Left rest:nis)
+    _ -> (Nothing,i:is)
+normalizeIndex' (PointerType tp) (i:is) = case normalizeIndex' tp is of
+  (Just upd,nis) -> case (upd,i) of
+    (Left upd',Left i') -> (Nothing,Left (i'+upd'):nis)
+    _ -> (Nothing,i:is)
+  _ -> (Nothing,i:is)
+normalizeIndex' _ is = (Nothing,is)
 
 indexObject :: Show ptr => Map String [TypeDesc] -> TypeDesc
                -> [DynNum]
