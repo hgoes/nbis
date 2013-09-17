@@ -151,6 +151,12 @@ reGetPhi (blk,instr) = Realization $ \info -> let (info1,getArg) = runRealizatio
                                                          val <- getArg
                                                          return $ Just (cond,val))
 
+reUndef :: TypeDesc -> Realization mem ptr (Either Val ptr)
+reUndef tp = Realization $ \info -> (info,case tp of
+                                        IntegerType w -> do
+                                          v <- lift $ varNamedAnn "undef" w
+                                          return $ Left $ DirectValue v)
+
 argToExpr :: (Enum ptr,Enum mem) => Operand -> Realization mem ptr (Either Val ptr)
 argToExpr expr = case operandDesc expr of
   ODNull -> let PointerType tp = operandType expr
@@ -187,7 +193,7 @@ argToExpr expr = case operandDesc expr of
                              (argToExpr ptr) <*>
                              (traverse argToExpr idx) <*>
                              (reLift reNewPtr)
-  ODUndef -> pure (Left $ ConstValue 0 (bitWidth (operandType expr)))
+  ODUndef -> reUndef (operandType expr)
 
 data BlockFinalization ptr = Jump (CondList (Ptr BasicBlock))
                            | Return (Maybe (Either Val ptr))
