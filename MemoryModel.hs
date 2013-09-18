@@ -20,6 +20,7 @@ data MemContent = MemCell Integer Integer
 data ErrorDesc = Custom
                | NullDeref
                | Overrun
+               | Underrun
                | FreeAccess
                deriving (Show,Eq,Ord)
 
@@ -48,6 +49,7 @@ class MemoryModel m mloc ptr where
   addProgram :: m -> SMTExpr Bool -> [mloc] -> MemoryProgram mloc ptr -> SMT m
   connectLocation :: m -> Proxy ptr -> SMTExpr Bool -> mloc -> mloc -> SMT m
   connectPointer :: m -> Proxy mloc -> SMTExpr Bool -> ptr -> ptr -> SMT m
+  memoryErrors :: m -> Proxy mloc -> Proxy ptr -> [(ErrorDesc,SMTExpr Bool)]
   debugMem :: m -> Proxy mloc -> Proxy ptr -> String
 
 memInstrSrc :: MemoryInstruction m p -> Maybe m

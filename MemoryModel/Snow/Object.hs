@@ -101,11 +101,13 @@ idxCompare (x:xs) (y:ys) = case dynNumCombine (\x y -> Left $ x==y) (\x y -> Rig
     Left True -> Right res
     Right res' -> Right $ res .&&. res'
 
-changeAt :: Integer -> (a -> (a,b,c)) -> [a] -> ([a],b,c)
-changeAt 0 f (x:xs) = let (x',y,z) = f x
-                      in (x':xs,y,z)
-changeAt n f (x:xs) = let (xs',y,z) = changeAt (n-1) f xs
-                      in (x:xs',y,z)
+changeAt :: Integer -> a -> (a -> (a,b,[(ErrorDesc,SMTExpr Bool)])) -> [a] -> ([a],b,[(ErrorDesc,SMTExpr Bool)])
+changeAt 0 _ f (x:xs) = let (x',y,z) = f x
+                        in (x':xs,y,z)
+changeAt n def f (x:xs) = let (xs',y,z) = changeAt (n-1) def f xs
+                          in (x:xs',y,z)
+changeAt _ def f [] = let (x',y,errs) = f def
+                      in ([],y,(Overrun,constant True):errs)
 
 changeAtDyn :: SMTExpr (BitVector BVUntyped) -> (a -> SMTExpr Bool -> (a,b,c)) -> [a] -> ([a],[b],[c])
 changeAtDyn idx f xs = change' 0 xs
@@ -154,7 +156,7 @@ indexObject structs (PointerType tp) (i:idx) (ObjAccessor access)
     (\f obj -> access (\obj' -> case (obj',i) of
                           (Bounded (StaticArrayObject objs),Left i')
                             -> let (nobjs,res,errs)
-                                     = changeAt i'
+                                     = changeAt i' (head objs)
                                        (indexBounded structs tp idx f) objs
                                in (Bounded (StaticArrayObject nobjs),res,errs)
                           (Bounded (StaticArrayObject objs),Right i')
@@ -181,14 +183,14 @@ indexObject structs (StructType desc) (Left i:idx) (ObjAccessor access)
     in ObjAccessor
        (\f obj -> access (\obj' -> case obj' of
                              Bounded (StructObject objs)
-                               -> let (nobjs,res,errs) = changeAt i (indexBounded structs tp idx f) objs
+                               -> let (nobjs,res,errs) = changeAt i (head objs) (indexBounded structs tp idx f) objs
                                   in (Bounded (StructObject nobjs),res,errs)
                          ) obj)
 indexObject _ tp idx _ = error $ "indexObject not implemented for "++show tp++" "++show idx
 
 indexBounded :: Show ptr => Map String [TypeDesc] -> TypeDesc -> [DynNum]
-                -> (Object ptr -> (Object ptr,a,[(ErrorDesc,SMTExpr Bool)]))
-                -> BoundedObject ptr -> (BoundedObject ptr,a,[(ErrorDesc,SMTExpr Bool)])
+                -> (Object ptr -> (Object ptr,[(a,SMTExpr Bool)],[(ErrorDesc,SMTExpr Bool)]))
+                -> BoundedObject ptr -> (BoundedObject ptr,[(a,SMTExpr Bool)],[(ErrorDesc,SMTExpr Bool)])
 indexBounded _ _ [] f obj = let (Bounded nobj,res,errs) = f (Bounded obj)
                             in (nobj,res,errs)
 indexBounded structs (StructType descr) (Left i:idx) f (StructObject objs)
@@ -197,17 +199,26 @@ indexBounded structs (StructType descr) (Left i:idx) f (StructObject objs)
             Just res -> res
             Nothing -> error $ "Couldn't resolve struct type "++name
           Right res -> res
-        (nobjs,res,errs) = changeAt i (indexBounded structs (List.genericIndex tps i) idx f) objs
+        (nobjs,res,errs) = changeAt i (head objs) (indexBounded structs (List.genericIndex tps i) idx f) objs
     in (StructObject nobjs,res,errs)
 indexBounded structs (ArrayType _ tp) (Left i:idx) f (StaticArrayObject objs)
-  = let (nobjs,res,errs) = changeAt i (indexBounded structs tp idx f) objs
+  = let (nobjs,res,errs) = changeAt i (head objs) (indexBounded structs tp idx f) objs
     in (StaticArrayObject nobjs,res,errs)
+indexBounded structs (ArrayType sz tp) (Right i:idx) f (StaticArrayObject objs)
+  = let (nobjs,res,errs) = changeAtDyn i (\el cond -> let (nel,res,errs) = indexBounded structs tp idx f el
+                                                          nerrs = fmap (\(desc,cond') -> (desc,cond .&&. cond')) errs
+                                                      in (iteBounded cond nel el,(res,cond),nerrs)
+                                         ) objs
+        nres = concat $ fmap (\(lst,c) -> fmap (\(x,c') -> (x,c' .&&. c)) lst) res
+    in (StaticArrayObject nobjs,nres,(Overrun,i `bvsge` (constantAnn (BitVector sz) (extractAnnotation i))):
+                                     (Underrun,i `bvslt` (constantAnn (BitVector 0) (extractAnnotation i))):
+                                     concat errs)
 indexBounded _ tp idx _ obj = error $ "indexBounded unimplemented for "++show tp++" "++show idx++" ("++show obj++") in Snow memory model"
 
 indexUnbounded :: Show ptr => Map String [TypeDesc] -> TypeDesc -> [DynNum]
-                  -> (Object ptr -> (Object ptr,a,[(ErrorDesc,SMTExpr Bool)]))
+                  -> (Object ptr -> (Object ptr,[(a,SMTExpr Bool)],[(ErrorDesc,SMTExpr Bool)]))
                   -> UnboundedObject ptr
-                  -> (UnboundedObject ptr,a,[(ErrorDesc,SMTExpr Bool)])
+                  -> (UnboundedObject ptr,[(a,SMTExpr Bool)],[(ErrorDesc,SMTExpr Bool)])
 indexUnbounded structs tp (i:is) f dynarr@(DynFlatArrayObject { dynFlatArrayBound = sz
                                                               , dynFlatArray = arrs
                                                               , dynFlatArrayIndexSize = idx_sz

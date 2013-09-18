@@ -5,6 +5,7 @@ import Program
 import Realization (isIntrinsic)
 import Unrollment
 import Analyzation
+import MemoryModel
 import MemoryModel.Snow
 import Circuit
 import Realization
@@ -90,9 +91,10 @@ main = do
     
     unroll isFirst cfg env []
       = stack (do
-                  let (p1,p2) = unrollProxies env in trace (debugMem (unrollMemory env) p1 p2) (return ())
+                  let (p1,p2) = unrollProxies env
+                  trace (debugMem (unrollMemory env) p1 p2) (return ())
                   mapM_ (\mn -> assert $ not' $ mergeActivationProxy mn) (unrollMergeNodes env)
-                  assert $ app or' [ cond | (desc,cond) <- unrollGuards env ]
+                  assert $ app or' [ cond | (desc,cond) <- unrollGuards env ++ (memoryErrors (unrollMemory env) p1 p2) ]
                   res <- checkSat
                   if res
                     then (do
