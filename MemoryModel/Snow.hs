@@ -482,6 +482,7 @@ listHeader x (y:ys) = let l = (length x)+1
 
 snowDebug :: (Show ptr,Show mloc) => SnowMemory mloc ptr -> String
 snowDebug mem = unlines $
+                (snowDebugLocation "Global" (snowGlobal mem))++
                 (concat
                  [ snowDebugLocation (show loc) cont
                  | (loc,cont) <- Map.toList (snowLocations mem)
