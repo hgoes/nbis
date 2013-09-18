@@ -80,30 +80,33 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
                         , snowNextObject = next
                         , snowErrors = []
                         }
-  makeEntry _ mem loc = return $ mem { snowLocations = Map.insert loc (snowGlobal mem) (snowLocations mem) }
+  makeEntry _ mem loc = trace ("Make entry: "++show loc) $ return $ mem { snowLocations = Map.insert loc (snowGlobal mem) (snowLocations mem) }
   addProgram mem act prev_locs prog = do
-    let mem1 = mem { snowProgram = prog++(snowProgram mem) }
-    mem2 <- foldlM (\cmem instr -> do
-                       (obj_upd',ptr_upd',next) <- initUpdates (snowStructs cmem) (snowNextObject cmem) instr
-                       let cmem1 = cmem { snowNextObject = next }
-                       applyUpdates
-                         (case ptr_upd' of
-                             Nothing -> []
-                             Just up -> [up])
-                         (case obj_upd' of
-                             Nothing -> []
-                             Just up -> [up]) (snowProgram cmem1) cmem1
-           ) mem1 prog
-    --return mem2
+    trace ("Adding program: "++show prog++" "++show prev_locs) $ return ()
+    let rprog = fmap (\instr -> (act,instr)) prog
+        mem1 = mem { snowProgram = (snowProgram mem)++rprog }
+    (mem2,ptr_upds,obj_upds) <- foldlM (\(cmem,cptr_upds,cobj_upds) instr -> do
+                                           (obj_upd',ptr_upd',next) <- initUpdates (snowStructs cmem) (snowNextObject cmem) instr
+                                           return (cmem { snowNextObject = next },
+                                                   case ptr_upd' of
+                                                     Nothing -> cptr_upds
+                                                     Just up -> up:cptr_upds,
+                                                   case obj_upd' of
+                                                     Nothing -> cobj_upds
+                                                     Just up -> up:cobj_upds)
+                                       ) (mem1,[],[]) prog
+    mem3 <- applyUpdates ptr_upds obj_upds (snowProgram mem2) mem2
     applyUpdates (Map.toList $ snowPointers mem1) [ (prev_loc,n,lst)
                                                   | prev_loc <- prev_locs,
-                                                    let Just prev_loc_cont = Map.lookup prev_loc (snowLocations mem2),
-                                                    (n,lst) <- Map.toList $ snowObjects prev_loc_cont ] prog mem2
+                                                    (n,lst) <- case Map.lookup prev_loc (snowLocations mem2) of
+                                                      Nothing -> []
+                                                      Just prev_loc_cont -> Map.toList $ snowObjects prev_loc_cont
+                                                  ] rprog mem3
   connectLocation mem _ cond loc_from loc_to = do
     trace ("Connecting location "++show loc_from++" with "++show loc_to) $ return ()
     let cloc = case Map.lookup loc_from (snowLocations mem) of
           Just l -> l
-          Nothing -> error $ "Couldn't find location "++show loc_from --SnowLocation Map.empty Map.empty
+          Nothing -> SnowLocation Map.empty
         mem1 = mem { snowLocationConnections = Map.insertWith (++) loc_from [(loc_to,cond)] (snowLocationConnections mem) }
         obj_upd = [ (loc_to,obj,[ (cond .&&. cond',obj) | (cond',obj) <- assign])
                   | (obj,assign) <- Map.toList $ snowObjects cloc ]
@@ -381,6 +384,7 @@ updateObject structs all_ptrs all_objs (loc,new_obj,new_conds) act instr = case 
                                                                            (\obj' -> let (res,errs) = loadObject sz obj'
                                                                                      in (obj',[(res,constant True)],errs)
                                                                            ) obj
+                                                     comment $ "Load from "++show ptr++" (object update)"
                                                      mapM_ (\(loaded',cond'') -> assert $ (and' `app` [cond,cond',cond'']) .=>. (res .==. loaded')
                                                            ) loaded
                                                  ) new_conds
