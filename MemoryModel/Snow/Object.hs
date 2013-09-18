@@ -166,15 +166,11 @@ indexObject structs (PointerType tp) (i:idx) (ObjAccessor access)
                                                                      ) objs
                                    nres = concat $ fmap (\(lst,c) -> fmap (\(x,c') -> (x,c' .&&. c)) lst) res
                                in (Bounded (StaticArrayObject nobjs),nres,concat errs)
-                          (Bounded obj,Left 0)
-                            -> let (nobj,res,errs)
-                                     = indexBounded structs tp idx f obj
-                               in (Bounded nobj,res,errs)
                           (Unbounded obj,_) -> let (nobj,res,errs) = indexUnbounded structs tp (i:idx) f obj
                                                in (Unbounded nobj,res,errs)
                           _ -> error $ "indexObject of "++show obj'++" with "++show i++" unimplemented"
                       ) obj)
-indexObject structs (StructType desc) (Left i:idx) (ObjAccessor access)
+{-indexObject structs (StructType desc) (Left i:idx) (ObjAccessor access)
   = let tps = case desc of
           Left name -> case Map.lookup name structs of
             Just res -> res
@@ -185,7 +181,7 @@ indexObject structs (StructType desc) (Left i:idx) (ObjAccessor access)
                              Bounded (StructObject objs)
                                -> let (nobjs,res,errs) = changeAt i (head objs) (indexBounded structs tp idx f) objs
                                   in (Bounded (StructObject nobjs),res,errs)
-                         ) obj)
+                         ) obj)-}
 indexObject _ tp idx _ = error $ "indexObject not implemented for "++show tp++" "++show idx
 
 indexBounded :: Show ptr => Map String [TypeDesc] -> TypeDesc -> [DynNum]
@@ -260,6 +256,10 @@ allocaBounded structs (StructType desc) = do
         Right res -> res
   objs <- mapM (allocaBounded structs) tps
   return $ StructObject objs
+allocaBounded structs (ArrayType sz tp) = do
+  objs <- sequence $ genericReplicate sz (allocaBounded structs tp)
+  return $ StaticArrayObject objs
+allocaBounded _ tp = error $ "allocaBound not implemented for "++show tp
 
 allocaUnbounded :: Map String [TypeDesc]
                    -> TypeDesc
@@ -306,6 +306,7 @@ loadPtr :: Show ptr => Object ptr -> (Maybe ptr,[(ErrorDesc,SMTExpr Bool)])
 loadPtr (Bounded (ValidPointer p)) = (Just p,[])
 loadPtr (Bounded NullPointer) = (Nothing,[])
 loadPtr (Bounded AnyPointer) = (Nothing,[]) -- FIXME: What to do here?
+loadPtr (Bounded (StaticArrayObject (ptr:_))) = loadPtr (Bounded ptr)
 loadPtr obj = error $ "Cant load pointer from "++show obj
 
 storeObject :: Show ptr => SMTExpr (BitVector BVUntyped) -> Object ptr -> (Object ptr,[(ErrorDesc,SMTExpr Bool)])
@@ -353,10 +354,12 @@ storePtr :: Show ptr => ptr -> Object ptr -> (Object ptr,[(ErrorDesc,SMTExpr Boo
 storePtr ptr (Bounded obj) = let (nobj,errs) = storePtr' ptr obj
                              in (Bounded nobj,errs)
 
-storePtr' :: ptr -> BoundedObject ptr -> (BoundedObject ptr,[(ErrorDesc,SMTExpr Bool)])
+storePtr' :: Show ptr => ptr -> BoundedObject ptr -> (BoundedObject ptr,[(ErrorDesc,SMTExpr Bool)])
 storePtr' ptr (ValidPointer _) = (ValidPointer ptr,[])
 storePtr' ptr NullPointer = (ValidPointer ptr,[])
 storePtr' ptr AnyPointer = (ValidPointer ptr,[])
+storePtr' ptr (StaticArrayObject (_:ptrs)) = (StaticArrayObject ((ValidPointer ptr):ptrs),[])
+storePtr' ptr obj = error $ "storePtr': Storing pointer "++show ptr++" to object "++show obj++" not implemented"
 
 iteBounded :: SMTExpr Bool -> BoundedObject ptr -> BoundedObject ptr -> BoundedObject ptr
 iteBounded cond (WordObject w1) (WordObject w2) = WordObject (ite cond w1 w2)

@@ -59,6 +59,7 @@ mkGlobal cont = do
     mkGlobal' (MemArray els) = do
       els' <- mapM mkGlobal' els
       return $ StaticArrayObject els'
+    mkGlobal' MemNull = return NullPointer
 
 instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc ptr) mloc ptr where
   memNew _ _ structs globals = do
