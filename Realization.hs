@@ -421,6 +421,8 @@ intrinsics "nbis_nondet_u32" = Just (True,intr_nondet 32)
 intrinsics "nbis_nondet_u16" = Just (True,intr_nondet 16)
 intrinsics "nbis_nondet_u8" = Just (True,intr_nondet 8)
 intrinsics "nbis_watch" = Just (False,intr_watch)
+intrinsics "llvm.lifetime.start" = Just (False,intr_lifetime_start)
+intrinsics "llvm.lifetime.end" = Just (False,intr_lifetime_end)
 intrinsics _ = Nothing
 
 intr_memcpy [(Right to,_),(Right from,_),(Left len,_),_,_] = do
@@ -477,3 +479,6 @@ intr_stacksave _ = do
   reMemInstr (MINull (IntegerType 8) ptr)
   return (Just $ Right ptr)
 intr_stackrestore _ = return Nothing
+
+intr_lifetime_start _ = return Nothing
+intr_lifetime_end _ = return Nothing
