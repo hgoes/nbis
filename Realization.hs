@@ -390,7 +390,7 @@ realizeInstruction (IStore val to) = reInject (\(ptr,val) -> do
                                      (argToExpr val)
 realizeInstruction (ITerminator (ICall trg f args)) = case operandDesc f of
   ODFunction rtp fn argtps -> let args' = traverse (\arg -> (\r -> (r,operandType arg)) <$> argToExpr arg) args
-                              in case intrinsics fn of
+                              in case intrinsics fn rtp argtps of
                                 Nothing -> reAddCall fn trg *> ((\args'' -> Just $ Call fn (fmap fst args'') trg) <$> args')
                                 Just (def,intr) -> (if def
                                                     then reDefineVar trg (fn++"Result") (reInject (\args'' -> do
@@ -398,32 +398,33 @@ realizeInstruction (ITerminator (ICall trg f args)) = case operandDesc f of
                                                                                                       return res) args')
                                                     else reInject (\args'' -> intr args'' >> return ()) args') *> pure Nothing
 
-isIntrinsic :: String -> Bool
-isIntrinsic name = case intrinsics name :: Maybe (Bool,[(Either Val Int,TypeDesc)] -> RealizationMonad Int Int (Maybe (Either Val Int))) of
+isIntrinsic :: String -> TypeDesc -> [TypeDesc] -> Bool
+isIntrinsic name rtp argtps = case intrinsics name rtp argtps :: Maybe (Bool,[(Either Val Int,TypeDesc)] -> RealizationMonad Int Int (Maybe (Either Val Int))) of
   Nothing -> False
   Just _ -> True
 
-intrinsics :: (Enum ptr,Enum mem) => String -> Maybe (Bool,[(Either Val ptr,TypeDesc)] -> RealizationMonad mem ptr (Maybe (Either Val ptr)))
---intrinsics "llvm.memcpy.p0i8.p0i8.i64" = Just intr_memcpy
---intrinsics "llvm.memcpy.p0i8.p0i8.i32" = Just intr_memcpy
+intrinsics :: (Enum ptr,Enum mem) => String -> TypeDesc -> [TypeDesc] -> Maybe (Bool,[(Either Val ptr,TypeDesc)] -> RealizationMonad mem ptr (Maybe (Either Val ptr)))
+intrinsics "llvm.memcpy.p0i8.p0i8.i64" _ _ = Just (True,intr_memcpy)
+intrinsics "llvm.memcpy.p0i8.p0i8.i32" _ _ = Just (True,intr_memcpy)
 --intrinsics "llvm.memset.p0i8.i32" = Just intr_memset
 --intrinsics "llvm.memset.p0i8.i64" = Just intr_memset
-intrinsics "llvm.stacksave" = Just (True,intr_stacksave)
-intrinsics "llvm.stackrestore" = Just (False,intr_stackrestore)
-intrinsics "nbis_restrict" = Just (False,intr_restrict)
-intrinsics "nbis_assert" = Just (False,intr_assert)
-intrinsics "nbis_nondet_i64" = Just (True,intr_nondet 64)
-intrinsics "nbis_nondet_i32" = Just (True,intr_nondet 32)
-intrinsics "nbis_nondet_i16" = Just (True,intr_nondet 16)
-intrinsics "nbis_nondet_i8" = Just (True,intr_nondet 8)
-intrinsics "nbis_nondet_u64" = Just (True,intr_nondet 64)
-intrinsics "nbis_nondet_u32" = Just (True,intr_nondet 32)
-intrinsics "nbis_nondet_u16" = Just (True,intr_nondet 16)
-intrinsics "nbis_nondet_u8" = Just (True,intr_nondet 8)
-intrinsics "nbis_watch" = Just (False,intr_watch)
-intrinsics "llvm.lifetime.start" = Just (False,intr_lifetime_start)
-intrinsics "llvm.lifetime.end" = Just (False,intr_lifetime_end)
-intrinsics _ = Nothing
+intrinsics "llvm.stacksave" _ _ = Just (True,intr_stacksave)
+intrinsics "llvm.stackrestore" _ _ = Just (False,intr_stackrestore)
+intrinsics "nbis_restrict" _ _ = Just (False,intr_restrict)
+intrinsics "nbis_assert" _ _ = Just (False,intr_assert)
+intrinsics "nbis_nondet_i64" _ _ = Just (True,intr_nondet 64)
+intrinsics "nbis_nondet_i32" _ _ = Just (True,intr_nondet 32)
+intrinsics "nbis_nondet_i16" _ _ = Just (True,intr_nondet 16)
+intrinsics "nbis_nondet_i8" _ _ = Just (True,intr_nondet 8)
+intrinsics "nbis_nondet_u64" _ _ = Just (True,intr_nondet 64)
+intrinsics "nbis_nondet_u32" _ _ = Just (True,intr_nondet 32)
+intrinsics "nbis_nondet_u16" _ _ = Just (True,intr_nondet 16)
+intrinsics "nbis_nondet_u8" _ _ = Just (True,intr_nondet 8)
+intrinsics "nbis_watch" _ _ = Just (False,intr_watch)
+intrinsics "llvm.lifetime.start" _ _ = Just (False,intr_lifetime_start)
+intrinsics "llvm.lifetime.end" _ _ = Just (False,intr_lifetime_end)
+intrinsics "strlen" rtp _ = Just (True,intr_strlen (bitWidth rtp))
+intrinsics _ _ _ = Nothing
 
 intr_memcpy [(Right to,_),(Right from,_),(Left len,_),_,_] = do
   let len' = case len of
@@ -431,8 +432,10 @@ intr_memcpy [(Right to,_),(Right from,_),(Left len,_),_,_] = do
         DirectValue l -> Right l
   loc <- reMemLoc
   nloc <- reNewMemLoc
-  reMemInstr (MICopy loc len' from to nloc)
-  return Nothing
+  reMemInstr (MICopy loc from to (CopyOpts { copySizeLimit = Just len'
+                                           , copyStopper = Nothing
+                                           , copyMayOverlap = False }) nloc)
+  return $ Just (Right to)
 
 --intr_memset _ [(Right dest,_),(val,_),(Left (ConstValue len _),_),_,_] = do
 --  reError "memset not implemented"
@@ -482,3 +485,9 @@ intr_stackrestore _ = return Nothing
 
 intr_lifetime_start _ = return Nothing
 intr_lifetime_end _ = return Nothing
+
+intr_strlen width [(Right ptr,_)] = do
+  res <- lift $ varNamedAnn "strlen" width
+  loc <- reMemLoc
+  reMemInstr (MIStrLen loc ptr res)
+  return (Just $ Left $ DirectValue res)

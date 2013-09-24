@@ -373,10 +373,44 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) act instr = case ins
                                       ValidPointer (obj_p,idx') -> (c,ValidPointer (obj_p,ptrIndexIndex idx idx'))
                                  | (c,src) <- new_conds ]),[])
     | otherwise -> return ([],Nothing,[])
+  MIStrLen mfrom ptr lenvar
+    | ptr==new_ptr -> do
+      let sz = extractAnnotation lenvar
+      errs <- mapM (\(cond,src) -> do
+                       errs <- mapM (\((obj_p,idx),cond') -> do
+                                        let (idx',(last_tp,idx_last)) = splitLast idx
+                                            (idx_last',off) = splitLast idx_last
+                                            idx'' = idx'++[(last_tp,idx_last')]
+                                            ObjAccessor access = ptrIndexGetAccessor structs idx''
+                                        case Map.lookup obj_p all_objs of
+                                          --Nothing -> error $ "Object "++show obj_p++" not found at location "++show mfrom
+                                          Nothing -> return [] -- TODO: Is this sound?
+                                          Just objs -> do
+                                            errs <- mapM (\(cond'',obj) -> do
+                                                             let (_,len,errs) = access
+                                                                                (\obj' -> let (res,errs) = strlen sz off obj'
+                                                                                          in (obj',[(res,constant True)],errs)
+                                                                                ) obj
+                                                             comment $ "Strlen of "++show ptr
+                                                             mapM_ (\(len',cond''') -> assert $ (and' `app` [cond,cond',cond'',cond''']) .=>. (lenvar .==. len')
+                                                                   ) len
+                                                             return errs
+                                                         ) objs
+                                            return [ (err,app and' [act,c,cond',cond]) | (err,c) <- concat errs ]
+                                    ) (validPointers src)
+                       return $ concat errs ++ [ (NullDeref,cond .&&. cond') | cond' <- nullPointers src ]
+                   ) new_conds
+      return ([],Nothing,concat errs)
+    | otherwise -> return ([],Nothing,[])
   _ -> return ([],Nothing,[])
 
 concatPairs :: [([a],[b])] -> ([a],[b])
 concatPairs xs = (concat $ fmap fst xs,concat $ fmap snd xs)
+
+splitLast :: [a] -> ([a],a)
+splitLast [x] = ([],x)
+splitLast (x:xs) = let (xs',last) = splitLast xs
+                   in (x:xs',last)
 
 updateObject :: (Eq mloc,Ord ptr,Show ptr,Show mloc)
                 => Map String [TypeDesc]

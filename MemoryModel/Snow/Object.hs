@@ -451,3 +451,15 @@ ptrCompare f NullPointer NullPointer = constant True
 ptrCompare f (ITEPointer c p1 p2) p = ite c (ptrCompare f p1 p) (ptrCompare f p2 p)
 ptrCompare f p (ITEPointer c p1 p2) = ite c (ptrCompare f p p1) (ptrCompare f p p2)
 ptrCompare _ _ _ = constant False
+
+strlen :: Show ptr => Integer -> DynNum -> Object ptr -> (SMTExpr (BitVector BVUntyped),[(ErrorDesc,SMTExpr Bool)])
+strlen width off (Bounded (StaticArrayObject words)) = case off of
+  Left i -> strlenStatic (constant True) 0 (genericDrop i words)
+  where
+    strlenStatic cond _ [] = (constantAnn (BitVector 0) width,[(Overrun,cond)])
+    strlenStatic cond i (x:xs) = let ncond = case x of
+                                       WordObject w
+                                         | extractAnnotation w == 8 -> w .==. (constantAnn (BitVector 0) 8)
+                                     (res,errs) = strlenStatic (cond .&&. (not' ncond)) (i+1) xs
+                                 in (ite ncond (constantAnn (BitVector i) width) res,errs)
+strlen _ _ obj = error $ "strlen not implemented for "++show obj

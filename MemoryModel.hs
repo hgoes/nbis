@@ -39,6 +39,7 @@ data MemoryInstruction m p
   | MIIndex [DynNum] p p
   | MIPhi [(SMTExpr Bool,m)] m
   | MICopy m DynNum p p m
+  | MIStrLen m p (SMTExpr (BitVector BVUntyped))
   deriving (Show,Eq)
 
 type MemoryProgram m p = [MemoryInstruction m p]
@@ -65,6 +66,7 @@ memInstrSrc (MICast _ _ _ _) = Nothing
 memInstrSrc (MIIndex _ _ _) = Nothing
 memInstrSrc (MIPhi _ _) = Nothing
 memInstrSrc (MICopy m _ _ _ _) = Just m
+memInstrSrc (MIStrLen m _ _) = Just m
 
 memInstrTrg :: MemoryInstruction m p -> Maybe m
 memInstrTrg (MINull _ _) = Nothing
@@ -79,6 +81,7 @@ memInstrTrg (MICast _ _ _ _) = Nothing
 memInstrTrg (MIIndex _ _ _) = Nothing
 memInstrTrg (MIPhi _ m) = Just m
 memInstrTrg (MICopy _ _ _ _ m) = Just m
+memInstrTrg (MIStrLen _ _ _) = Nothing
 
 flattenMemContent :: MemContent -> [(Integer,Integer)]
 flattenMemContent (MemCell w v) = [(w,v)]
