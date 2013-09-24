@@ -30,9 +30,20 @@ data BoundedObject ptr
   = WordObject (SMTExpr (BitVector BVUntyped))
   | StructObject [BoundedObject ptr]
   | StaticArrayObject [BoundedObject ptr]
-  | ValidPointer ptr
+  | Pointer (PointerContent ptr)
+  deriving (Eq)
+
+instance Show ptr => Show (BoundedObject ptr) where
+  show (WordObject expr) = "w"++(show $ extractAnnotation expr)++" "++show expr
+  show (StructObject objs) = "{"++List.intercalate ", " (fmap show objs)++"}"
+  show (StaticArrayObject objs) = show objs
+  show (Pointer ptr) = show ptr
+
+data PointerContent ptr
+  = ValidPointer ptr
   | NullPointer
   | AnyPointer
+  | ITEPointer (SMTExpr Bool) (PointerContent ptr) (PointerContent ptr)
   deriving (Show,Eq)
 
 data ObjAccessor ptr = ObjAccessor (forall a. (Object ptr -> (Object ptr,[(a,SMTExpr Bool)],[(ErrorDesc,SMTExpr Bool)]))
@@ -40,6 +51,20 @@ data ObjAccessor ptr = ObjAccessor (forall a. (Object ptr -> (Object ptr,[(a,SMT
                                     -> (Object ptr,[(a,SMTExpr Bool)],[(ErrorDesc,SMTExpr Bool)]))
 
 type PtrIndex = [(TypeDesc,[DynNum])]
+
+validPointers :: PointerContent ptr -> [(ptr,SMTExpr Bool)]
+validPointers (ValidPointer p) = [(p,constant True)]
+validPointers NullPointer = []
+validPointers AnyPointer = []
+validPointers (ITEPointer c p1 p2) = [ (p,c .&&. c') | (p,c') <- validPointers p1 ]++
+                                     [ (p,(not' c) .&&. c') | (p,c') <- validPointers p2 ]
+
+nullPointers :: PointerContent ptr -> [SMTExpr Bool]
+nullPointers (ValidPointer p) = []
+nullPointers NullPointer = [constant True]
+nullPointers AnyPointer = [constant True]
+nullPointers (ITEPointer c p1 p2) = [ c .&&. c' | c' <- nullPointers p1 ]++
+                                    [ (not' c) .&&. c' | c' <- nullPointers p2 ]
 
 ptrIndexCast :: Map String [TypeDesc] -> TypeDesc -> PtrIndex -> PtrIndex
 ptrIndexCast structs tp1 ref@((tp2,idx):rest) = case indexType structs tp2 idx of
@@ -170,18 +195,6 @@ indexObject structs (PointerType tp) (i:idx) (ObjAccessor access)
                                                in (Unbounded nobj,res,errs)
                           _ -> error $ "indexObject of "++show obj'++" with "++show i++" unimplemented"
                       ) obj)
-{-indexObject structs (StructType desc) (Left i:idx) (ObjAccessor access)
-  = let tps = case desc of
-          Left name -> case Map.lookup name structs of
-            Just res -> res
-          Right res -> res
-        tp = List.genericIndex tps i
-    in ObjAccessor
-       (\f obj -> access (\obj' -> case obj' of
-                             Bounded (StructObject objs)
-                               -> let (nobjs,res,errs) = changeAt i (head objs) (indexBounded structs tp idx f) objs
-                                  in (Bounded (StructObject nobjs),res,errs)
-                         ) obj)-}
 indexObject _ tp idx _ = error $ "indexObject not implemented for "++show tp++" "++show idx
 
 indexBounded :: Show ptr => Map String [TypeDesc] -> TypeDesc -> [DynNum]
@@ -244,7 +257,7 @@ allocaObject structs tp (Right sz) = fmap Unbounded (allocaUnbounded structs tp 
 allocaBounded :: Map String [TypeDesc] -- ^ All structs in the program
                  -> TypeDesc -- ^ The type to be allocated
                  -> SMT (BoundedObject ptr)
-allocaBounded _ (PointerType tp) = return AnyPointer
+allocaBounded _ (PointerType tp) = return (Pointer AnyPointer)
 allocaBounded _ (IntegerType w) = do
   v <- varNamedAnn "allocInt" w
   return $ WordObject v
@@ -302,10 +315,8 @@ loadObject' sz (StaticArrayObject (obj:objs)) = case loadObject' sz obj of
                              Nothing -> Just r1
                              Just r2 -> Just $ bvconcat r1 r2,errs++errs')
 
-loadPtr :: Show ptr => Object ptr -> (Maybe ptr,[(ErrorDesc,SMTExpr Bool)])
-loadPtr (Bounded (ValidPointer p)) = (Just p,[])
-loadPtr (Bounded NullPointer) = (Nothing,[])
-loadPtr (Bounded AnyPointer) = (Nothing,[]) -- FIXME: What to do here?
+loadPtr :: Show ptr => Object ptr -> (PointerContent ptr,[(ErrorDesc,SMTExpr Bool)])
+loadPtr (Bounded (Pointer ptr)) = (ptr,[])
 loadPtr (Bounded (StaticArrayObject (ptr:_))) = loadPtr (Bounded ptr)
 loadPtr obj = error $ "Cant load pointer from "++show obj
 
@@ -350,16 +361,93 @@ storeObjects' off bv (obj:objs)
                     (noff',nobjs,errs') = storeObjects' noff bv objs
                 in (noff',nobj:nobjs,errs++errs')
 
-storePtr :: Show ptr => ptr -> Object ptr -> (Object ptr,[(ErrorDesc,SMTExpr Bool)])
+storePtr :: Show ptr => PointerContent ptr -> Object ptr -> (Object ptr,[(ErrorDesc,SMTExpr Bool)])
 storePtr ptr (Bounded obj) = let (nobj,errs) = storePtr' ptr obj
                              in (Bounded nobj,errs)
 
-storePtr' :: Show ptr => ptr -> BoundedObject ptr -> (BoundedObject ptr,[(ErrorDesc,SMTExpr Bool)])
-storePtr' ptr (ValidPointer _) = (ValidPointer ptr,[])
-storePtr' ptr NullPointer = (ValidPointer ptr,[])
-storePtr' ptr AnyPointer = (ValidPointer ptr,[])
-storePtr' ptr (StaticArrayObject (_:ptrs)) = (StaticArrayObject ((ValidPointer ptr):ptrs),[])
+storePtr' :: Show ptr => PointerContent ptr -> BoundedObject ptr -> (BoundedObject ptr,[(ErrorDesc,SMTExpr Bool)])
+storePtr' ptr (Pointer _) = (Pointer ptr,[])
+storePtr' ptr (StaticArrayObject (_:ptrs)) = (StaticArrayObject ((Pointer ptr):ptrs),[])
 storePtr' ptr obj = error $ "storePtr': Storing pointer "++show ptr++" to object "++show obj++" not implemented"
 
-iteBounded :: SMTExpr Bool -> BoundedObject ptr -> BoundedObject ptr -> BoundedObject ptr
+iteBounded :: Show ptr => SMTExpr Bool -> BoundedObject ptr -> BoundedObject ptr -> BoundedObject ptr
 iteBounded cond (WordObject w1) (WordObject w2) = WordObject (ite cond w1 w2)
+iteBounded cond (StaticArrayObject arr1) (StaticArrayObject arr2) = StaticArrayObject (zipWith (iteBounded cond) arr1 arr2)
+iteBounded cond (Pointer p1) (Pointer p2) = Pointer (ITEPointer cond p1 p2)
+iteBounded _ obj1 obj2 = error $ "iteBounded not implemented for "++show obj1++" and "++show obj2
+
+copyObjectLen :: Integer         -- ^ The size of a pointer
+                 -> Object ptr   -- ^ The source object
+                 -> Object ptr   -- ^ The target object
+                 -> DynNum       -- ^ The length in bytes
+                 -> (Object ptr,[(ErrorDesc,SMTExpr Bool)]) -- ^ The resulting object and any errors that can occur
+copyObjectLen ptrSz (Bounded bsrc) (Bounded btrg) (Left len) = (Bounded $ copyObjectLenBounded ptrSz bsrc 0 btrg 0 len,[])
+
+copyObjectLenBounded :: Integer -> BoundedObject ptr -> Integer -> BoundedObject ptr -> Integer -> Integer -> BoundedObject ptr
+copyObjectLenBounded ptrSz src srcOff (WordObject twrd) trgOff len
+  | trgOff==0 && trgLen==len = WordObject swrd
+  | trgOff==0 = WordObject $ bvconcat swrd (bvextract' len (trgLen-len) twrd)
+  | trgOff+len==trgLen = WordObject $ bvconcat (bvextract' 0 trgOff twrd) swrd
+  | otherwise = WordObject $ bvconcat (bvconcat (bvextract' 0 trgOff twrd) swrd) (bvextract' len (trgLen-len) twrd)
+  where
+    swrd = extractWord ptrSz srcOff len src
+    trgLen = extractAnnotation twrd
+copyObjectLenBounded ptrSz src srcOff (StructObject tobjs) trgOff len
+  = StructObject $ copyObjectLenBounded' ptrSz src srcOff tobjs trgOff len
+copyObjectLenBounded ptrSz src srcOff (StaticArrayObject tobjs) trgOff len
+  = StaticArrayObject $ copyObjectLenBounded' ptrSz src srcOff tobjs trgOff len
+copyObjectLenBounded ptrSz src srcOff (Pointer _) trgOff len
+  | trgOff==0 && len==ptrSz = Pointer (extractPtr ptrSz srcOff src)
+
+copyObjectLenBounded' :: Integer -> BoundedObject ptr -> Integer -> [BoundedObject ptr] -> Integer -> Integer -> [BoundedObject ptr]
+copyObjectLenBounded' ptrSz src srcOff (trgObj:trgObjs) trgOff len
+  | trgOff >= objLen = trgObj:(copyObjectLenBounded' ptrSz src srcOff trgObjs (trgOff-objLen) len)
+  | trgOff+len <= objLen = (copyObjectLenBounded ptrSz src srcOff trgObj trgOff len):trgObjs
+  | otherwise = (copyObjectLenBounded ptrSz src srcOff trgObj trgOff len):
+                (copyObjectLenBounded' ptrSz src (srcOff+objLen) trgObjs 0 (len-objLen))
+  where
+    objLen = boundedLen ptrSz trgObj
+
+boundedLen :: Integer -> BoundedObject ptr -> Integer
+boundedLen _ (WordObject w) = extractAnnotation w
+boundedLen ptrSz (StructObject objs) = sum $ fmap (boundedLen ptrSz) objs
+boundedLen ptrSz (StaticArrayObject objs) = sum $ fmap (boundedLen ptrSz) objs
+boundedLen ptrSz (Pointer _) = ptrSz
+
+extractWord :: Integer -> Integer -> Integer -> BoundedObject ptr -> SMTExpr (BitVector BVUntyped)
+extractWord _ off len (WordObject w)
+  | off==0 && len >= wlen = w
+  | off+len > wlen = bvextract' off (wlen-off) w
+  | otherwise = bvextract' off len w
+  where
+    wlen = extractAnnotation w
+extractWord ptrSz off len (StructObject objs) = extractWord' ptrSz off len objs
+extractWord ptrSz off len (StaticArrayObject objs) = extractWord' ptrSz off len objs
+
+extractWord' :: Integer -> Integer -> Integer -> [BoundedObject ptr] -> SMTExpr (BitVector BVUntyped)
+extractWord' ptrSz off len (obj:objs)
+  | obj_len <= off = extractWord' ptrSz (off-obj_len) len objs
+  | off+len <= obj_len = extractWord ptrSz off len obj
+  | otherwise = bvconcat (extractWord ptrSz off (obj_len-off) obj) (extractWord' ptrSz 0 (len-obj_len+off) objs)
+  where
+    obj_len = boundedLen ptrSz obj
+
+extractPtr :: Integer -> Integer -> BoundedObject ptr -> PointerContent ptr
+extractPtr _ off (Pointer ptr)
+  | off==0 = ptr
+extractPtr ptrSz off (StructObject objs) = extractPtr' ptrSz off objs
+extractPtr ptrSz off (StaticArrayObject objs) = extractPtr' ptrSz off objs
+
+extractPtr' :: Integer -> Integer -> [BoundedObject ptr] -> PointerContent ptr
+extractPtr' ptrSz off (obj:objs)
+  | obj_len <= off = extractPtr' ptrSz (off-obj_len) objs
+  | otherwise = extractPtr ptrSz off obj
+  where
+    obj_len = boundedLen ptrSz obj
+
+ptrCompare :: (ptr -> ptr -> SMTExpr Bool) -> PointerContent ptr -> PointerContent ptr -> SMTExpr Bool
+ptrCompare f (ValidPointer p1) (ValidPointer p2) = f p1 p2
+ptrCompare f NullPointer NullPointer = constant True
+ptrCompare f (ITEPointer c p1 p2) p = ite c (ptrCompare f p1 p) (ptrCompare f p2 p)
+ptrCompare f p (ITEPointer c p1 p2) = ite c (ptrCompare f p p1) (ptrCompare f p p2)
+ptrCompare _ _ _ = constant False
