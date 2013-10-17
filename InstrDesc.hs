@@ -251,7 +251,7 @@ getInstrType structs (IAssign _ _ desc) = case desc of
   IBinaryOperator _ l _ -> operandType l
   IFCmp _ _ _ -> IntegerType 1
   IICmp _ _ _ -> IntegerType 1
-  IGetElementPtr ptr idx -> indexType structs (operandType ptr)
+  IGetElementPtr ptr idx -> PointerType $ indexType structs (operandType ptr)
                             [ case operandDesc i of
                                  ODInt x -> Left x
                                  _ -> Right ()

@@ -453,8 +453,7 @@ ptrCompare f p (ITEPointer c p1 p2) = ite c (ptrCompare f p p1) (ptrCompare f p 
 ptrCompare _ _ _ = constant False
 
 strlen :: Show ptr => Integer -> DynNum -> Object ptr -> (SMTExpr (BitVector BVUntyped),[(ErrorDesc,SMTExpr Bool)])
-strlen width off (Bounded (StaticArrayObject words)) = case off of
-  Left i -> strlenStatic (constant True) 0 (genericDrop i words)
+strlen width (Left i) (Bounded (StaticArrayObject words)) = strlenStatic (constant True) 0 (genericDrop i words)
   where
     strlenStatic cond _ [] = (constantAnn (BitVector 0) width,[(Overrun,cond)])
     strlenStatic cond i (x:xs) = let ncond = case x of
@@ -463,3 +462,22 @@ strlen width off (Bounded (StaticArrayObject words)) = case off of
                                      (res,errs) = strlenStatic (cond .&&. (not' ncond)) (i+1) xs
                                  in (ite ncond (constantAnn (BitVector i) width) res,errs)
 strlen _ _ obj = error $ "strlen not implemented for "++show obj
+
+strncmp :: Show ptr => Integer -> DynNum -> DynNum -> Object ptr -> DynNum -> Object ptr -> (SMTExpr (BitVector BVUntyped),[(ErrorDesc,SMTExpr Bool)])
+strncmp width (Left limit) (Left i1) (Bounded (StaticArrayObject arr1)) (Left i2) (Bounded (StaticArrayObject arr2))
+  = strncmpStatic (constant True) 0 (genericDrop i1 arr1) (genericDrop i2 arr2)
+  where
+    strncmpStatic cond _ [] _ = (constantAnn (BitVector 0) width,[(Overrun,cond)])
+    strncmpStatic cond _ _ [] = (constantAnn (BitVector 0) width,[(Overrun,cond)])
+    strncmpStatic cond i (x:xs) (y:ys)
+      = case (x,y) of
+      (WordObject wx,WordObject wy)
+        | extractAnnotation wx == 8 &&
+          extractAnnotation wy == 8 -> let continue = (wx .==. wy) .&&. (not' $ wx .==. constantAnn (BitVector 0) 8)
+                                           (nres,errs) = strncmpStatic (cond .&&. continue) (i+1) xs ys
+                                           diff = if width == 8
+                                                  then bvsub wx wy
+                                                  else bvconcat (constantAnn (BitVector 0) (width-8)::SMTExpr (BitVector BVUntyped)) (bvsub wx wy)
+                                       in if i==limit-1
+                                          then (diff,[])
+                                          else (ite continue nres diff,errs)

@@ -16,4 +16,6 @@ Executable nbis
     MemoryModel.Untyped
     MemoryModel.Typed
     MemoryModel.Plain
+    MemoryModel.Snow
+    MemoryModel.Rivers
   Build-Depends:	base,bindings-llvm,containers,mtl,smtlib2,fgl,tagged,random

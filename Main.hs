@@ -7,6 +7,7 @@ import Unrollment
 import Analyzation
 import MemoryModel
 import MemoryModel.Snow
+import MemoryModel.Rivers
 import Circuit
 import Realization
 
@@ -72,7 +73,7 @@ main = do
                            Just bin -> bin) $ do
     setOption (PrintSuccess False)
     setOption (ProduceModels True)
-    (start,env :: UnrollEnv (Gr.Gr BlkInfo ()) (SnowMemory Integer Integer) Integer Integer) <- startingContext cfg (entryPoint opts)
+    (start,env :: UnrollEnv (Gr.Gr BlkInfo ()) (RiverMemory Integer Integer) Integer Integer) <- startingContext cfg (entryPoint opts)
     findBug True cfg 0 env [start]
   case bug of
     Just tr -> do
@@ -81,20 +82,31 @@ main = do
     Nothing -> putStrLn "No bug found."
   where
     findBug isFirst cfg depth env ctxs = do
-      --trace ("Depth: "++show depth) (return ())
-      --trace ("Contexts:\n"++(unlines $ fmap show ctxs)) (return ())
+      trace ("Depth: "++show depth) (return ())
+      --liftIO $ writeFile ("state-space"++show depth++".dot") $ Gr.graphviz' (unrollInfo env)
+      {-trace ("Contexts:\n"++(unlines $ fmap (\ctx -> show $ fmap (\edge -> ([ getBlkName cfg (unrollCtxFunction ctx) blk sblk | (blk,sblk,_,_,_) <- edgeConds edge ],
+                                                                            getBlkName cfg (unrollCtxFunction ctx) (edgeTargetBlock edge) (edgeTargetSubblock edge)
+                                                                           )) $ realizationQueue ctx) ctxs)) (return ())-}
       result <- unroll isFirst cfg env ctxs
       case result of
         Left err -> return (Just err)
         Right ([],nenv) -> return Nothing
         Right (nctxs,nenv) -> findBug False cfg (depth+1) nenv nctxs
+
+    getBlkName cfg fname blk sblk = case Map.lookup fname (unrollFunctions cfg) of
+      Just info -> case Map.lookup (blk,sblk) (unrollFunInfoBlocks info) of
+        Just (name,_,_,_) -> case name of
+          Just name' -> name'
+        Nothing -> "Unknown block"
     
     unroll isFirst cfg env []
       = stack (do
                   let (p1,p2) = unrollProxies env
-                  trace (debugMem (unrollMemory env) p1 p2) (return ())
+                      bugs = unrollGuards env ++ (memoryErrors (unrollMemory env) p1 p2)
+                  --trace (debugMem (unrollMemory env) p1 p2) (return ())
+                  --trace ("Checking errors:\n"++unlines (fmap (\(desc,cond) -> "  "++show desc++" ~> "++show cond) bugs)) (return ())
                   mapM_ (\mn -> assert $ not' $ mergeActivationProxy mn) (unrollMergeNodes env)
-                  assert $ app or' [ cond | (desc,cond) <- unrollGuards env ++ (memoryErrors (unrollMemory env) p1 p2) ]
+                  assert $ app or' [ cond | (desc,cond) <- bugs ]
                   res <- checkSat
                   if res
                     then (do

@@ -124,16 +124,27 @@ indexType structs (PointerType tp) (_:idx) = indexType' tp idx
       = indexType' tp is
 indexType _ tp idx = error $ "Can't index type "++show tp
 
-typeWidth :: TypeDesc -> Integer
-typeWidth (IntegerType w)
+typeWidth :: Integer -> Map String [TypeDesc] -> TypeDesc -> Integer
+typeWidth _ _ (IntegerType w)
   | w `mod` 8 == 0 = w `div` 8
   | otherwise = error $ "typeWidth called for "++show w
-typeWidth (ArrayType n tp) = n*(typeWidth tp)
-typeWidth (StructType (Right tps)) = sum (fmap typeWidth tps)
-typeWidth tp = error $ "No typeWidth for "++show tp
+typeWidth pw _ (PointerType _) = pw `div` 8
+typeWidth pw structs (ArrayType n tp) = n*(typeWidth pw structs tp)
+typeWidth pw structs (StructType (Right tps)) = sum (fmap (typeWidth pw structs) tps)
+typeWidth pw structs (StructType (Left name)) = case Map.lookup name structs of
+  Just tps -> sum (fmap (typeWidth pw structs) tps)
+typeWidth _ _ tp = error $ "No typeWidth for "++show tp
 
-bitWidth :: TypeDesc -> Integer
-bitWidth (IntegerType w) = w
-bitWidth (ArrayType n tp) = n*(bitWidth tp)
-bitWidth (StructType (Right tps)) = sum (fmap bitWidth tps)
-bitWidth tp = error $ "No bitWidth for "++show tp
+bitWidth :: Integer -> Map String [TypeDesc] -> TypeDesc -> Integer
+bitWidth _ _ (IntegerType w) = w
+bitWidth pw _ (PointerType _) = pw
+bitWidth pw structs (ArrayType n tp) = n*(bitWidth pw structs tp)
+bitWidth pw structs (StructType (Right tps)) = sum (fmap (bitWidth pw structs) tps)
+bitWidth pw structs (StructType (Left name)) = case Map.lookup name structs of
+  Just tps -> sum (fmap (bitWidth pw structs) tps)
+bitWidth _ _ tp = error $ "No bitWidth for "++show tp
+
+bitWidth' :: TypeDesc -> Integer
+bitWidth' = bitWidth
+            (error "bitWidth' is not implemented for pointer types")
+            (error "bitWidth' is not implemented for struct types")

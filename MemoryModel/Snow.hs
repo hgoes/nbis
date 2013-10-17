@@ -68,7 +68,7 @@ mkGlobal cont = do
     mkGlobal' MemNull = return (Pointer NullPointer)
 
 instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc ptr) mloc ptr where
-  memNew _ _ structs globals = do
+  memNew _ _ _ structs globals = do
     (globs,ptrs,next) <- foldlM (\(loc,ptrs,next) (ptr,tp,cont) -> do
                                     glob <- case cont of
                                       Just cont' -> mkGlobal cont'
@@ -86,9 +86,9 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
                         , snowNextObject = next
                         , snowErrors = []
                         }
-  makeEntry _ mem loc = trace ("Make entry: "++show loc) $ return $ mem { snowLocations = Map.insert loc (snowGlobal mem) (snowLocations mem) }
-  addProgram mem act prev_locs prog = do
-    trace ("Adding program: "++show prog++" "++show prev_locs) $ return ()
+  makeEntry _ mem loc = {-trace ("Make entry: "++show loc) $-} return $ mem { snowLocations = Map.insert loc (snowGlobal mem) (snowLocations mem) }
+  addProgram mem act prev_locs prog ptrs = do
+    --trace ("Adding program: "++show prog++" "++show prev_locs) $ return ()
     let rprog = fmap (\instr -> (act,instr)) prog
         mem1 = mem { snowProgram = (snowProgram mem)++rprog }
     (mem2,ptr_upds,obj_upds) <- foldlM (\(cmem,cptr_upds,cobj_upds) instr -> do
@@ -109,7 +109,7 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
                                                       Just prev_loc_cont -> Map.toList $ snowObjects prev_loc_cont
                                                   ] rprog mem3
   connectLocation mem _ cond loc_from loc_to = do
-    trace ("Connecting location "++show loc_from++" with "++show loc_to) $ return ()
+    --trace ("Connecting location "++show loc_from++" with "++show loc_to) $ return ()
     let cloc = case Map.lookup loc_from (snowLocations mem) of
           Just l -> l
           Nothing -> SnowLocation Map.empty
@@ -119,7 +119,7 @@ instance (Ord mloc,Ord ptr,Show ptr,Show mloc) => MemoryModel (SnowMemory mloc p
         obj_upd' = concat $ fmap (connectObjectUpdate (snowLocationConnections mem1)) obj_upd
     applyUpdates [] obj_upd' (snowProgram mem1) mem1
   connectPointer mem _ cond ptr_from ptr_to = do
-    trace ("Connecting pointer "++show ptr_from++" with "++show ptr_to++"("++show cond++")") $ return ()
+    --trace ("Connecting pointer "++show ptr_from++" with "++show ptr_to++"("++show cond++")") $ return ()
     let mem1 = mem { snowPointerConnections = Map.insertWith (++) ptr_from [(ptr_to,cond)] (snowPointerConnections mem) }
         ptr_upd = case Map.lookup ptr_from (snowPointers mem1) of
           Just assign -> connectPointerUpdate (snowPointerConnections mem1)
@@ -135,8 +135,8 @@ applyUpdates [] [] _ mem = return mem
 applyUpdates ptr_upds obj_upds instrs mem = do
   let ptr_upds' = fmap (\(ptr,upd) -> (ptr,simplifyCondList upd)) ptr_upds
       obj_upds' = fmap (\(loc,obj_p,upd) -> (loc,obj_p,simplifyCondList upd)) obj_upds
-  trace (unlines $ listHeader "Pointer updates: " (fmap show ptr_upds')) (return ())
-  trace (unlines $ listHeader "Object updates: " (fmap show obj_upds')) (return ())
+  --trace (unlines $ listHeader "Pointer updates: " (fmap show ptr_upds')) (return ())
+  --trace (unlines $ listHeader "Object updates: " (fmap show obj_upds')) (return ())
   let mem1 = foldl (\cmem (ptr,assign)
                     -> cmem { snowPointers = Map.insertWith mergeCondList ptr assign (snowPointers cmem)
                             }) mem ptr_upds'
@@ -366,7 +366,7 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) act instr = case ins
                                       ValidPointer (obj_p,idx) -> (c,ValidPointer (obj_p,ptrIndexCast structs tp_to idx))
                                  | (c,src) <- new_conds ]),[])
     | otherwise -> return ([],Nothing,[])
-  MIIndex idx ptr_from ptr_to
+  MIIndex _ _ idx ptr_from ptr_to
     | ptr_from==new_ptr
       -> return ([],Just (ptr_to,[ case src of
                                       NullPointer -> (c,NullPointer)
@@ -402,6 +402,17 @@ updatePointer structs all_ptrs all_objs (new_ptr,new_conds) act instr = case ins
                    ) new_conds
       return ([],Nothing,concat errs)
     | otherwise -> return ([],Nothing,[])
+  {-MICopy mfrom ptr_from ptr_to opts mto
+    | ptr_from==new_ptr -> case Map.lookup ptr_to all_ptrs of
+      Just dests -> do
+        let res = [ (mto,obj_p,[ (cond .&&. cond',nobj)
+                               | (cond',obj) <- objs',
+                                 let (nobj,_,errs) = access
+                                       | (cond,Just (obj_p,idx)) <- new_conds
+                , let ObjAccessor access = ptrIndexGetAccessor structs idx
+                ]
+      return ([],Nothing,[])
+    | otherwise -> return ([],Nothing,[])-}
   _ -> return ([],Nothing,[])
 
 concatPairs :: [([a],[b])] -> ([a],[b])

@@ -99,6 +99,7 @@ data ReturnInfo ptr = ReturnCreate { returnCreateFun :: String
                                   }
 
 data UnrollConfig mloc ptr = UnrollCfg { unrollDoMerge :: String -> Ptr BasicBlock -> Integer -> Bool
+                                       , unrollPointerWidth :: Integer
                                        , unrollStructs :: Map String [TypeDesc]
                                        , unrollTypes :: Set TypeDesc
                                        , unrollFunctions :: Map String (UnrollFunInfo mloc ptr)
@@ -119,16 +120,16 @@ nodeIdCallStackList nd = (nodeIdFunction nd,nodeIdBlock nd,nodeIdSubblock nd):
                              Nothing -> []
                              Just (nd',_) -> nodeIdCallStackList nd')
 
-defaultConfig :: (Eq ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> UnrollConfig mloc ptr
+defaultConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> UnrollConfig mloc ptr
 defaultConfig entr desc = mergePointConfig entr desc safeMergePoints
 
-randomMergePointConfig :: (Eq ptr,Enum ptr,Enum mloc,RandomGen g) => String -> ProgDesc -> g -> UnrollConfig mloc ptr
+randomMergePointConfig :: (Ord ptr,Enum ptr,Enum mloc,RandomGen g) => String -> ProgDesc -> g -> UnrollConfig mloc ptr
 randomMergePointConfig entr desc gen = mergePointConfig entr desc (randomMergePoints gen)
 
-noMergePointConfig :: (Eq ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> UnrollConfig mloc ptr
+noMergePointConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> UnrollConfig mloc ptr
 noMergePointConfig entr desc = mergePointConfig entr desc (const [])
 
-explicitMergePointConfig :: (Eq ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> [(String,String,Integer)] -> UnrollConfig mloc ptr
+explicitMergePointConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> [(String,String,Integer)] -> UnrollConfig mloc ptr
 explicitMergePointConfig entry prog merges
   = mergePointConfig' entry prog
     (\funs _ -> Set.fromList [ case Map.lookup fun funs of
@@ -139,13 +140,13 @@ explicitMergePointConfig entry prog merges
                                     Nothing -> error $ "Merge-point "++show (fun,blk,sblk)++" not found."
                              | (fun,blk,sblk) <- merges ])
 
-mergePointConfig :: (Eq ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> ([[Gr.Node]] -> [Gr.Node]) -> UnrollConfig mloc ptr
+mergePointConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> ([[Gr.Node]] -> [Gr.Node]) -> UnrollConfig mloc ptr
 mergePointConfig entry prog select = mergePointConfig' entry prog $
                                      \_ prog_gr -> Set.fromList $ fmap (\nd -> let Just inf = Gr.lab prog_gr nd in inf) $
                                                    select (possibleMergePoints prog_gr)
 
-mergePointConfig' :: (Eq ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> (Map String (UnrollFunInfo mloc ptr) -> Gr.Gr (String,Ptr BasicBlock,Integer) () -> Set (String,Ptr BasicBlock,Integer)) -> UnrollConfig mloc ptr
-mergePointConfig' entry (funs,globs,alltps,structs) select
+mergePointConfig' :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> (Map String (UnrollFunInfo mloc ptr) -> Gr.Gr (String,Ptr BasicBlock,Integer) () -> Set (String,Ptr BasicBlock,Integer)) -> UnrollConfig mloc ptr
+mergePointConfig' entry (funs,globs,ptrWidth,alltps,structs) select
   = trace ("Program: "++show prog_gr) $
     trace ("Possible merges: "++show (possibleMergePoints prog_gr)) $
     trace ("Order: "++show order) $
@@ -155,7 +156,8 @@ mergePointConfig' entry (funs,globs,alltps,structs) select
                                                    Just n -> (fun,n,sblk)
                                                    Nothing -> (fun,show blk,sblk))
                                       $ Set.toList selectedMergePoints)) $
-    UnrollCfg { unrollStructs = structs
+    UnrollCfg { unrollPointerWidth = ptrWidth
+              , unrollStructs = structs
               , unrollTypes = alltps
               , unrollFunctions = ext_funs
               , unrollDoMerge = \fname blk sblk -> Set.member (fname,blk,sblk) selectedMergePoints
@@ -479,7 +481,7 @@ startingContext cfg fname = case Map.lookup fname (unrollFunctions cfg) of
         ((cptr,prog),globs') = mapAccumL (\(ptr',prog') (tp,cont) 
                                           -> ((succ ptr',(ptr',tp,cont):prog'),ptr')
                                          ) (0,[]) (unrollCfgGlobals cfg)
-    mem <- memNew (Proxy::Proxy Integer) (unrollTypes cfg) (unrollStructs cfg) [ (ptr,tp,cont) | (ptr,PointerType tp,cont) <- prog ]
+    mem <- memNew (Proxy::Proxy Integer) (unrollPointerWidth cfg) (unrollTypes cfg) (unrollStructs cfg) [ (ptr,tp,cont) | (ptr,PointerType tp,cont) <- prog ]
     return (UnrollContext { unrollOrder = order
                           , currentMergeNodes = Map.empty
                           , nextMergeNodes = Map.empty
@@ -560,15 +562,6 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
         rmn <- getMergeNode mn
         nprx <- lift $ varNamed "proxy"
         lift $ assert $ (mergeActivationProxy rmn) .==. (app or' ([ act | (_,_,_,act,_,_,_) <- inc ]++[nprx]))
-        ninp <- foldlM (\cinp (_,_,_,act,mp,_,_) -> do
-                           sequence $ zipWith (\mp' cinp' -> addMerge True act mp' cinp') mp cinp
-                       ) (mergeInputs rmn) inc
-        modify $ \env -> env { unrollInfo = foldl (\info ndSrc -> unrollInfoConnect info ndSrc (mergeUnrollInfo rmn)
-                                                  ) (unrollInfo env) [ ndSrc | (_,_,_,_,_,_,Just ndSrc) <- inc ] }
-        --mapM dumpMergeValue ninp >>= liftIO . print
-        --checkLoops' ninp
-        updateMergeNode mn (rmn { mergeActivationProxy = nprx
-                                , mergeInputs = ninp })
         mapM_ (\(fun,blk,sblk,act,_,loc,_) -> do
                   env <- get
                   let (_,prx_ptr) = unrollProxies env
@@ -578,6 +571,15 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                     Nothing -> return ()
                     Just phi -> lift $ assert $ act .=>. (app and' $ phi:[ not' phi' | (blk',phi') <- Map.toList (mergePhis rmn), blk'/=blk ])
               ) inc
+        ninp <- foldlM (\cinp (_,_,_,act,mp,_,_) -> do
+                           sequence $ zipWith (\mp' cinp' -> addMerge True act mp' cinp') mp cinp
+                       ) (mergeInputs rmn) inc
+        modify $ \env -> env { unrollInfo = foldl (\info ndSrc -> unrollInfoConnect info ndSrc (mergeUnrollInfo rmn)
+                                                  ) (unrollInfo env) [ ndSrc | (_,_,_,_,_,_,Just ndSrc) <- inc ] }
+        --mapM dumpMergeValue ninp >>= liftIO . print
+        --checkLoops' ninp
+        updateMergeNode mn (rmn { mergeActivationProxy = nprx
+                                , mergeInputs = ninp })
         return (cur { realizationQueue = rest
                     , usedMergeNodes = Map.insert trg () (usedMergeNodes cur) })
       Nothing -> do
@@ -738,7 +740,7 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
           [] -> return ()
           xs -> do
             env <- get
-            nmem <- lift $ addProgram (unrollMemory env) act prev_locs xs
+            nmem <- lift $ addProgram (unrollMemory env) act prev_locs xs (rePtrTypes nst)
             put $ env { unrollMemory = nmem }
         mapM_ (\(cond,src,trg) -> do
                   env <- get

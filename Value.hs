@@ -132,7 +132,9 @@ valNew name (IntegerType 1) = do
   res <- varNamed name
   return $ ConditionValue res 1
 valNew name tp = do
-  res <- varNamedAnn name (fromIntegral $ bitWidth tp)
+  res <- varNamedAnn name (fromIntegral $ bitWidth
+                           (error "Can't create value for pointer type")
+                           (error "Can't create value for struct type") tp)
   return $ DirectValue res
 
 valCopy :: String -> Val -> SMT Val

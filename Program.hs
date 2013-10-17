@@ -54,6 +54,7 @@ type ProgDesc = (Map String ([(Ptr Argument, TypeDesc)],
                              [LoopDesc],
                              Maybe DomTree),
                  Map (Ptr GlobalVariable) (TypeDesc, Maybe MemContent),
+                 Integer,
                  Set TypeDesc,
                  Map String [TypeDesc])
 
@@ -196,6 +197,7 @@ getProgram is_intr file = do
   print "done."
   tli <- getTargetLibraryInfo mod
   dl <- getDataLayout mod
+  ptrWidth <- dataLayoutPointerSize dl 0
   funs <- moduleGetFunctionList mod >>= 
           ipListToList >>=
           mapM (\fun -> do
@@ -232,7 +234,7 @@ getProgram is_intr file = do
                     return (g,(tp,init'))) >>=
            return . Map.fromList
   (tps,structs) <- getUsedTypes mod
-  return (funs,globs,Set.fromList tps,structs)
+  return (funs,globs,fromIntegral ptrWidth,Set.fromList tps,structs)
   where
     mkSubBlocks :: [InstrDesc Operand] -> [InstrDesc Operand] -> [[InstrDesc Operand]]
     mkSubBlocks cur (i:is) = case i of
@@ -292,7 +294,7 @@ getConstant val
         error "Unknown constant."
 
 mergePrograms :: ProgDesc -> ProgDesc -> ProgDesc
-mergePrograms (p1,g1,tp1,s1) (p2,g2,tp2,s2) 
+mergePrograms (p1,g1,pw1,tp1,s1) (p2,g2,pw2,tp2,s2)
   = (Map.unionWithKey (\name (args1,tp1,blks1,loops1,dt1) (args2,tp2,blks2,loops2,dt2)
                        -> if fmap snd args1 /= fmap snd args2 || tp1 /= tp2
                           then error $ "Conflicting signatures for function "++show name++" detected"
@@ -302,5 +304,8 @@ mergePrograms (p1,g1,tp1,s1) (p2,g2,tp2,s2)
                                       then (args1,tp1,blks1,loops1,dt1)
                                       else error $ "Conflicting definitions for function "++show name++" found"))) p1 p2,
      Map.union g1 g2,
+     if pw1==pw2
+     then pw1
+     else error "Programs do not agree on pointer width",
      Set.union tp1 tp2,
      Map.union s1 s2)

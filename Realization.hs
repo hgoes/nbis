@@ -47,6 +47,7 @@ data RealizationState mem ptr
                      , reNextMemLoc :: mem
                      , reNextPtr :: ptr
                      , reLocals :: Map (Ptr Instruction) (Either Val ptr)
+                     , rePtrTypes :: Map ptr TypeDesc
                      }
 
 data RealizationOutput mem ptr
@@ -141,7 +142,10 @@ reMemLoc = do
 reMemInstr :: MemoryInstruction mem ptr -> RealizationMonad mem ptr ()
 reMemInstr instr = tell (mempty { reMemInstrs = [instr] })
 
-reGetPhi :: (Enum mem,Enum ptr) => (Ptr BasicBlock,Operand) -> Realization mem ptr (Maybe (SMTExpr Bool,Either Val ptr))
+rePtrType :: Ord ptr => ptr -> TypeDesc -> RealizationMonad mem ptr ()
+rePtrType ptr tp = modify (\st -> st { rePtrTypes = Map.insert ptr tp (rePtrTypes st) })
+
+reGetPhi :: (Ord ptr,Enum mem,Enum ptr) => (Ptr BasicBlock,Operand) -> Realization mem ptr (Maybe (SMTExpr Bool,Either Val ptr))
 reGetPhi (blk,instr) = Realization $ \info -> let (info1,getArg) = runRealization (argToExpr instr) info
                                               in (info1 { rePossiblePhis = Set.insert blk (rePossiblePhis info) },do
                                                      re <- ask
@@ -157,43 +161,53 @@ reUndef tp = Realization $ \info -> (info,case tp of
                                           v <- lift $ varNamedAnn "undef" w
                                           return $ Left $ DirectValue v)
 
-argToExpr :: (Enum ptr,Enum mem) => Operand -> Realization mem ptr (Either Val ptr)
-argToExpr expr = case operandDesc expr of
-  ODNull -> let PointerType tp = operandType expr
-            in reInject (\(ptr,instr) -> reMemInstr instr >> return (Right ptr)) $
-               liftA (\ptr -> (ptr,MINull tp ptr)) (reLift reNewPtr)
-  ODInt v -> case operandType expr of
-    IntegerType 1 -> pure $ Left $ ConstCondition (v/=0)
-    IntegerType w -> pure $ Left $ ConstValue v w
-  ODInstr instr _ name -> Realization $ \info -> if Set.member instr (reLocallyDefined info)
-                                                 then (info,do
-                                                          rs <- get
-                                                          case Map.lookup instr (reLocals rs) of
-                                                            Just res -> return res)
-                                                 else (info { rePossibleInputs = Map.insert instr (operandType expr,name) (rePossibleInputs info) },do
-                                                          re <- ask
-                                                          case Map.lookup (Right instr) (reInputs re) of
-                                                            Just res -> return res
-                                                            Nothing -> error $ "Can't find value "++show name
-                                                      )
-  ODGlobal g -> Realization $ \info -> (info { rePossibleGlobals = Set.insert g (rePossibleGlobals info) },do
-                                           re <- ask
-                                           case Map.lookup g (reGlobals re) of
-                                             Just res -> return $ Right res)
-  ODArgument arg -> Realization $ \info -> (info { rePossibleArgs = Set.insert arg (rePossibleArgs info) },do
+argToExpr :: (Ord ptr,Enum ptr,Enum mem) => Operand -> Realization mem ptr (Either Val ptr)
+argToExpr expr = reInject getType result
+  where
+    getType res = case operandType expr of
+      PointerType tp -> case res of
+        Right ptr -> do
+          rePtrType ptr tp
+          return res
+      _ -> return res
+    result = case operandDesc expr of
+      ODNull -> let PointerType tp = operandType expr
+                in reInject (\(ptr,instr) -> reMemInstr instr >> return (Right ptr)) $
+                   liftA (\ptr -> (ptr,MINull tp ptr)) (reLift reNewPtr)
+      ODInt v -> case operandType expr of
+        IntegerType 1 -> pure $ Left $ ConstCondition (v/=0)
+        IntegerType w -> pure $ Left $ ConstValue v w
+      ODInstr instr _ name -> Realization $ \info -> if Set.member instr (reLocallyDefined info)
+                                                     then (info,do
+                                                              rs <- get
+                                                              case Map.lookup instr (reLocals rs) of
+                                                                Just res -> return res)
+                                                     else (info { rePossibleInputs = Map.insert instr (operandType expr,name) (rePossibleInputs info) },do
+                                                              re <- ask
+                                                              case Map.lookup (Right instr) (reInputs re) of
+                                                                Just res -> return res
+                                                                Nothing -> error $ "Can't find value "++show name
+                                                          )
+      ODGlobal g -> Realization $ \info -> (info { rePossibleGlobals = Set.insert g (rePossibleGlobals info) },do
                                                re <- ask
-                                               case Map.lookup (Left arg) (reInputs re) of
-                                                 Just res -> return res)
-  ODGetElementPtr ptr idx -> reInject (\(ptr',instr) -> reMemInstr instr >> return (Right ptr')) $
-                             (\(Right val_ptr) val_idx ptr' -> (ptr',MIIndex (fmap (\i -> case i of
-                                                                                       Left (ConstValue bv _) -> Left bv
-                                                                                       Left (DirectValue bv) -> Right bv
-                                                                                   ) val_idx
-                                                                             ) val_ptr ptr')) <$>
-                             (argToExpr ptr) <*>
-                             (traverse argToExpr idx) <*>
-                             (reLift reNewPtr)
-  ODUndef -> reUndef (operandType expr)
+                                               case Map.lookup g (reGlobals re) of
+                                                 Just res -> return $ Right res)
+      ODArgument arg -> Realization $ \info -> (info { rePossibleArgs = Set.insert arg (rePossibleArgs info) },do
+                                                   re <- ask
+                                                   case Map.lookup (Left arg) (reInputs re) of
+                                                     Just res -> return res)
+      ODGetElementPtr ptr idx -> let PointerType tpTo = operandType expr
+                                     PointerType tpFrom = operandType ptr
+                                 in reInject (\(ptr',instr) -> reMemInstr instr >> return (Right ptr')) $
+                                    (\(Right val_ptr) val_idx ptr' -> (ptr',MIIndex tpFrom tpTo (fmap (\i -> case i of
+                                                                                                          Left (ConstValue bv _) -> Left bv
+                                                                                                          Left (DirectValue bv) -> Right bv
+                                                                                                      ) val_idx
+                                                                                                ) val_ptr ptr')) <$>
+                                    (argToExpr ptr) <*>
+                                    (traverse argToExpr idx) <*>
+                                    (reLift reNewPtr)
+      ODUndef -> reUndef (operandType expr)
 
 data BlockFinalization ptr = Jump (CondList (Ptr BasicBlock))
                            | Return (Maybe (Either Val ptr))
@@ -207,13 +221,14 @@ postRealize :: RealizationEnv ptr -> mem -> mem -> ptr -> RealizationMonad mem p
 postRealize env cur_mem next_mem next_ptr act = runRWST act env (RealizationState { reCurMemLoc = cur_mem
                                                                                   , reNextMemLoc = next_mem
                                                                                   , reNextPtr = next_ptr
-                                                                                  , reLocals = Map.empty })
+                                                                                  , reLocals = Map.empty
+                                                                                  , rePtrTypes = Map.empty })
 
-realizeInstructions :: (Eq ptr,Enum ptr,Enum mem) => [InstrDesc Operand] -> Realization mem ptr (BlockFinalization ptr)
+realizeInstructions :: (Ord ptr,Enum ptr,Enum mem) => [InstrDesc Operand] -> Realization mem ptr (BlockFinalization ptr)
 realizeInstructions [instr] = (\(Just fin) -> fin) <$> realizeInstruction instr
 realizeInstructions (instr:instrs) = ((\Nothing -> ()) <$> realizeInstruction instr) *> realizeInstructions instrs
 
-realizeInstruction :: (Eq ptr,Enum ptr,Enum mem) => InstrDesc Operand -> Realization mem ptr (Maybe (BlockFinalization ptr))
+realizeInstruction :: (Ord ptr,Enum ptr,Enum mem) => InstrDesc Operand -> Realization mem ptr (Maybe (BlockFinalization ptr))
 realizeInstruction (ITerminator (IRet e)) = reSetReturn *> (Just . Return . Just <$> argToExpr e)
 realizeInstruction (ITerminator IRetVoid) = reSetReturn *> (pure $ Just $ Return Nothing)
 realizeInstruction (ITerminator (IBr to)) = (reAddSuccessor to) *> (pure $ Just $ Jump [(constant True,to)])
@@ -242,142 +257,153 @@ realizeInstruction (ITerminator (ISwitch val def args))
                    in Just $ Jump jumps') <$>
      (argToExpr val) <*>
      (traverse (\(cmp_v,to) -> (\r -> (r,to)) <$> (argToExpr cmp_v)) args))
-realizeInstruction (IAssign trg name expr)
-  = let rname = case name of
-          Just name' -> "assign_"++name'
-          Nothing -> "assign"++(case expr of
-                                   IBinaryOperator _ _ _ -> "BinOp"
-                                   IICmp _ _ _ -> "ICmp"
-                                   IGetElementPtr _ _ -> "GetElementPtr"
-                                   IPhi _ -> "Phi"
-                                   ILoad _ -> "Load"
-                                   IBitCast _ _ -> "BitCast"
-                                   ISExt _ _ -> "SExt"
-                                   IZExt _ _ -> "ZExt"
-                                   IAlloca _ _ -> "Alloca"
-                                   ISelect _ _ _ -> "Select"
-                                   _ -> "Unknown")
-    in (reDefineVar trg rname
-        (case expr of
-            IBinaryOperator op lhs rhs -> (\(Left lhs') (Left rhs') -> Left $ valBinOp op lhs' rhs') <$>
-                                          (argToExpr lhs) <*>
-                                          (argToExpr rhs)
-            IICmp op lhs rhs -> case operandType lhs of
-              PointerType _ -> reInject (\(val,instr) -> reMemInstr instr >> return val) $
-                               (\(Right lhs') (Right rhs') cond
-                                -> (Left $ ConditionValue (case op of
-                                                              I_EQ -> cond
-                                                              I_NE -> not' cond) 1,MICompare lhs' rhs' cond)) <$>
-                               (argToExpr lhs) <*>
-                               (argToExpr rhs) <*>
-                               (reLift $ lift $ varNamed "PtrCompare")
-              _ -> (\(Left lhs') (Left rhs') -> Left $ valIntComp op lhs' rhs') <$>
-                   (argToExpr lhs) <*>
-                   (argToExpr rhs)
-            IGetElementPtr ptr idx -> reInject (\(ptr',instr) -> reMemInstr instr >> return (Right ptr')) $
-                                      (\(Right val_ptr) val_idx ptr' -> (ptr',MIIndex (fmap (\i -> case i of
-                                                                                                Left (ConstValue bv _) -> Left bv
-                                                                                                Left (DirectValue bv) -> Right bv
-                                                                                            ) val_idx
-                                                                                      ) val_ptr ptr')) <$>
-                                      (argToExpr ptr) <*>
-                                      (traverse argToExpr idx) <*>
-                                      (reLift reNewPtr)
-            IPhi args -> reInject (\args' -> case args' of
-                                      Left [(_,v)] -> return (Left v)
-                                      Left vs -> return $ Left $ valSwitch (fmap (\(c,v) -> (v,c)) vs)
-                                      Right ps@((_,p):ps') -> if all (\(_,p') -> p==p') ps'
-                                                              then return (Right p)
-                                                              else (do
-                                                                       ptr <- reNewPtr
-                                                                       reMemInstr (MISelect ps ptr)
-                                                                       return $ Right ptr)
-                                  ) $
-                         (\args' -> case catMaybes args' of
-                             all@((_,Right _):_) -> Right (fmap (\(cond,Right p) -> (cond,p)) all)
-                             all@((_,Left _):_) -> Left (fmap (\(cond,Left v) -> (cond,v)) all)) <$>
-                         (traverse reGetPhi args)
-            ILoad arg -> reInject (\(Right ptr) -> do
-                                      loc <- reMemLoc
-                                      case operandType arg of
-                                        PointerType (PointerType tp) -> do
-                                          ptr2 <- reNewPtr
-                                          reMemInstr (MILoadPtr loc ptr ptr2)
-                                          return $ Right ptr2
-                                        PointerType tp -> do
-                                          loadRes <- lift $ varNamedAnn "LoadRes" ((typeWidth tp)*8)
-                                          reMemInstr (MILoad loc ptr loadRes)
-                                          return $ Left $ DirectValue loadRes)
-                         (argToExpr arg)
-            IBitCast tp_to arg -> reInject (\(Right ptr) -> do
-                                               let PointerType tp_from = operandType arg
-                                               ptr' <- reNewPtr
-                                               reMemInstr (MICast tp_from tp_to ptr ptr')
-                                               return $ Right ptr')
-                                  (argToExpr arg)
-            ISExt tp arg -> (\arg' -> case arg' of
-                                Left (ConditionValue v w) -> Left $ ConditionValue v (bitWidth (operandType arg))
-                                Left arg'' -> let v = valValue arg''
-                                                  w = bitWidth (operandType arg)
-                                                  d = (bitWidth tp) - w
-                                                  nv = bvconcat (ite (bvslt v (constantAnn (BitVector 0) w::SMTExpr (BitVector BVUntyped)))
-                                                                 (constantAnn (BitVector (-1)) d::SMTExpr (BitVector BVUntyped))
-                                                                 (constantAnn (BitVector 0) (fromIntegral d))) v
-                                              in Left $ DirectValue nv) <$>
+realizeInstruction assignInstr@(IAssign trg name expr)
+  = reDefineVar trg rname (reInject getType result) *> pure Nothing
+  where
+    rname = case name of
+      Just name' -> "assign_"++name'
+      Nothing -> "assign"++(case expr of
+                               IBinaryOperator _ _ _ -> "BinOp"
+                               IICmp _ _ _ -> "ICmp"
+                               IGetElementPtr _ _ -> "GetElementPtr"
+                               IPhi _ -> "Phi"
+                               ILoad _ -> "Load"
+                               IBitCast _ _ -> "BitCast"
+                               ISExt _ _ -> "SExt"
+                               IZExt _ _ -> "ZExt"
+                               IAlloca _ _ -> "Alloca"
+                               ISelect _ _ _ -> "Select"
+                               _ -> "Unknown")
+    getType res = do
+      structs <- asks reStructs
+      case getInstrType structs assignInstr of
+        PointerType tp -> case res of
+          Right ptr -> rePtrType ptr tp >> return res
+        _ -> return res
+    result = case expr of
+      IBinaryOperator op lhs rhs -> (\(Left lhs') (Left rhs') -> Left $ valBinOp op lhs' rhs') <$>
+                                    (argToExpr lhs) <*>
+                                    (argToExpr rhs)
+      IICmp op lhs rhs -> case operandType lhs of
+        PointerType _ -> reInject (\(val,instr) -> reMemInstr instr >> return val) $
+                         (\(Right lhs') (Right rhs') cond
+                          -> (Left $ ConditionValue (case op of
+                                                        I_EQ -> cond
+                                                        I_NE -> not' cond) 1,MICompare lhs' rhs' cond)) <$>
+                         (argToExpr lhs) <*>
+                         (argToExpr rhs) <*>
+                         (reLift $ lift $ varNamed "PtrCompare")
+        _ -> (\(Left lhs') (Left rhs') -> Left $ valIntComp op lhs' rhs') <$>
+             (argToExpr lhs) <*>
+             (argToExpr rhs)
+      IGetElementPtr ptr idx -> let PointerType tpFrom = operandType ptr
+                                in reInject (\(ptr',val_ptr,ridx) -> do
+                                                structs <- asks reStructs
+                                                let tpTo = case getInstrType structs assignInstr of
+                                                      PointerType tp -> tp
+                                                      tp -> error $ "Result of getelementptr instruction is non-pointer type "++show tp++" "++show assignInstr
+                                                reMemInstr (MIIndex tpFrom tpTo ridx val_ptr ptr') >> return (Right ptr')) $
+                                   (\(Right val_ptr) val_idx ptr' -> (ptr',val_ptr,fmap (\i -> case i of
+                                                                                            Left (ConstValue bv _) -> Left bv
+                                                                                            Left (DirectValue bv) -> Right bv
+                                                                                        ) val_idx)) <$>
+                                   (argToExpr ptr) <*>
+                                   (traverse argToExpr idx) <*>
+                                   (reLift reNewPtr)
+      IPhi args -> reInject (\args' -> case args' of
+                                Left [(_,v)] -> return (Left v)
+                                Left vs -> return $ Left $ valSwitch (fmap (\(c,v) -> (v,c)) vs)
+                                Right ps@((_,p):ps') -> if all (\(_,p') -> p==p') ps'
+                                                        then return (Right p)
+                                                        else (do
+                                                                 ptr <- reNewPtr
+                                                                 reMemInstr (MISelect ps ptr)
+                                                                 return $ Right ptr)
+                            ) $
+                   (\args' -> case catMaybes args' of
+                       all@((_,Right _):_) -> Right (fmap (\(cond,Right p) -> (cond,p)) all)
+                       all@((_,Left _):_) -> Left (fmap (\(cond,Left v) -> (cond,v)) all)) <$>
+                   (traverse reGetPhi args)
+      ILoad arg -> reInject (\(Right ptr) -> do
+                                loc <- reMemLoc
+                                case operandType arg of
+                                  PointerType (PointerType tp) -> do
+                                    ptr2 <- reNewPtr
+                                    reMemInstr (MILoadPtr loc ptr ptr2)
+                                    return $ Right ptr2
+                                  PointerType tp -> do
+                                    loadRes <- lift $ varNamedAnn "LoadRes" (bitWidth' tp)
+                                    reMemInstr (MILoad loc ptr loadRes)
+                                    return $ Left $ DirectValue loadRes)
+                   (argToExpr arg)
+      IBitCast tp_to arg -> reInject (\(Right ptr) -> do
+                                         let PointerType tp_from = operandType arg
+                                         ptr' <- reNewPtr
+                                         reMemInstr (MICast tp_from tp_to ptr ptr')
+                                         return $ Right ptr')
                             (argToExpr arg)
-            IZExt tp arg -> (\arg' -> case arg' of
-                                Left (ConditionValue v w) -> Left $ ConditionValue v (bitWidth (operandType arg))
-                                Left arg'' -> let v = valValue arg''
-                                                  w = bitWidth (operandType arg)
-                                                  d = (bitWidth tp) - w
-                                                  nv = bvconcat (constantAnn (BitVector 0) (fromIntegral d)::SMTExpr (BitVector BVUntyped)) v
-                                              in Left $ DirectValue nv) <$>
-                            (argToExpr arg)
-            ITrunc tp arg -> (\arg' -> case arg' of
-                                 Left (ConditionValue v w) -> Left $ ConditionValue v (bitWidth tp)
-                                 Left arg'' -> let v = valValue arg''
-                                                   w = bitWidth (operandType arg)
-                                                   d = w - (bitWidth tp)
-                                                   nv = bvextract' 0 (bitWidth tp) v
-                                               in Left $ DirectValue nv) <$>
-                             (argToExpr arg)
-            IAlloca tp sz -> reInject (\size -> do
-                                          ptr <- reNewPtr
-                                          loc <- reMemLoc
-                                          new_loc <- reNewMemLoc
-                                          reMemInstr (MIAlloc loc tp size ptr new_loc)
-                                          return $ Right ptr) $
-                             (case sz of
-                                 Nothing -> pure (Left 1)
-                                 Just sz' -> (\(Left r) -> case r of
-                                                 ConstValue bv _ -> Left bv
-                                                 DirectValue bv -> Right bv
-                                             ) <$> argToExpr sz')
-            ISelect cond ifT ifF -> reInject (\(cond',ifTArg,ifFArg)
-                                              -> case (ifTArg,ifFArg) of
-                                                (Right ifT',Right ifF') -> if ifT'==ifF'
-                                                                           then return (Right ifT')
-                                                                           else (do
-                                                                                    ptr <- reNewPtr
-                                                                                    reMemInstr (MISelect [(cond',ifT'),(not' cond',ifF')] ptr)
-                                                                                    return $ Right ptr)
-                                                (Left ifT',Left ifF') -> return $ Left $ valSwitch [(ifT',cond'),(ifF',cond')]) $
-                                    (\(Left argCond) ifT' ifF' -> (valCond argCond,ifT',ifF')) <$>
-                                    (argToExpr cond) <*>
-                                    (argToExpr ifT) <*>
-                                    (argToExpr ifF)
-            IMalloc (Just tp) sz True -> reInject (\size -> do
-                                                      ptr <- reNewPtr
-                                                      loc <- reMemLoc
-                                                      new_loc <- reNewMemLoc
-                                                      reMemInstr (MIAlloc loc tp size ptr new_loc)
-                                                      return $ Right ptr) $
-                                         (\(Left r) -> case r of
-                                             ConstValue bv _ -> Left bv
-                                             DirectValue bv -> Right bv
-                                         ) <$> argToExpr sz
-            _ -> error $ "Unknown expression: "++show expr
-        )) *> pure Nothing
+      ISExt tp arg -> (\arg' -> case arg' of
+                          Left (ConditionValue v w) -> Left $ ConditionValue v (bitWidth' (operandType arg))
+                          Left arg'' -> let v = valValue arg''
+                                            w = bitWidth' (operandType arg)
+                                            d = (bitWidth' tp) - w
+                                            nv = bvconcat (ite (bvslt v (constantAnn (BitVector 0) w::SMTExpr (BitVector BVUntyped)))
+                                                           (constantAnn (BitVector (-1)) d::SMTExpr (BitVector BVUntyped))
+                                                           (constantAnn (BitVector 0) (fromIntegral d))) v
+                                        in Left $ DirectValue nv) <$>
+                      (argToExpr arg)
+      IZExt tp arg -> (\arg' -> case arg' of
+                          Left (ConditionValue v w) -> Left $ ConditionValue v (bitWidth' (operandType arg))
+                          Left arg'' -> let v = valValue arg''
+                                            w = bitWidth' (operandType arg)
+                                            d = (bitWidth' tp) - w
+                                            nv = bvconcat (constantAnn (BitVector 0) (fromIntegral d)::SMTExpr (BitVector BVUntyped)) v
+                                        in Left $ DirectValue nv) <$>
+                      (argToExpr arg)
+      ITrunc tp arg -> (\arg' -> case arg' of
+                           Left (ConditionValue v w) -> Left $ ConditionValue v (bitWidth' tp)
+                           Left arg'' -> let v = valValue arg''
+                                             w = bitWidth' (operandType arg)
+                                             d = w - (bitWidth' tp)
+                                             nv = bvextract' 0 (bitWidth' tp) v
+                                         in Left $ DirectValue nv) <$>
+                       (argToExpr arg)
+      IAlloca tp sz -> reInject (\size -> do
+                                    ptr <- reNewPtr
+                                    loc <- reMemLoc
+                                    new_loc <- reNewMemLoc
+                                    reMemInstr (MIAlloc loc tp size ptr new_loc)
+                                    return $ Right ptr) $
+                       (case sz of
+                           Nothing -> pure (Left 1)
+                           Just sz' -> (\(Left r) -> case r of
+                                           ConstValue bv _ -> Left bv
+                                           DirectValue bv -> Right bv
+                                       ) <$> argToExpr sz')
+      ISelect cond ifT ifF -> reInject (\(cond',ifTArg,ifFArg)
+                                        -> case (ifTArg,ifFArg) of
+                                          (Right ifT',Right ifF') -> if ifT'==ifF'
+                                                                     then return (Right ifT')
+                                                                     else (do
+                                                                              ptr <- reNewPtr
+                                                                              reMemInstr (MISelect [(cond',ifT'),(not' cond',ifF')] ptr)
+                                                                              return $ Right ptr)
+                                          (Left ifT',Left ifF') -> return $ Left $ valSwitch [(ifT',cond'),(ifF',cond')]) $
+                              (\(Left argCond) ifT' ifF' -> (valCond argCond,ifT',ifF')) <$>
+                              (argToExpr cond) <*>
+                              (argToExpr ifT) <*>
+                              (argToExpr ifF)
+      IMalloc (Just tp) sz True -> reInject (\size -> do
+                                                ptr <- reNewPtr
+                                                loc <- reMemLoc
+                                                new_loc <- reNewMemLoc
+                                                reMemInstr (MIAlloc loc tp size ptr new_loc)
+                                                return $ Right ptr) $
+                                   (\(Left r) -> case r of
+                                       ConstValue bv _ -> Left bv
+                                       DirectValue bv -> Right bv
+                                   ) <$> argToExpr sz
+      _ -> error $ "Unknown expression: "++show expr
 realizeInstruction (IStore val to) = reInject (\(ptr,val) -> do
                                                   loc <- reMemLoc
                                                   new_loc <- reNewMemLoc
@@ -423,7 +449,7 @@ intrinsics "nbis_nondet_u8" _ _ = Just (True,intr_nondet 8)
 intrinsics "nbis_watch" _ _ = Just (False,intr_watch)
 intrinsics "llvm.lifetime.start" _ _ = Just (False,intr_lifetime_start)
 intrinsics "llvm.lifetime.end" _ _ = Just (False,intr_lifetime_end)
-intrinsics "strlen" rtp _ = Just (True,intr_strlen (bitWidth rtp))
+intrinsics "strlen" rtp _ = Just (True,intr_strlen (bitWidth' rtp))
 intrinsics _ _ _ = Nothing
 
 intr_memcpy [(Right to,_),(Right from,_),(Left len,_),_,_] = do

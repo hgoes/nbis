@@ -36,18 +36,28 @@ data MemoryInstruction m p
   | MICompare p p (SMTExpr Bool)
   | MISelect [(SMTExpr Bool,p)] p
   | MICast TypeDesc TypeDesc p p
-  | MIIndex [DynNum] p p
+  | MIIndex TypeDesc TypeDesc [DynNum] p p
   | MIPhi [(SMTExpr Bool,m)] m
-  | MICopy m DynNum p p m
+  | MICopy m p p CopyOptions m
   | MIStrLen m p (SMTExpr (BitVector BVUntyped))
   deriving (Show,Eq)
+
+data CopyOptions = CopyOpts { copySizeLimit :: Maybe DynNum -- ^ A size in bytes after which to stop the copying
+                            , copyStopper :: Maybe DynNum   -- ^ If this character is found in the source, stop copying
+                            , copyMayOverlap :: Bool        -- ^ Are source and destination allowed to overlap?
+                            } deriving (Show,Eq)
 
 type MemoryProgram m p = [MemoryInstruction m p]
 
 class MemoryModel m mloc ptr where
-  memNew :: Proxy mloc -> Set TypeDesc -> Map String [TypeDesc] -> [(ptr,TypeDesc,Maybe MemContent)] -> SMT m
+  memNew :: Proxy mloc
+            -> Integer      -- ^ Pointer width
+            -> Set TypeDesc      -- ^ A set of all types occuring in the program
+            -> Map String [TypeDesc] -- ^ The content of all named structs
+            -> [(ptr,TypeDesc,Maybe MemContent)] -- ^ Global variables
+            -> SMT m
   makeEntry :: Proxy ptr -> m -> mloc -> SMT m
-  addProgram :: m -> SMTExpr Bool -> [mloc] -> MemoryProgram mloc ptr -> SMT m
+  addProgram :: m -> SMTExpr Bool -> [mloc] -> MemoryProgram mloc ptr -> Map ptr TypeDesc -> SMT m
   connectLocation :: m -> Proxy ptr -> SMTExpr Bool -> mloc -> mloc -> SMT m
   connectPointer :: m -> Proxy mloc -> SMTExpr Bool -> ptr -> ptr -> SMT m
   memoryErrors :: m -> Proxy mloc -> Proxy ptr -> [(ErrorDesc,SMTExpr Bool)]
@@ -63,7 +73,7 @@ memInstrSrc (MIStorePtr m _ _ _) = Just m
 memInstrSrc (MICompare _ _ _) = Nothing
 memInstrSrc (MISelect _ _) = Nothing
 memInstrSrc (MICast _ _ _ _) = Nothing
-memInstrSrc (MIIndex _ _ _) = Nothing
+memInstrSrc (MIIndex _ _ _ _ _) = Nothing
 memInstrSrc (MIPhi _ _) = Nothing
 memInstrSrc (MICopy m _ _ _ _) = Just m
 memInstrSrc (MIStrLen m _ _) = Just m
@@ -78,7 +88,7 @@ memInstrTrg (MIStorePtr _ _ _ m) = Just m
 memInstrTrg (MICompare _ _ _) = Nothing
 memInstrTrg (MISelect _ _) = Nothing
 memInstrTrg (MICast _ _ _ _) = Nothing
-memInstrTrg (MIIndex _ _ _) = Nothing
+memInstrTrg (MIIndex _ _ _ _ _) = Nothing
 memInstrTrg (MIPhi _ m) = Just m
 memInstrTrg (MICopy _ _ _ _ m) = Just m
 memInstrTrg (MIStrLen _ _ _) = Nothing
@@ -115,3 +125,7 @@ dynNumCombine _ g (Right i1) (Right i2)
       GT -> g i1 (bvconcat (constantAnn (BitVector 0) ((extractAnnotation i1) - (extractAnnotation i2)) :: SMTExpr (BitVector BVUntyped)) i2)
 dynNumCombine _ g (Left i1) (Right i2) = g (constantAnn (BitVector i1) (extractAnnotation i2)) i2
 dynNumCombine _ g (Right i1) (Left i2) = g i1 (constantAnn (BitVector i2) (extractAnnotation i1))
+
+dynNumExpr :: Integer -> DynNum -> SMTExpr (BitVector BVUntyped)
+dynNumExpr width (Left x) = constantAnn (BitVector x) width
+dynNumExpr _ (Right x) = x
