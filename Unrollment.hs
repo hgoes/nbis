@@ -346,13 +346,24 @@ getMergeValue ref = do
           env <- get
           let nptr = unrollNextPtr env
           put $ env { unrollNextPtr = succ nptr }
-          mapM_ (\(ref,cond) -> do
-                    Right ptr <- getMergeValue ref
-                    env <- get
-                    let (prx,_) = unrollProxies env
-                    nmem <- lift $ connectPointer (unrollMemory env) prx cond ptr nptr
-                    put $ env { unrollMemory = nmem }
-                ) refs
+          refs' <- mapM (\(ref,cond) -> do
+                            Right ptr <- getMergeValue ref
+                            return (cond,ptr)
+                        ) refs
+          if extensible
+            then mapM_ (\(cond,ptr) -> do
+                           env <- get
+                           let (prx,_) = unrollProxies env
+                           nmem <- lift $ connectPointer (unrollMemory env) prx cond ptr nptr
+                           put $ env { unrollMemory = nmem }
+                       ) refs'
+            else (do
+                     env <- get
+                     let (prx,_) = unrollProxies env
+                         emptyLike :: Proxy a -> [a]
+                         emptyLike _ = []
+                     nmem <- lift $ addProgram (unrollMemory env) (constant True) (emptyLike prx) [MISelect refs' nptr] Map.empty
+                     put $ env { unrollMemory = nmem })
           return (Right nptr)
       liftIO $ writeIORef ref (MergedValue extensible ret)
       return ret
