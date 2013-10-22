@@ -82,35 +82,38 @@ instance (Ord ptr,Ord mloc,Show ptr,Show mloc) => MemoryModel (RiverMemory mloc 
                          }
   makeEntry _ mem loc = return $ mem { riverLocations = Map.insert loc (riverGlobals mem) (riverLocations mem) }
   addProgram mem cond prev is ptrs = do
-    --trace ("Add program: "++show is) (return ())
-    addInstructions ptrs (mem { riverProgram = is++(riverProgram mem) }) is
+    trace ("Add program: "++show is) (return ())
+    addInstructions ptrs (mem { riverProgram = is++(riverProgram mem) }) is {->>= simplifyRiver-}
   connectLocation mem _ cond locFrom locTo = do
-    --trace ("Connect location: "++show cond++" "++show locFrom++" ~> "++show locTo) (return ())
+    trace ("Connect location: "++show cond++" "++show locFrom++" ~> "++show locTo) (return ())
     let mem1 = mem { riverLocations = insertIfNotPresent locFrom (RiverLocation Map.empty) $
                                       insertIfNotPresent locTo (RiverLocation Map.empty) $
-                                      riverLocations mem }
+                                      riverLocations mem
+                   , riverConnections = Map.insertWith Set.union locFrom (Set.singleton locTo) (riverConnections mem) }
         locFrom' = (riverLocations mem1)!locFrom
-        upds = updateFromLoc mem1 locFrom
-    nobjs <- foldlM (\cupd (objRef,objInfo) -> case Map.lookup objRef (riverObjects locFrom') of
-                        Just objInfo' -> do
-                          assert $ cond .=>. (objectEq (objectRepresentation objInfo) (objectRepresentation objInfo'))
-                          return cupd
-                        Nothing -> do
-                          skel <- objectSkel (objectRepresentation objInfo)
-                          assert $ cond .=>. (objectEq (objectRepresentation objInfo) skel)
-                          return (Map.insert objRef (ObjectInfo { objectRepresentation = skel
-                                                                , objectReachability = objectReachability objInfo }) cupd)
-                    ) Map.empty (Map.toList $ case Map.lookup locFrom (newObjects upds) of
-                                    Nothing -> Map.empty
-                                    Just res -> res)
-    let upd = noUpdate { newObjReachability = case Map.lookup locFrom (newObjReachability upds) of
-                            Just res -> Map.singleton locTo res
-                            Nothing -> Map.empty
+        locTo' = (riverLocations mem1)!locTo
+    (nobjs,nreach) <- foldlM (\(cobjs,creach) (objRef,objInfo) -> case Map.lookup objRef (riverObjects locTo') of
+                                 Just objInfo' -> do
+                                   assert $ cond .=>. (objectEq (objectRepresentation objInfo) (objectRepresentation objInfo'))
+                                   return (cobjs,Map.insertWith unionReachability objRef (objectReachability objInfo) creach)
+                                 Nothing -> do
+                                   skel <- objectSkel (objectRepresentation objInfo)
+                                   assert $ cond .=>. (objectEq (objectRepresentation objInfo) skel)
+                                   return (Map.insert objRef (ObjectInfo { objectRepresentation = skel
+                                                                         , objectReachability = objectReachability objInfo }) cobjs,creach)
+                             ) (Map.empty,Map.empty) (Map.toList $ riverObjects locFrom')
+    let ptrReach = Map.mapMaybe (\ptrInfo -> let diffReach = Map.intersection (pointerReachability ptrInfo) nobjs
+                                             in if Map.null diffReach
+                                                then Nothing
+                                                else Just diffReach
+                                ) (riverPointers mem1)
+    let upd = noUpdate { newPtrReachability = ptrReach
+                       , newObjReachability = Map.singleton locTo nreach
                        , newObjects = Map.singleton locTo nobjs
                        }
     applyUpdateRec mem1 upd
   connectPointer mem _ cond ptrSrc ptrTrg = do
-    --trace ("Connect pointer: "++show cond++" "++show ptrSrc++" ~> "++show ptrTrg) (return ())
+    trace ("Connect pointer: "++show cond++" "++show ptrSrc++" ~> "++show ptrTrg) (return ())
     let Just ptrSrc' = Map.lookup ptrSrc (riverPointers mem)
     (ptrTrg',mem1) <- case Map.lookup ptrTrg (riverPointers mem) of
       Nothing -> do
@@ -205,7 +208,7 @@ updateInstruction mem upd (MILoadPtr mfrom ptrSrc ptrTrg) = do
       Just ptrFromInfo = Map.lookup ptrSrc (riverPointers mem)
       Just ptrToInfo = Map.lookup ptrTrg (riverPointers mem)
   -- Two things can happen:
-  -- 1. A new object gets reachable:
+  -- 1. An existing object gets reachable:
   upd1 <- case Map.lookup ptrSrc (newPtrReachability upd) of
     Nothing -> return noUpdate
     Just nreach -> do
@@ -710,6 +713,17 @@ storeObject word (DynamicObject arr limit) off = case compare el_width (extractA
     (idx_width,el_width) = extractAnnotation arr
     off' = (offsetToExpr (idx_width `div` 8) off) `bvudiv` (constantAnn (BitVector $ el_width `div` 8) idx_width)
 
+simplifyObject :: RiverObject -> SMT RiverObject
+simplifyObject (StaticObject obj) = do
+  obj' <- simplify obj
+  return (StaticObject obj')
+simplifyObject (DynamicObject arr limit) = do
+  arr' <- simplify arr
+  limit' <- case limit of
+    Left l -> return (Left l)
+    Right l -> simplify l >>= return.Right
+  return (DynamicObject arr' limit')
+
 objectITE :: SMTExpr Bool -> RiverObject -> RiverObject -> RiverObject
 objectITE cond (StaticObject w1) (StaticObject w2)
   = if w1==w2
@@ -755,3 +769,14 @@ debugRiver mem
                                                               Nothing -> "dyn"
                                                               Just set -> show (Set.toList set))++")"
                                     | (RiverObjectRef obj,reachObjs) <- Map.toList reach ]++"}"
+
+simplifyRiver :: RiverMemory mloc ptr -> SMT (RiverMemory mloc ptr)
+simplifyRiver mem = do
+  nlocs <- mapM (\loc -> do
+                    nobjs <- mapM (\objInfo -> do
+                                      nrep <- simplifyObject (objectRepresentation objInfo)
+                                      return $ objInfo { objectRepresentation = nrep }
+                                  ) (riverObjects loc)
+                    return $ RiverLocation nobjs
+                ) (riverLocations mem)
+  return $ mem { riverLocations = nlocs }
