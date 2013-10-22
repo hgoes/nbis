@@ -128,7 +128,7 @@ typeWidth :: Integer -> Map String [TypeDesc] -> TypeDesc -> Integer
 typeWidth _ _ (IntegerType w)
   | w `mod` 8 == 0 = w `div` 8
   | otherwise = error $ "typeWidth called for "++show w
-typeWidth pw _ (PointerType _) = pw `div` 8
+typeWidth pw _ (PointerType _) = pw
 typeWidth pw structs (ArrayType n tp) = n*(typeWidth pw structs tp)
 typeWidth pw structs (StructType (Right tps)) = sum (fmap (typeWidth pw structs) tps)
 typeWidth pw structs (StructType (Left name)) = case Map.lookup name structs of
