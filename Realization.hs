@@ -58,7 +58,7 @@ data RealizationOutput mem ptr
 
 data RealizationInfo = RealizationInfo { rePossiblePhis :: Set (Ptr BasicBlock)
                                        , rePossibleInputs :: Map (Ptr Instruction) (TypeDesc,Maybe String)
-                                       , rePossibleArgs :: Set (Ptr Argument)
+                                       , rePossibleArgs :: Map (Ptr Argument) (TypeDesc,Maybe String)
                                        , rePossibleGlobals :: Set (Ptr GlobalVariable)
                                        , reLocallyDefined :: Set (Ptr Instruction)
                                        , reSuccessors :: Set (Ptr BasicBlock)
@@ -192,7 +192,7 @@ argToExpr expr = reInject getType result
                                                re <- ask
                                                case Map.lookup g (reGlobals re) of
                                                  Just res -> return $ Right res)
-      ODArgument arg -> Realization $ \info -> (info { rePossibleArgs = Set.insert arg (rePossibleArgs info) },do
+      ODArgument arg -> Realization $ \info -> (info { rePossibleArgs = Map.insert arg (operandType expr,Nothing) (rePossibleArgs info) },do
                                                    re <- ask
                                                    case Map.lookup (Left arg) (reInputs re) of
                                                      Just res -> return res)
@@ -215,7 +215,7 @@ data BlockFinalization ptr = Jump (CondList (Ptr BasicBlock))
                            deriving (Show)
 
 preRealize :: Realization mem ptr a -> (RealizationInfo,RealizationMonad mem ptr a)
-preRealize r = runRealization r (RealizationInfo Set.empty Map.empty Set.empty Set.empty Set.empty Set.empty Set.empty False)
+preRealize r = runRealization r (RealizationInfo Set.empty Map.empty Map.empty Set.empty Set.empty Set.empty Set.empty False)
 
 postRealize :: RealizationEnv ptr -> mem -> mem -> ptr -> RealizationMonad mem ptr a -> SMT (a,RealizationState mem ptr,RealizationOutput mem ptr)
 postRealize env cur_mem next_mem next_ptr act = runRWST act env (RealizationState { reCurMemLoc = cur_mem

@@ -620,7 +620,10 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                                                                                           Right arg -> show arg)
                                                                    Just n -> n
                                                              v <- lift $ valNew rname tp
-                                                             return (Left v)) (Map.mapKeys Right $ rePossibleInputs info)
+                                                             return (Left v)
+                                                       ) (Map.union (Map.mapKeys Right $ rePossibleInputs info)
+                                                          (Map.mapKeys Left (rePossibleArgs info))
+                                                         )
                       inp' <- createMergeValues True inp
                       inp'' <- foldlM (\cinp (_,_,_,act,mp,_,_)
                                        -> sequence $ zipWith (\mp' cinp' -> addMerge True act mp' cinp') mp cinp
@@ -654,7 +657,7 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                       inp <- mapM getMergeValue (Map.intersection (head mergedInps) $
                                                  Map.union
                                                  (fmap (const ()) $ Map.mapKeys Right (rePossibleInputs info))
-                                                 (Map.fromList [ (Left k,()) | k <- Set.toList (rePossibleArgs info) ]))
+                                                 (fmap (const ()) $ Map.mapKeys Left (rePossibleArgs info)))
                       (start_loc,prev_locs,mphis) <- case inc of
                         (_,_,_,_,_,loc',_):inc' -> if all (\(_,_,_,_,_,loc'',_) -> loc'==loc'') inc'
                                                    then return (loc',[loc'],[])
