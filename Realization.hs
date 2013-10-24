@@ -186,7 +186,9 @@ argToExpr expr = reInject getType result
                                                               re <- ask
                                                               case Map.lookup (Right instr) (reInputs re) of
                                                                 Just res -> return res
-                                                                Nothing -> error $ "Can't find value "++show name
+                                                                Nothing -> error $ "Can't find value "++show instr++(case name of
+                                                                                                                        Nothing -> ""
+                                                                                                                        Just rname -> "("++rname++")")
                                                           )
       ODGlobal g -> Realization $ \info -> (info { rePossibleGlobals = Set.insert g (rePossibleGlobals info) },do
                                                re <- ask
