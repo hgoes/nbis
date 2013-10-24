@@ -53,7 +53,8 @@ data Offset = Offset { staticOffset :: Integer
                      } deriving Show
 
 data RiverObject = StaticObject (SMTExpr (BitVector BVUntyped))
-                 | DynamicObject (SMTExpr (SMTArray (SMTExpr (BitVector BVUntyped)) (BitVector BVUntyped))) (Either Integer (SMTExpr (BitVector BVUntyped)))
+                 | DynamicObject (SMTExpr (SMTArray (SMTExpr (BitVector BVUntyped)) (BitVector BVUntyped)))
+                   (Either Integer (SMTExpr (BitVector BVUntyped)))
                  deriving (Show,Eq)
 
 nullObj :: RiverObjectRef
@@ -285,29 +286,33 @@ updateInstruction mem upd act (MIStore mfrom word ptr mto) = do
   case Map.lookup ptr (newPtrReachability upd) of
     Nothing -> return (noUpdate,[])
     Just nreach
-      -> let newObjs2 = Map.foldlWithKey (\objs objRef reach
-                                          -> let Just obj = Map.lookup objRef (riverObjects locFrom)
-                                             in case reach of
-                                               Nothing -> let off = Offset { staticOffset = 0
-                                                                           , dynamicOffset = Just $ pointerOffset ptr' }
-                                                          in Map.insert objRef (obj { objectRepresentation = objectITE ((pointerObject ptr') .==. objRepr (riverPointerOffset mem) objRef)
-                                                                                                             (storeObject word (objectRepresentation obj) off)
-                                                                                                             (objectRepresentation obj) }) objs
-                                               Just offs -> let nobj = foldl (\cobj soff
-                                                                              -> let off = Offset { staticOffset = soff
-                                                                                                  , dynamicOffset = Nothing }
-                                                                                 in cobj { objectRepresentation = objectITE (((pointerObject ptr') .==. objRepr (riverPointerOffset mem) objRef) .&&.
-                                                                                                                             ((pointerOffset ptr') .==. offRepr (riverPointerWidth mem) (riverPointerOffset mem) soff))
-                                                                                                                  (storeObject word (objectRepresentation obj) off)
-                                                                                                                  (objectRepresentation obj)
-                                                                                         }
-                                                                             ) obj offs
-                                                            in Map.insert objRef nobj objs
-                                         ) newObjs1 (Map.delete nullObj nreach)
+      -> let (newObjs2,errs)
+               = Map.foldlWithKey (\(objs,errs) objRef reach
+                                   -> let Just obj = Map.lookup objRef (riverObjects locFrom)
+                                      in case reach of
+                                        Nothing -> let off = Offset { staticOffset = 0
+                                                                    , dynamicOffset = Just $ pointerOffset ptr' }
+                                                       (obj',errs') = storeObject act word (objectRepresentation obj) off
+                                                   in (Map.insert objRef (obj { objectRepresentation = objectITE ((pointerObject ptr') .==. objRepr (riverPointerOffset mem) objRef)
+                                                                                                       obj'
+                                                                                                       (objectRepresentation obj) }) objs,errs'++errs)
+                                        Just offs -> let (nobj,nerrs)
+                                                           = foldl (\(cobj,cerrs) soff
+                                                                    -> let off = Offset { staticOffset = soff
+                                                                                        , dynamicOffset = Nothing }
+                                                                           (obj',errs') = storeObject act word (objectRepresentation obj) off
+                                                                       in (cobj { objectRepresentation = objectITE (((pointerObject ptr') .==. objRepr (riverPointerOffset mem) objRef) .&&.
+                                                                                                                    ((pointerOffset ptr') .==. offRepr (riverPointerWidth mem) (riverPointerOffset mem) soff))
+                                                                                                         obj'
+                                                                                                         (objectRepresentation obj)
+                                                                                },errs'++cerrs)
+                                                                   ) (obj,[]) offs
+                                                            in (Map.insert objRef nobj objs,nerrs++errs)
+                                         ) (newObjs1,[]) (Map.delete nullObj nreach)
          in return (noUpdate { newObjects = Map.singleton mto newObjs2 },
-                    if Map.member nullObj nreach
-                    then [(NullDeref,act .&&. ((pointerObject ptr') .==. objRepr (riverPointerOffset mem) nullObj))]
-                    else [])
+                    (if Map.member nullObj nreach
+                     then [(NullDeref,act .&&. ((pointerObject ptr') .==. objRepr (riverPointerOffset mem) nullObj))]
+                     else [])++errs)
 updateInstruction mem upd act (MIStorePtr mfrom ptrFrom ptrTo mto) = do
   let Just locFrom = Map.lookup mfrom (riverLocations mem)
       Just ptrFrom' = Map.lookup ptrFrom (riverPointers mem)
@@ -320,30 +325,34 @@ updateInstruction mem upd act (MIStorePtr mfrom ptrFrom ptrTo mto) = do
   case Map.lookup ptrTo (newPtrReachability upd) of
     Nothing -> return (noUpdate { newObjReachability = newObjReach },[])
     Just nreach
-      -> let newObjs2 = Map.foldlWithKey (\objs objRef reach
-                                          -> let Just obj = Map.lookup objRef (riverObjects locFrom)
-                                             in case reach of
-                                               Nothing -> let off = Offset { staticOffset = 0
-                                                                           , dynamicOffset = Just $ pointerOffset ptrFrom' }
-                                                          in Map.insert objRef (obj { objectRepresentation = objectITE ((pointerObject ptrTo') .==. objRepr (riverPointerOffset mem) objRef)
-                                                                                                             (storeObject word (objectRepresentation obj) off)
-                                                                                                             (objectRepresentation obj) }) objs
-                                               Just offs -> let nobj = foldl (\cobj soff
-                                                                              -> let off = Offset { staticOffset = soff
-                                                                                                  , dynamicOffset = Nothing }
-                                                                                 in cobj { objectRepresentation = objectITE (((pointerObject ptrTo') .==. objRepr (riverPointerOffset mem) objRef) .&&.
-                                                                                                                             ((pointerOffset ptrTo') .==. offRepr (riverPointerWidth mem) (riverPointerOffset mem) soff))
-                                                                                                                  (storeObject word (objectRepresentation obj) off)
-                                                                                                                  (objectRepresentation obj)
-                                                                                         }
-                                                                             ) obj offs
-                                                            in Map.insert objRef nobj objs
-                                         ) newObjs1 (Map.delete nullObj nreach)
+      -> let (newObjs2,errs)
+               = Map.foldlWithKey (\(objs,errs) objRef reach
+                                   -> let Just obj = Map.lookup objRef (riverObjects locFrom)
+                                      in case reach of
+                                        Nothing -> let off = Offset { staticOffset = 0
+                                                                    , dynamicOffset = Just $ pointerOffset ptrFrom' }
+                                                       (obj',errs') = storeObject act word (objectRepresentation obj) off
+                                                   in (Map.insert objRef (obj { objectRepresentation = objectITE ((pointerObject ptrTo') .==. objRepr (riverPointerOffset mem) objRef)
+                                                                                                       obj'
+                                                                                                       (objectRepresentation obj) }) objs,errs'++errs)
+                                        Just offs -> let (nobj,nerrs)
+                                                           = foldl (\(cobj,cerrs) soff
+                                                                    -> let off = Offset { staticOffset = soff
+                                                                                        , dynamicOffset = Nothing }
+                                                                           (obj',errs') = storeObject act word (objectRepresentation obj) off
+                                                                       in (cobj { objectRepresentation = objectITE (((pointerObject ptrTo') .==. objRepr (riverPointerOffset mem) objRef) .&&.
+                                                                                                                    ((pointerOffset ptrTo') .==. offRepr (riverPointerWidth mem) (riverPointerOffset mem) soff))
+                                                                                                         obj'
+                                                                                                         (objectRepresentation obj)
+                                                                                },errs'++cerrs)
+                                                                   ) (obj,[]) offs
+                                                     in (Map.insert objRef nobj objs,nerrs++errs)
+                                  ) (newObjs1,[]) (Map.delete nullObj nreach)
          in return (noUpdate { newObjects = Map.singleton mto newObjs2
                              , newObjReachability = newObjReach },
-                    if Map.member nullObj nreach
-                    then [(NullDeref,act .&&. ((pointerObject ptrTo') .==. objRepr (riverPointerOffset mem) nullObj))]
-                    else [])
+                    (if Map.member nullObj nreach
+                     then [(NullDeref,act .&&. ((pointerObject ptrTo') .==. objRepr (riverPointerOffset mem) nullObj))]
+                     else [])++errs)
 updateInstruction _ _ _ (MICompare _ _ _) = return (noUpdate,[])
 updateInstruction _ upd _ (MISelect cases pto)
   = return (foldl (\cupd (_,pfrom) -> case Map.lookup pfrom (newPtrReachability upd) of
@@ -697,8 +706,8 @@ mkGlobal (MemArray els) = do
         (MemCell w _):_ -> w
   arr <- varNamedAnn "global" (64,w)
   let obj = DynamicObject arr (Left $ genericLength els)
-      (obj',_) = foldl (\(cobj,idx) (MemCell w v) -> (storeObject (constantAnn (BitVector v) w) cobj (Offset { staticOffset = idx
-                                                                                                             , dynamicOffset = Nothing }),
+      (obj',_) = foldl (\(cobj,idx) (MemCell w v) -> (fst $ storeObject (constant True) (constantAnn (BitVector v) w) cobj (Offset { staticOffset = idx
+                                                                                                                                   , dynamicOffset = Nothing }),
                                                       idx+(w `div` 8))
                        ) (obj,0) els
   return obj'
@@ -733,35 +742,61 @@ loadObject act width (StaticObject obj) off = case dynamicOffset off of
     objSize = extractAnnotation obj
     extractStart = (staticOffset off+width)*8
 loadObject act width (DynamicObject arr limit) off = case compare el_width (width*8) of
-    EQ -> (Just $ select arr off',[])
-    LT -> (Just $ bvextract' 0 width (select arr off'),[])
+    EQ -> (Just $ select arr off',errs)
+    LT -> (Just $ bvextract' 0 width (select arr off'),errs)
     GT -> let (num_els,rest) = width `divMod` el_width
           in (Just $ foldl1 bvconcat ([ select arr (off' `bvadd` (constantAnn (BitVector i) idx_width)) | i <- [0..(num_els-1)] ]++
                                       (if rest==0
                                        then []
-                                       else [ bvextract' 0 rest ((select arr (offsetToExpr idx_width off)) `bvadd` (constantAnn (BitVector num_els) idx_width)) ])),[])
+                                       else [ bvextract' 0 rest ((select arr (offsetToExpr idx_width off)) `bvadd` (constantAnn (BitVector num_els) idx_width)) ])),errs)
   where
     (idx_width,el_width) = extractAnnotation arr
-    off' = (offsetToExpr (idx_width `div` 8) off) `bvudiv` (constantAnn (BitVector $ el_width `div` 8) idx_width)
+    elSize = el_width `div` 8
+    byteOff = (offsetToExpr (idx_width `div` 8) off)
+    off' = byteOff `bvudiv` (constantAnn (BitVector $ el_width `div` 8) idx_width)
+    errs = checkLimits act elSize idx_width limit off
 
-storeObject :: SMTExpr (BitVector BVUntyped) -> RiverObject -> Offset -> RiverObject
-storeObject word (StaticObject obj) off = case dynamicOffset off of
+storeObject :: SMTExpr Bool -> SMTExpr (BitVector BVUntyped) -> RiverObject -> Offset -> (RiverObject,[(ErrorDesc,SMTExpr Bool)])
+storeObject _ word (StaticObject obj) off = case dynamicOffset off of
   Nothing -> let size = (extractAnnotation word) `div` 8
                  objSize = (extractAnnotation obj) `div` 8
-             in if staticOffset off==0
-                then (if size==objSize
-                      then StaticObject word
-                      else StaticObject $ bvconcat word (bvextract' 0 ((objSize-size)*8) obj))
-                else (if (staticOffset off)+size==objSize
-                      then StaticObject $ bvconcat (bvextract' (size*8) ((objSize-size)*8) obj) word
-                      else StaticObject $ bvconcat
-                           (bvextract' ((objSize-staticOffset off)*8) ((staticOffset off)*8) obj)
-                           (bvconcat word (bvextract' 0 ((objSize-(staticOffset off)-size)*8) obj)))
-storeObject word (DynamicObject arr limit) off = case compare el_width (extractAnnotation word) of
-  EQ -> DynamicObject (store arr off' word) limit
+             in (if staticOffset off==0
+                 then (if size==objSize
+                       then StaticObject word
+                       else StaticObject $ bvconcat word (bvextract' 0 ((objSize-size)*8) obj))
+                 else (if (staticOffset off)+size==objSize
+                       then StaticObject $ bvconcat (bvextract' (size*8) ((objSize-size)*8) obj) word
+                       else StaticObject $ bvconcat
+                            (bvextract' ((objSize-staticOffset off)*8) ((staticOffset off)*8) obj)
+                            (bvconcat word (bvextract' 0 ((objSize-(staticOffset off)-size)*8) obj))),
+                 [])
+storeObject act word (DynamicObject arr limit) off = case compare el_width (extractAnnotation word) of
+  EQ -> (DynamicObject (store arr off' word) limit,errs)
   where
     (idx_width,el_width) = extractAnnotation arr
     off' = (offsetToExpr (idx_width `div` 8) off) `bvudiv` (constantAnn (BitVector $ el_width `div` 8) idx_width)
+    errs = checkLimits act (el_width `div` 8) idx_width limit off
+
+checkLimits :: SMTExpr Bool -> Integer -> Integer -> Either Integer (SMTExpr (BitVector BVUntyped)) -> Offset -> [(ErrorDesc,SMTExpr Bool)]
+checkLimits act elSize idx_width limit off
+  = case limit of
+    Left sz -> case dynamicOffset off of
+      Nothing -> (if sz > ((staticOffset off)*elSize)
+                  then []
+                  else [(Overrun,act)])++
+                 (if (staticOffset off) < 0
+                  then [(Underrun,act)]
+                  else [])
+      Just _ -> [(Overrun,act .&&. (bvsge off' limitExpr))
+                ,(Underrun,act .&&. (bvslt (constantAnn (BitVector 0) idx_width) off'))]
+    Right _ -> [(Overrun,act .&&. (bvsge off' limitExpr))
+               ,(Underrun,act .&&. (bvslt (constantAnn (BitVector 0) idx_width) off'))]
+  where
+    byteOff = (offsetToExpr (idx_width `div` 8) off)
+    off' = byteOff `bvudiv` (constantAnn (BitVector elSize) idx_width)
+    limitExpr = case limit of
+      Left limit' -> constantAnn (BitVector limit') idx_width
+      Right limit' -> limit'
 
 simplifyObject :: RiverObject -> SMT RiverObject
 simplifyObject (StaticObject obj) = do
