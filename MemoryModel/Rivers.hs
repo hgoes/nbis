@@ -82,10 +82,10 @@ instance (Ord ptr,Ord mloc,Show ptr,Show mloc) => MemoryModel (RiverMemory mloc 
                          }
   makeEntry _ mem loc = return $ mem { riverLocations = Map.insert loc (riverGlobals mem) (riverLocations mem) }
   addProgram mem cond prev is ptrs = do
-    trace ("Add program: "++show is) (return ())
+    --trace ("Add program: "++show is) (return ())
     addInstructions ptrs (mem { riverProgram = is++(riverProgram mem) }) is {->>= simplifyRiver-}
   connectLocation mem _ cond locFrom locTo = do
-    trace ("Connect location: "++show cond++" "++show locFrom++" ~> "++show locTo) (return ())
+    --trace ("Connect location: "++show cond++" "++show locFrom++" ~> "++show locTo) (return ())
     let mem1 = mem { riverLocations = insertIfNotPresent locFrom (RiverLocation Map.empty) $
                                       insertIfNotPresent locTo (RiverLocation Map.empty) $
                                       riverLocations mem
@@ -113,7 +113,7 @@ instance (Ord ptr,Ord mloc,Show ptr,Show mloc) => MemoryModel (RiverMemory mloc 
                        }
     applyUpdateRec mem1 upd
   connectPointer mem _ cond ptrSrc ptrTrg = do
-    trace ("Connect pointer: "++show cond++" "++show ptrSrc++" ~> "++show ptrTrg) (return ())
+    --trace ("Connect pointer: "++show cond++" "++show ptrSrc++" ~> "++show ptrTrg) (return ())
     let Just ptrSrc' = Map.lookup ptrSrc (riverPointers mem)
     (ptrTrg',mem1) <- case Map.lookup ptrTrg (riverPointers mem) of
       Nothing -> do

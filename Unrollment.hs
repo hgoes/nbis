@@ -608,6 +608,12 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
              then (do
                       act_proxy <- lift $ varNamed $ "proxy_"++blk_name
                       act_static <- lift $ defConstNamed ("act_"++blk_name) (app or' ([ act | (_,_,_,act,_,_,_) <- inc ]++[act_proxy]))
+                      mergedInps <- mergeValueStacks True [ (cond,mp) | (_,_,_,cond,mp,_,_) <- inc ]
+                      inp <- mapM getMergeValue (Map.intersection (head mergedInps) $
+                                                 Map.union
+                                                 (fmap (const ()) $ Map.mapKeys Right (rePossibleInputs info))
+                                                 (fmap (const ()) $ Map.mapKeys Left (rePossibleArgs info)))
+                      {-
                       inp <- sequence $ Map.mapWithKey (\vname (tp,name) -> case tp of
                                                            PointerType _ -> do
                                                              env <- get
@@ -623,11 +629,11 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                                                              return (Left v)
                                                        ) (Map.union (Map.mapKeys Right $ rePossibleInputs info)
                                                           (Map.mapKeys Left (rePossibleArgs info))
-                                                         )
-                      inp' <- createMergeValues True inp
-                      inp'' <- foldlM (\cinp (_,_,_,act,mp,_,_)
-                                       -> sequence $ zipWith (\mp' cinp' -> addMerge True act mp' cinp') mp cinp
-                                      ) (inp':(fmap (const Map.empty) (tail $ nodeIdCallStackList trg))) inc
+                                                         )-}
+                      --inp' <- createMergeValues True inp
+                      --inp'' <- foldlM (\cinp (_,_,_,act,mp,_,_)
+                      --                 -> sequence $ zipWith (\mp' cinp' -> addMerge True act mp' cinp') mp cinp
+                      --                ) (inp':(fmap (const Map.empty) (tail $ nodeIdCallStackList trg))) inc
                       phis <- fmap Map.fromList $
                               mapM (\blk' -> do
                                        phi <- lift $ varNamed "phi"
@@ -644,12 +650,12 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                       env <- get
                       put $ env { unrollMergeNodes = Map.insert (unrollNextMergeNode env)
                                                      (MergeNode { mergeActivationProxy = act_proxy
-                                                                , mergeInputs = inp''
+                                                                , mergeInputs = mergedInps --inp''
                                                                 , mergePhis = phis
                                                                 , mergeLoc = loc
                                                                 , mergeUnrollInfo = newNodeInfo }) (unrollMergeNodes env)
                                 , unrollNextMergeNode = succ $ unrollNextMergeNode env }
-                      return (act_static,inp,inp'',phis,loc,[loc],
+                      return (act_static,inp,mergedInps {-inp''-},phis,loc,[loc],
                               Just $ unrollNextMergeNode env,[],[ (act',loc',loc) | (_,_,_,act',_,loc',_) <- inc ]))
              else (do
                       mergedInps <- mergeValueStacks extensible [ (cond,mp) | (_,_,_,cond,mp,_,_) <- inc ]
@@ -691,12 +697,11 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
         put $ env { unrollNextPtr = reNextPtr nst
                   , unrollNextMem = reNextMemLoc nst }
         outp' <- createMergeValues False (Map.mapKeys Right $ reLocals nst)
-        let trans_vars = Map.fromList [ (Right var,()) | var <- Set.toList trans ]
-            arg_vars = Map.filterWithKey (\k _ -> case k of
+        let arg_vars = Map.filterWithKey (\k _ -> case k of
                                              Left _ -> True
                                              _ -> False
                                          ) (head inp')
-            new_vars = Map.union (Map.union outp' (Map.intersection (head inp') trans_vars)) arg_vars
+            new_vars = Map.union (Map.union outp' (head inp')) arg_vars
             nCreatedMerges = if mergeNodeCreate
                              then Set.insert trg createdMerges
                              else createdMerges
