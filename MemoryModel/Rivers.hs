@@ -757,19 +757,22 @@ loadObject act width (DynamicObject arr limit) off = case compare el_width (widt
     errs = checkLimits act elSize idx_width limit off
 
 storeObject :: SMTExpr Bool -> SMTExpr (BitVector BVUntyped) -> RiverObject -> Offset -> (RiverObject,[(ErrorDesc,SMTExpr Bool)])
-storeObject _ word (StaticObject obj) off = case dynamicOffset off of
-  Nothing -> let size = (extractAnnotation word) `div` 8
-                 objSize = (extractAnnotation obj) `div` 8
-             in (if staticOffset off==0
-                 then (if size==objSize
-                       then StaticObject word
-                       else StaticObject $ bvconcat word (bvextract' 0 ((objSize-size)*8) obj))
-                 else (if (staticOffset off)+size==objSize
-                       then StaticObject $ bvconcat (bvextract' (size*8) ((objSize-size)*8) obj) word
-                       else StaticObject $ bvconcat
-                            (bvextract' ((objSize-staticOffset off)*8) ((staticOffset off)*8) obj)
-                            (bvconcat word (bvextract' 0 ((objSize-(staticOffset off)-size)*8) obj))),
-                 [])
+storeObject act word (StaticObject obj) off = case dynamicOffset off of
+  Nothing
+    | staticOffset off+size <= objSize
+      -> (if staticOffset off==0
+          then (if size==objSize
+                then StaticObject word
+                else StaticObject $ bvconcat word (bvextract' 0 ((objSize-size)*8) obj))
+          else (if (staticOffset off)+size==objSize
+                then StaticObject $ bvconcat (bvextract' (size*8) ((objSize-size)*8) obj) word
+                else StaticObject $ bvconcat
+                     (bvextract' ((objSize-staticOffset off)*8) ((staticOffset off)*8) obj)
+                     (bvconcat word (bvextract' 0 ((objSize-(staticOffset off)-size)*8) obj))),[])
+    | otherwise -> (StaticObject obj,[(Overrun,act)])
+    where
+      size = (extractAnnotation word) `div` 8
+      objSize = (extractAnnotation obj) `div` 8
 storeObject act word (DynamicObject arr limit) off = case compare el_width (extractAnnotation word) of
   EQ -> (DynamicObject (store arr off' word) limit,errs)
   where
