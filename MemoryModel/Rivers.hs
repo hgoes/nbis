@@ -455,6 +455,9 @@ initUpdate _ mem act instr@(MIAlloc mfrom tp sz ptr mto) = do
     Left 1 -> do
       v <- varNamedAnn "alloc" (bitWidth ((riverPointerWidth mem)*8) (riverStructs mem) tp)
       return $ StaticObject tp v
+    Right sz -> do
+      v <- varNamedAnn "allocArr" (64,bitWidth ((riverPointerWidth mem)*8) (riverStructs mem) tp)
+      return $ DynamicObject tp v (Right sz)
   let mem1 = mem { riverNextObject = succ (riverNextObject mem)
                  , riverPointers = Map.insert ptr (PointerInfo { pointerObject = objRepr (riverPointerOffset mem)
                                                                                  (riverNextObject mem)
