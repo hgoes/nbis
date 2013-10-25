@@ -52,8 +52,8 @@ data Offset = Offset { staticOffset :: Integer
                      , dynamicOffset :: Maybe (SMTExpr (BitVector BVUntyped))
                      } deriving Show
 
-data RiverObject = StaticObject (SMTExpr (BitVector BVUntyped))
-                 | DynamicObject (SMTExpr (SMTArray (SMTExpr (BitVector BVUntyped)) (BitVector BVUntyped)))
+data RiverObject = StaticObject TypeDesc (SMTExpr (BitVector BVUntyped))
+                 | DynamicObject TypeDesc (SMTExpr (SMTArray (SMTExpr (BitVector BVUntyped)) (BitVector BVUntyped)))
                    (Either Integer (SMTExpr (BitVector BVUntyped)))
                  deriving (Show,Eq)
 
@@ -65,7 +65,7 @@ instance (Ord ptr,Ord mloc,Show ptr,Show mloc) => MemoryModel (RiverMemory mloc 
     let ptrOffset = ptrWidth `div` 2
     (globs,ptrs,next) <- foldlM (\(loc,ptrs,next) (ptr,tp,cont) -> do
                                     glob <- case cont of
-                                      Just cont' -> mkGlobal cont'
+                                      Just cont' -> mkGlobal ptrWidth structs tp cont'
                                     return (loc { riverObjects = Map.insert (RiverObjectRef next) (ObjectInfo { objectRepresentation = glob
                                                                                                               , objectReachability = Map.empty }) (riverObjects loc)
                                                 },Map.insert ptr (PointerInfo { pointerObject = objRepr ptrOffset (RiverObjectRef next)
@@ -292,7 +292,10 @@ updateInstruction mem upd act (MIStore mfrom word ptr mto) = do
                                       in case reach of
                                         Nothing -> let off = Offset { staticOffset = 0
                                                                     , dynamicOffset = Just $ pointerOffset ptr' }
-                                                       (obj',errs') = storeObject act word (objectRepresentation obj) off
+                                                       (obj',errs') = storeObject
+                                                                      (riverPointerWidth mem)
+                                                                      (riverStructs mem)
+                                                                      act word (objectRepresentation obj) off
                                                    in (Map.insert objRef (obj { objectRepresentation = objectITE ((pointerObject ptr') .==. objRepr (riverPointerOffset mem) objRef)
                                                                                                        obj'
                                                                                                        (objectRepresentation obj) }) objs,errs'++errs)
@@ -300,7 +303,10 @@ updateInstruction mem upd act (MIStore mfrom word ptr mto) = do
                                                            = foldl (\(cobj,cerrs) soff
                                                                     -> let off = Offset { staticOffset = soff
                                                                                         , dynamicOffset = Nothing }
-                                                                           (obj',errs') = storeObject act word (objectRepresentation obj) off
+                                                                           (obj',errs') = storeObject
+                                                                                          (riverPointerWidth mem)
+                                                                                          (riverStructs mem)
+                                                                                          act word (objectRepresentation obj) off
                                                                        in (cobj { objectRepresentation = objectITE (((pointerObject ptr') .==. objRepr (riverPointerOffset mem) objRef) .&&.
                                                                                                                     ((pointerOffset ptr') .==. offRepr (riverPointerWidth mem) (riverPointerOffset mem) soff))
                                                                                                          obj'
@@ -331,7 +337,10 @@ updateInstruction mem upd act (MIStorePtr mfrom ptrFrom ptrTo mto) = do
                                       in case reach of
                                         Nothing -> let off = Offset { staticOffset = 0
                                                                     , dynamicOffset = Just $ pointerOffset ptrFrom' }
-                                                       (obj',errs') = storeObject act word (objectRepresentation obj) off
+                                                       (obj',errs') = storeObject
+                                                                      (riverPointerWidth mem)
+                                                                      (riverStructs mem)
+                                                                      act word (objectRepresentation obj) off
                                                    in (Map.insert objRef (obj { objectRepresentation = objectITE ((pointerObject ptrTo') .==. objRepr (riverPointerOffset mem) objRef)
                                                                                                        obj'
                                                                                                        (objectRepresentation obj) }) objs,errs'++errs)
@@ -339,7 +348,10 @@ updateInstruction mem upd act (MIStorePtr mfrom ptrFrom ptrTo mto) = do
                                                            = foldl (\(cobj,cerrs) soff
                                                                     -> let off = Offset { staticOffset = soff
                                                                                         , dynamicOffset = Nothing }
-                                                                           (obj',errs') = storeObject act word (objectRepresentation obj) off
+                                                                           (obj',errs') = storeObject
+                                                                                          (riverPointerWidth mem)
+                                                                                          (riverStructs mem)
+                                                                                          act word (objectRepresentation obj) off
                                                                        in (cobj { objectRepresentation = objectITE (((pointerObject ptrTo') .==. objRepr (riverPointerOffset mem) objRef) .&&.
                                                                                                                     ((pointerOffset ptrTo') .==. offRepr (riverPointerWidth mem) (riverPointerOffset mem) soff))
                                                                                                          obj'
@@ -442,7 +454,7 @@ initUpdate _ mem act instr@(MIAlloc mfrom tp sz ptr mto) = do
   newObj <- case sz of
     Left 1 -> do
       v <- varNamedAnn "alloc" (bitWidth ((riverPointerWidth mem)*8) (riverStructs mem) tp)
-      return $ StaticObject v
+      return $ StaticObject tp v
   let mem1 = mem { riverNextObject = succ (riverNextObject mem)
                  , riverPointers = Map.insert ptr (PointerInfo { pointerObject = objRepr (riverPointerOffset mem)
                                                                                  (riverNextObject mem)
@@ -697,17 +709,20 @@ getLocation mem loc def = case Map.lookup loc (riverLocations mem) of
   Just cont -> (cont,mem)
   Nothing -> (def,mem { riverLocations = Map.insert loc def (riverLocations mem) })
 
-mkGlobal :: MemContent -> SMT RiverObject
-mkGlobal (MemCell w v) = do
+mkGlobal :: Integer -> Map String [TypeDesc] -> TypeDesc -> MemContent -> SMT RiverObject
+mkGlobal pw structs tp (MemCell w v) = do
   obj <- defConstNamed "global" (constantAnn (BitVector v) w)
-  return $ StaticObject obj
-mkGlobal (MemArray els) = do
+  return $ StaticObject tp obj
+mkGlobal pw structs tp (MemArray els) = do
   let w = case els of
         (MemCell w _):_ -> w
+      tp' = case tp of
+        ArrayType _ t -> t
+        VectorType _ t -> t
   arr <- varNamedAnn "global" (64,w)
-  let obj = DynamicObject arr (Left $ genericLength els)
-      (obj',_) = foldl (\(cobj,idx) (MemCell w v) -> (fst $ storeObject (constant True) (constantAnn (BitVector v) w) cobj (Offset { staticOffset = idx
-                                                                                                                                   , dynamicOffset = Nothing }),
+  let obj = DynamicObject tp' arr (Left $ genericLength els)
+      (obj',_) = foldl (\(cobj,idx) (MemCell w v) -> (fst $ storeObject pw structs (constant True) (constantAnn (BitVector v) w) cobj (Offset { staticOffset = idx
+                                                                                                                                              , dynamicOffset = Nothing }),
                                                       idx+(w `div` 8))
                        ) (obj,0) els
   return obj'
@@ -720,6 +735,7 @@ offsetToExpr width off
                        dynOff' = case compare rwidth (width*8) of
                           EQ -> dynOff
                           LT -> bvconcat (constantAnn (BitVector 0) (width*8-rwidth) :: SMTExpr (BitVector BVUntyped)) dynOff
+                          GT -> bvextract' 0 (width*8) dynOff
                     in if staticOffset off==0
                        then dynOff'
                        else bvadd (constantAnn (BitVector $ staticOffset off) (width*8)) dynOff'
@@ -730,7 +746,7 @@ compareOffsets width off1 off2 = case (dynamicOffset off1,dynamicOffset off2) of
   _ -> Right $ (offsetToExpr width off1) .==. (offsetToExpr width off2)
 
 loadObject :: SMTExpr Bool -> Integer -> RiverObject -> Offset -> (Maybe (SMTExpr (BitVector BVUntyped)),[(ErrorDesc,SMTExpr Bool)])
-loadObject act width (StaticObject obj) off = case dynamicOffset off of
+loadObject act width (StaticObject _ obj) off = case dynamicOffset off of
   Nothing
     | objSize >= extractStart
       -> if staticOffset off==0 &&
@@ -741,7 +757,7 @@ loadObject act width (StaticObject obj) off = case dynamicOffset off of
   where
     objSize = extractAnnotation obj
     extractStart = (staticOffset off+width)*8
-loadObject act width (DynamicObject arr limit) off = case compare el_width (width*8) of
+loadObject act width (DynamicObject _ arr limit) off = case compare el_width (width*8) of
     EQ -> (Just $ select arr off',errs)
     LT -> (Just $ bvextract' 0 width (select arr off'),errs)
     GT -> let (num_els,rest) = width `divMod` el_width
@@ -756,25 +772,28 @@ loadObject act width (DynamicObject arr limit) off = case compare el_width (widt
     off' = byteOff `bvudiv` (constantAnn (BitVector $ el_width `div` 8) idx_width)
     errs = checkLimits act elSize idx_width limit off
 
-storeObject :: SMTExpr Bool -> SMTExpr (BitVector BVUntyped) -> RiverObject -> Offset -> (RiverObject,[(ErrorDesc,SMTExpr Bool)])
-storeObject act word (StaticObject obj) off = case dynamicOffset off of
+storeObject :: Integer -> Map String [TypeDesc] -> SMTExpr Bool -> SMTExpr (BitVector BVUntyped) -> RiverObject -> Offset -> (RiverObject,[(ErrorDesc,SMTExpr Bool)])
+storeObject pw structs act word o@(StaticObject tp obj) off = case dynamicOffset off of
   Nothing
     | staticOffset off+size <= objSize
       -> (if staticOffset off==0
           then (if size==objSize
-                then StaticObject word
-                else StaticObject $ bvconcat word (bvextract' 0 ((objSize-size)*8) obj))
+                then StaticObject tp word
+                else StaticObject tp $ bvconcat word (bvextract' 0 ((objSize-size)*8) obj))
           else (if (staticOffset off)+size==objSize
-                then StaticObject $ bvconcat (bvextract' (size*8) ((objSize-size)*8) obj) word
-                else StaticObject $ bvconcat
+                then StaticObject tp $ bvconcat (bvextract' (size*8) ((objSize-size)*8) obj) word
+                else StaticObject tp $ bvconcat
                      (bvextract' ((objSize-staticOffset off)*8) ((staticOffset off)*8) obj)
                      (bvconcat word (bvextract' 0 ((objSize-(staticOffset off)-size)*8) obj))),[])
-    | otherwise -> (StaticObject obj,[(Overrun,act)])
+    | otherwise -> (StaticObject tp obj,[(Overrun,act)])
     where
       size = (extractAnnotation word) `div` 8
       objSize = (extractAnnotation obj) `div` 8
-storeObject act word (DynamicObject arr limit) off = case compare el_width (extractAnnotation word) of
-  EQ -> (DynamicObject (store arr off' word) limit,errs)
+  Just _ -> let (nobj,errs) = storeObject pw structs act word (toDynObj pw structs o) off
+            in (toStaticObj nobj,errs)
+storeObject _ _ act word (DynamicObject tp arr limit) off = case compare el_width (extractAnnotation word) of
+  EQ -> (DynamicObject tp (store arr off' word) limit,errs)
+  _ -> error $ "Can't store object of size "++(show $ extractAnnotation word)++" to array with element size "++show el_width
   where
     (idx_width,el_width) = extractAnnotation arr
     off' = (offsetToExpr (idx_width `div` 8) off) `bvudiv` (constantAnn (BitVector $ el_width `div` 8) idx_width)
@@ -802,23 +821,23 @@ checkLimits act elSize idx_width limit off
       Right limit' -> limit'
 
 simplifyObject :: RiverObject -> SMT RiverObject
-simplifyObject (StaticObject obj) = do
+simplifyObject (StaticObject tp obj) = do
   obj' <- simplify obj
-  return (StaticObject obj')
-simplifyObject (DynamicObject arr limit) = do
+  return (StaticObject tp obj')
+simplifyObject (DynamicObject tp arr limit) = do
   arr' <- simplify arr
   limit' <- case limit of
     Left l -> return (Left l)
     Right l -> simplify l >>= return.Right
-  return (DynamicObject arr' limit')
+  return (DynamicObject tp arr' limit')
 
 objectITE :: SMTExpr Bool -> RiverObject -> RiverObject -> RiverObject
-objectITE cond (StaticObject w1) (StaticObject w2)
+objectITE cond (StaticObject tp w1) (StaticObject _ w2)
   = if w1==w2
-    then StaticObject w1
-    else StaticObject $ ite cond w1 w2
-objectITE cond (DynamicObject arr1 limit1) (DynamicObject arr2 limit2)
-  = DynamicObject narr nlimit
+    then StaticObject tp w1
+    else StaticObject tp $ ite cond w1 w2
+objectITE cond (DynamicObject tp arr1 limit1) (DynamicObject _ arr2 limit2)
+  = DynamicObject tp narr nlimit
   where
     narr = if arr1==arr2
            then arr1
@@ -828,17 +847,34 @@ objectITE cond (DynamicObject arr1 limit1) (DynamicObject arr2 limit2)
              else Right (ite cond (dynNumExpr 64 limit1) (dynNumExpr 64 limit2))
 
 objectEq :: RiverObject -> RiverObject -> SMTExpr Bool
-objectEq (StaticObject w1) (StaticObject w2) = w1 .==. w2
-objectEq (DynamicObject arr1 _) (DynamicObject arr2 _) = arr1 .==. arr2
+objectEq (StaticObject _ w1) (StaticObject _ w2) = w1 .==. w2
+objectEq (DynamicObject _ arr1 _) (DynamicObject _ arr2 _) = arr1 .==. arr2
 
 objectSkel :: RiverObject -> SMT RiverObject
-objectSkel (StaticObject w) = do
+objectSkel (StaticObject tp w) = do
   v <- varAnn (extractAnnotation w)
-  return (StaticObject v)
-objectSkel (DynamicObject arr limit) = do
+  return (StaticObject tp v)
+objectSkel (DynamicObject tp arr limit) = do
   arr' <- varAnn (extractAnnotation arr)
   limit' <- varAnn 64
-  return $ DynamicObject arr' (Right limit')
+  return $ DynamicObject tp arr' (Right limit')
+
+toDynObj :: Integer -> Map String [TypeDesc] -> RiverObject -> RiverObject
+toDynObj pw structs (StaticObject tp w) = case tp of
+  ArrayType sz tp' -> let elSize = typeWidth pw structs tp'
+                          arr = foldl (\arr idx -> store arr (constantAnn (BitVector idx) 64) (bvextract' (idx*elSize*8) (elSize*8) w)
+                                      ) (constArray (constantAnn (BitVector 0) (elSize*8)) 64) [0..(sz-1)]
+                          limit = Left sz
+                      in DynamicObject tp' arr limit
+toDynObj _ _ obj = obj
+
+toStaticObj :: RiverObject -> RiverObject
+toStaticObj (DynamicObject tp arr (Left sz))
+  = let (idxWidth,elWidth) = extractAnnotation arr
+        tp' = ArrayType sz tp
+        word = foldl1 bvconcat [ select arr (constantAnn (BitVector idx) idxWidth) | idx <- [0..(sz-1)] ]
+    in StaticObject tp' word
+toStaticObj obj = obj
 
 debugRiver :: (Show mloc,Show ptr) => RiverMemory mloc ptr -> String
 debugRiver mem
