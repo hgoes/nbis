@@ -813,15 +813,18 @@ checkLimits act elSize idx_width limit off
                   then [(Underrun,act)]
                   else [])
       Just _ -> [(Overrun,act .&&. (bvsge off' limitExpr))
-                ,(Underrun,act .&&. (bvslt (constantAnn (BitVector 0) idx_width) off'))]
+                ,(Underrun,act .&&. (bvslt off' (constantAnn (BitVector 0) idx_width)))]
     Right _ -> [(Overrun,act .&&. (bvsge off' limitExpr))
-               ,(Underrun,act .&&. (bvslt (constantAnn (BitVector 0) idx_width) off'))]
+               ,(Underrun,act .&&. (bvslt off' (constantAnn (BitVector 0) idx_width)))]
   where
     byteOff = (offsetToExpr (idx_width `div` 8) off)
     off' = byteOff `bvudiv` (constantAnn (BitVector elSize) idx_width)
     limitExpr = case limit of
       Left limit' -> constantAnn (BitVector limit') idx_width
-      Right limit' -> limit'
+      Right limit' -> let limit_width = extractAnnotation limit'
+                      in case compare idx_width limit_width of
+                        EQ -> limit'
+                        GT -> bvconcat (constantAnn (BitVector 0) (idx_width-limit_width) :: SMTExpr (BitVector BVUntyped)) limit'
 
 simplifyObject :: RiverObject -> SMT RiverObject
 simplifyObject (StaticObject tp obj) = do
