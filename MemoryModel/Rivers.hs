@@ -292,29 +292,31 @@ updateInstruction mem upd act (MIStore mfrom word ptr mto) = do
                                       in case reach of
                                         Nothing -> let off = Offset { staticOffset = 0
                                                                     , dynamicOffset = Just $ pointerOffset ptr' }
+                                                       cond = (pointerObject ptr') .==. objRepr (riverPointerOffset mem) objRef
                                                        (obj',errs') = storeObject
                                                                       (riverPointerWidth mem)
                                                                       (riverStructs mem)
-                                                                      act word (objectRepresentation obj) off
-                                                   in (Map.insert objRef (obj { objectRepresentation = objectITE ((pointerObject ptr') .==. objRepr (riverPointerOffset mem) objRef)
+                                                                      (act .&&. cond) word (objectRepresentation obj) off
+                                                   in (Map.insert objRef (obj { objectRepresentation = objectITE cond
                                                                                                        obj'
                                                                                                        (objectRepresentation obj) }) objs,errs'++errs)
                                         Just offs -> let (nobj,nerrs)
                                                            = foldl (\(cobj,cerrs) soff
                                                                     -> let off = Offset { staticOffset = soff
                                                                                         , dynamicOffset = Nothing }
+                                                                           cond = ((pointerObject ptr') .==. objRepr (riverPointerOffset mem) objRef) .&&.
+                                                                                  ((pointerOffset ptr') .==. offRepr (riverPointerWidth mem) (riverPointerOffset mem) soff)
                                                                            (obj',errs') = storeObject
                                                                                           (riverPointerWidth mem)
                                                                                           (riverStructs mem)
-                                                                                          act word (objectRepresentation obj) off
-                                                                       in (cobj { objectRepresentation = objectITE (((pointerObject ptr') .==. objRepr (riverPointerOffset mem) objRef) .&&.
-                                                                                                                    ((pointerOffset ptr') .==. offRepr (riverPointerWidth mem) (riverPointerOffset mem) soff))
+                                                                                          (act .&&. cond) word (objectRepresentation obj) off
+                                                                       in (cobj { objectRepresentation = objectITE cond
                                                                                                          obj'
                                                                                                          (objectRepresentation obj)
                                                                                 },errs'++cerrs)
                                                                    ) (obj,[]) offs
                                                             in (Map.insert objRef nobj objs,nerrs++errs)
-                                         ) (newObjs1,[]) (Map.delete nullObj nreach)
+                                  ) (newObjs1,[]) (Map.delete nullObj nreach)
          in return (noUpdate { newObjects = Map.singleton mto newObjs2 },
                     (if Map.member nullObj nreach
                      then [(NullDeref,act .&&. ((pointerObject ptr') .==. objRepr (riverPointerOffset mem) nullObj))]
@@ -337,23 +339,25 @@ updateInstruction mem upd act (MIStorePtr mfrom ptrFrom ptrTo mto) = do
                                       in case reach of
                                         Nothing -> let off = Offset { staticOffset = 0
                                                                     , dynamicOffset = Just $ pointerOffset ptrFrom' }
+                                                       cond = (pointerObject ptrTo') .==. objRepr (riverPointerOffset mem) objRef
                                                        (obj',errs') = storeObject
                                                                       (riverPointerWidth mem)
                                                                       (riverStructs mem)
-                                                                      act word (objectRepresentation obj) off
-                                                   in (Map.insert objRef (obj { objectRepresentation = objectITE ((pointerObject ptrTo') .==. objRepr (riverPointerOffset mem) objRef)
+                                                                      (act .&&. cond) word (objectRepresentation obj) off
+                                                   in (Map.insert objRef (obj { objectRepresentation = objectITE cond
                                                                                                        obj'
                                                                                                        (objectRepresentation obj) }) objs,errs'++errs)
                                         Just offs -> let (nobj,nerrs)
                                                            = foldl (\(cobj,cerrs) soff
                                                                     -> let off = Offset { staticOffset = soff
                                                                                         , dynamicOffset = Nothing }
+                                                                           cond = ((pointerObject ptrTo') .==. objRepr (riverPointerOffset mem) objRef) .&&.
+                                                                                  ((pointerOffset ptrTo') .==. offRepr (riverPointerWidth mem) (riverPointerOffset mem) soff)
                                                                            (obj',errs') = storeObject
                                                                                           (riverPointerWidth mem)
                                                                                           (riverStructs mem)
-                                                                                          act word (objectRepresentation obj) off
-                                                                       in (cobj { objectRepresentation = objectITE (((pointerObject ptrTo') .==. objRepr (riverPointerOffset mem) objRef) .&&.
-                                                                                                                    ((pointerOffset ptrTo') .==. offRepr (riverPointerWidth mem) (riverPointerOffset mem) soff))
+                                                                                          (act .&&. cond) word (objectRepresentation obj) off
+                                                                       in (cobj { objectRepresentation = objectITE cond
                                                                                                          obj'
                                                                                                          (objectRepresentation obj)
                                                                                 },errs'++cerrs)
@@ -806,7 +810,7 @@ checkLimits :: SMTExpr Bool -> Integer -> Integer -> Either Integer (SMTExpr (Bi
 checkLimits act elSize idx_width limit off
   = case limit of
     Left sz -> case dynamicOffset off of
-      Nothing -> (if sz > ((staticOffset off)*elSize)
+      Nothing -> (if sz > ((staticOffset off) `div` elSize)
                   then []
                   else [(Overrun,act)])++
                  (if (staticOffset off) < 0
