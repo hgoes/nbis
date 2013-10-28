@@ -73,8 +73,13 @@ main = do
                            Just bin -> bin) $ do
     setOption (PrintSuccess False)
     setOption (ProduceModels True)
-    (start,env :: UnrollEnv (Gr.Gr BlkInfo ()) (RiverMemory Integer Integer) Integer Integer) <- startingContext cfg (entryPoint opts)
-    findBug True cfg 0 env [start]
+    case memoryModelOption opts of
+      Rivers -> do
+        (start,env :: UnrollEnv (Gr.Gr BlkInfo ()) (RiverMemory Integer Integer) Integer Integer) <- startingContext cfg (entryPoint opts)
+        findBug True cfg 0 env [start]
+      Snow -> do
+        (start,env :: UnrollEnv (Gr.Gr BlkInfo ()) (SnowMemory Integer Integer) Integer Integer) <- startingContext cfg (entryPoint opts)
+        findBug True cfg 0 env [start]
   case bug of
     Just (tr,bugs) -> do
       putStrLn $ "Bug found: "++show bugs

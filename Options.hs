@@ -3,10 +3,8 @@ module Options where
 import System.Environment (getArgs)
 import System.Console.GetOpt
 
-data MemoryModelOption = UntypedModel
-                       | TypedModel
-                       | BlockModel
-                       | PlainModel
+data MemoryModelOption = Rivers
+                       | Snow
                        deriving (Eq,Ord,Show)
 
 data Options = Options
@@ -28,7 +26,7 @@ defaultOptions :: Options
 defaultOptions = Options { entryPoint = "main" 
                          , bmcDepth = 10
                          , files = []
-                         , memoryModelOption = PlainModel
+                         , memoryModelOption = Rivers
                          , solver = Nothing
                          , checkUser = False
                          , checkMemoryAccess = False
@@ -39,12 +37,10 @@ optionDescr :: [OptDescr (Options -> Options)]
 optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoint = str }) "function") "Specify the main function to test"
               ,Option ['d'] ["depth"] (ReqArg (\str opt -> opt { bmcDepth = read str }) "d") "Maximal unroll depth"
               ,Option ['m'] ["memory-model"] (ReqArg (\str opt -> opt { memoryModelOption = case str of
-                                                                           "typed" -> TypedModel
-                                                                           "untyped" -> UntypedModel
-                                                                           "block" -> BlockModel
-                                                                           "plain" -> PlainModel
+                                                                           "rivers" -> Rivers
+                                                                           "snow" -> Snow
                                                                            _ -> error $ "Unknown memory model "++show str
-                                                                      }) "model") "Memory model to use (untyped,typed or block)"
+                                                                      }) "model") "Memory model to use (rivers or snow)"
               ,Option [] ["solver"] (ReqArg (\str opt -> opt { solver = Just str }) "smt-binary") "The SMT solver to use to solve the generated instance"
               ,Option [] ["check-user"] (NoArg (\opt -> opt { checkUser = True })) "Validate user assertions"
               ,Option [] ["check-mem"] (NoArg (\opt -> opt { checkMemoryAccess = True })) "Validate memory accesses"
