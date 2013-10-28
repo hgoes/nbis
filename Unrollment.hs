@@ -755,18 +755,18 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                    nmem <- lift $ makeEntry prx (unrollMemory env) start_loc
                    put $ env { unrollMemory = nmem })
           else return ()
-        case mem_instr++(reMemInstrs outp) of
-          [] -> return ()
-          xs -> do
-            env <- get
-            nmem <- lift $ addProgram (unrollMemory env) act prev_locs xs (rePtrTypes nst)
-            put $ env { unrollMemory = nmem }
         mapM_ (\(cond,src,trg) -> do
                   env <- get
                   let (_,prx) = unrollProxies env
                   nmem <- lift $ connectLocation (unrollMemory env) prx cond src trg
                   put $ env { unrollMemory = nmem }
               ) mem_eqs
+        case mem_instr++(reMemInstrs outp) of
+          [] -> return ()
+          xs -> do
+            env <- get
+            nmem <- lift $ addProgram (unrollMemory env) act prev_locs xs (rePtrTypes nst)
+            put $ env { unrollMemory = nmem }
         modify (\env -> env { unrollGuards = (reGuards outp)++(unrollGuards env)
                             , unrollWatchpoints = (reWatchpoints outp)++(unrollWatchpoints env)
                             })
