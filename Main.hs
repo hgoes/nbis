@@ -76,8 +76,8 @@ main = do
     (start,env :: UnrollEnv (Gr.Gr BlkInfo ()) (RiverMemory Integer Integer) Integer Integer) <- startingContext cfg (entryPoint opts)
     findBug True cfg 0 env [start]
   case bug of
-    Just tr -> do
-      putStrLn "Bug found:"
+    Just (tr,bugs) -> do
+      putStrLn $ "Bug found: "++show bugs
       print tr
     Nothing -> putStrLn "No bug found."
   where
@@ -119,7 +119,13 @@ main = do
                                                          return (Just (name,vals)))
                                                 else return Nothing
                                           ) (unrollWatchpoints env)
-                             return $ Left $ catMaybes outp)
+                             rerrs <- mapM (\(desc,cond) -> do
+                                               cond' <- getValue cond
+                                               if cond'
+                                                 then return $ Just desc
+                                                 else return Nothing
+                                           ) bugs
+                             return $ Left (catMaybes outp,catMaybes rerrs))
                     else return (Right ([],env)))
     unroll isFirst cfg env (ctx:ctxs) = do
       --let (p1,p2) = unrollProxies env in trace (debugMem (unrollMemory env) p1 p2) (return ())
