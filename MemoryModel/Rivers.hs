@@ -689,11 +689,17 @@ initUpdate ptrs mem _ (MICompare ptr1 ptr2 res) = do
                      ((pointerOffset info1) .==. (pointerOffset info2)))
   return (mem2,noUpdate)
 initUpdate ptrs mem act instr@(MISelect cases ptr) = do
-  (obj,off,mem1,upd1) <- buildCases mem cases
-  obj' <- defConstNamed "ptrObj" obj
-  off' <- defConstNamed "ptrOff" off
-  let mem2 = mem1 { riverPointers = Map.insert ptr (PointerInfo { pointerObject = obj'
-                                                                , pointerOffset = off'
+  (obj,off,mem1,upd1) <- case cases of
+    [(_,p)] -> do
+      (info,nmem) <- getPointer mem ptrs p
+      return (pointerObject info,pointerOffset info,nmem,updateFromPtr nmem p)
+    _ -> do
+      (obj',off',nmem,upd) <- buildCases mem cases
+      obj'' <- defConstNamed "ptrObj" obj'
+      off'' <- defConstNamed "ptrOff" off'
+      return (obj'',off'',nmem,upd)
+  let mem2 = mem1 { riverPointers = Map.insert ptr (PointerInfo { pointerObject = obj
+                                                                , pointerOffset = off
                                                                 , pointerReachability = Map.empty
                                                                 , pointerType = ptrs!ptr
                                                                 }) (riverPointers mem1)
