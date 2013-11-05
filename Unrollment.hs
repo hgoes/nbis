@@ -16,6 +16,7 @@ import MemoryModel
 import ConditionList
 import Circuit
 import InstrDesc
+import SMTHelper
 
 import Data.Map (Map,(!))
 import qualified Data.Map as Map
@@ -338,10 +339,11 @@ getMergeValue ref = do
                            lst <- mapM (\(ref,cond) -> do
                                            Left val <- getMergeValue ref
                                            return (val,cond)) refs
-                           nval <- case lst of
-                             [(v,_)] -> return v
-                             _ -> lift $ valCopy name (valSwitch lst)
-                           return $ Left nval)
+                           let nval = valOptimize (valSwitch lst)
+                           nval' <- if valIsComplex nval
+                                    then lift $ valCopy name nval
+                                    else return nval
+                           return $ Left nval')
         Right p -> do
           env <- get
           let nptr = unrollNextPtr env
@@ -659,7 +661,13 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                               Just $ unrollNextMergeNode env,[],[ (act',loc',loc) | (_,_,_,act',_,loc',_) <- inc ]))
              else (do
                       mergedInps <- mergeValueStacks extensible [ (cond,mp) | (_,_,_,cond,mp,_,_) <- inc ]
-                      act <- lift $ defConstNamed ("act_"++(nodeIdFunction trg)++"_"++blk_name) (app or' [ act | (_,_,_,act,_,_,_) <- inc ])
+                      act <- case inc of
+                        [(_,_,_,act',_,_,_)] -> do
+                          let optAct = optimizeExpr' act'
+                          if isComplexExpr optAct
+                            then lift $ defConstNamed ("act_"++(nodeIdFunction trg)++"_"++blk_name) optAct
+                            else return optAct
+                        _ -> lift $ defConstNamed ("act_"++(nodeIdFunction trg)++"_"++blk_name) (app or' [ act | (_,_,_,act,_,_,_) <- inc ])
                       inp <- mapM getMergeValue (Map.intersection (head mergedInps) $
                                                  Map.union
                                                  (fmap (const ()) $ Map.mapKeys Right (rePossibleInputs info))
@@ -675,7 +683,10 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                       phis <- mapM (\blk' -> case [ cond | (_,blk'',_,cond,_,_,_) <- inc, blk''==blk' ] of
                                        [] -> return Nothing
                                        xs -> do
-                                         phi <- lift $ defConstNamed "phi" (app or' xs)
+                                         let phiExpr = optimizeExpr' $ app or' xs
+                                         phi <- if isComplexExpr phiExpr
+                                                then lift $ defConstNamed "phi" phiExpr
+                                                else return phiExpr
                                          return $ Just (blk',phi)
                                    ) (Set.toList $ rePossiblePhis info)
                       return (act,inp,mergedInps,

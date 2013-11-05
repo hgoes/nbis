@@ -3,6 +3,7 @@ module Value where
 
 import MemoryModel
 import TypeDesc
+import SMTHelper
 
 import Language.SMTLib2 as SMT2
 import Data.Typeable
@@ -162,3 +163,13 @@ valNewSameType name (ConstCondition c) = do
   var <- varNamed name
   return (ConditionValue { asCondition = var
                          , conditionWidth = 1 })
+
+valOptimize :: Val -> Val
+valOptimize (DirectValue x) = DirectValue $ optimizeExpr' x
+valOptimize (ConditionValue c w) = ConditionValue (optimizeExpr' c) w
+valOptimize x = x
+
+valIsComplex :: Val -> Bool
+valIsComplex (DirectValue x) = isComplexExpr x
+valIsComplex (ConditionValue c _) = isComplexExpr c
+valIsComplex _ = False

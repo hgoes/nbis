@@ -7,6 +7,7 @@ import ConditionList
 import TypeDesc
 import InstrDesc
 import VarStore
+import SMTHelper
 
 import Language.SMTLib2
 import Control.Monad
@@ -105,7 +106,10 @@ reDefineVar instr name genval = Realization $ \info -> let (info1,rgen) = runRea
                                                            do
                                                              val <- rgen
                                                              nval <- case val of
-                                                               Left rval -> lift $ fmap Left $ valCopy name rval
+                                                               Left rval -> let nval = valOptimize rval
+                                                                            in if valIsComplex nval
+                                                                               then lift $ fmap Left $ valCopy name nval
+                                                                               else return $ Left nval
                                                                Right ptr -> return (Right ptr)
                                                              modify (\st -> st { reLocals = Map.insert instr nval (reLocals st) })
                                                           )
