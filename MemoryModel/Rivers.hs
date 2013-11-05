@@ -207,10 +207,21 @@ isNoUpdate upd = Map.null (newPtrReachability upd) &&
 
 instance (Ord ptr,Ord mloc) => Monoid (Update mloc ptr) where
   mempty = noUpdate
-  mappend u1 u2 = Update { newPtrReachability = Map.unionWith unionReachability (newPtrReachability u1) (newPtrReachability u2)
-                         , newObjReachability = Map.unionWith (Map.unionWith unionReachability) (newObjReachability u1) (newObjReachability u2)
-                         , newObjects = Map.unionWith Map.union (newObjects u1) (newObjects u2)
-                         }
+  mappend = mergeUpdates Nothing
+
+mergeUpdates :: (Ord ptr,Ord mloc) => Maybe (SMTExpr Bool) -> Update mloc ptr -> Update mloc ptr -> Update mloc ptr
+mergeUpdates cond u1 u2
+  = Update { newPtrReachability = Map.unionWith unionReachability (newPtrReachability u1) (newPtrReachability u2)
+           , newObjReachability = Map.unionWith (Map.unionWith unionReachability) (newObjReachability u1) (newObjReachability u2)
+           , newObjects = case cond of
+                Nothing -> Map.unionWith Map.union (newObjects u1) (newObjects u2)
+                Just cond' -> Map.unionWith (Map.unionWith (\o1 o2
+                                                            -> ObjectInfo { objectRepresentation = objectITE cond' (objectRepresentation o1)
+                                                                                                   (objectRepresentation o2)
+                                                                          , objectReachability = unionReachability (objectReachability o1)
+                                                                                                 (objectReachability o2)
+                                                                          })) (newObjects u1) (newObjects u2)
+           }
 
 getObject :: Ord mloc => RiverMemory mloc ptr -> mloc -> RiverObjectRef -> SMT (ObjectInfo,RiverMemory mloc ptr)
 getObject mem loc ref = case Map.lookup ref (riverObjectTypes mem) of
@@ -379,10 +390,21 @@ updateInstruction upd mem = do
                                                  in Map.insertWith unionReachability pto nreach' cupd
                                              ) Map.empty trgs
                        ) (ptrIdxBySrc $ riverProgram mem) (newPtrReachability upd)
-      newObjsPhi = foldl' Map.union Map.empty $
+      newObjsPhi = fmap snd $
+                   foldl' (Map.unionWith
+                           (\(_,cur) (c,new) -> (c,Map.unionWith (\oldInfo newInfo
+                                                                  -> ObjectInfo { objectRepresentation = objectITE c
+                                                                                                         (objectRepresentation newInfo)
+                                                                                                         (objectRepresentation oldInfo)
+                                                                                , objectReachability = unionReachability
+                                                                                                       (objectReachability newInfo)
+                                                                                                       (objectReachability oldInfo)
+                                                                                }) cur new
+                           )))
+                   Map.empty $
                    Map.intersectionWith
                    (\trgs nobjs
-                    -> fmap (const nobjs) trgs
+                    -> fmap (\c -> (c,nobjs)) trgs
                    ) (locPhisBySrc $ riverProgram mem) (newObjects upd)
       newObjReachPhi = foldl' Map.union Map.empty $
                        Map.intersectionWith
@@ -756,7 +778,7 @@ initUpdate ptrs mem act instr@(MIPhi cases mto) = do
                                             (riverLocations cmem) }
             upd1 = updateFromLoc cmem1 loc
             (cmem2,upd2) = buildCases cmem1 locs
-        in (cmem2,mappend upd1 upd2)
+        in (cmem2,mergeUpdates (Just c) upd1 upd2)
 
 applyUpdateRec :: (Ord mloc,Ord ptr,Show mloc,Show ptr) => RiverMemory mloc ptr -> Update mloc ptr -> SMT (RiverMemory mloc ptr)
 applyUpdateRec mem upd
