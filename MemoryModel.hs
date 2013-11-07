@@ -40,6 +40,8 @@ data MemoryInstruction m p
   | MIPhi [(SMTExpr Bool,m)] m
   | MICopy m p p CopyOptions m
   | MIStrLen m p (SMTExpr (BitVector BVUntyped))
+  | MISet m p DynNum DynNum m
+  | MIFree m p m
   deriving (Show,Eq)
 
 data CopyOptions = CopyOpts { copySizeLimit :: Maybe DynNum -- ^ A size in bytes after which to stop the copying

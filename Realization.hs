@@ -213,6 +213,12 @@ argToExpr expr = reInject getType result
                                     (argToExpr ptr) <*>
                                     (traverse argToExpr idx) <*>
                                     (reLift reNewPtr)
+      ODBitcast ptr -> let PointerType tpTo = operandType expr
+                           PointerType tpFrom = operandType ptr
+                       in reInject (\(ptr',instr) -> reMemInstr instr >> return (Right ptr')) $
+                          (\(Right val_ptr) ptr' -> (ptr',MICast tpFrom tpTo val_ptr ptr')) <$>
+                          (argToExpr ptr) <*>
+                          (reLift reNewPtr)
       ODUndef -> reUndef (operandType expr)
 
 data BlockFinalization ptr = Jump (CondList (Ptr BasicBlock))
@@ -438,8 +444,8 @@ isIntrinsic name rtp argtps = case intrinsics name rtp argtps :: Maybe (Bool,[(E
 intrinsics :: (Enum ptr,Enum mem) => String -> TypeDesc -> [TypeDesc] -> Maybe (Bool,[(Either Val ptr,TypeDesc)] -> RealizationMonad mem ptr (Maybe (Either Val ptr)))
 intrinsics "llvm.memcpy.p0i8.p0i8.i64" _ _ = Just (True,intr_memcpy)
 intrinsics "llvm.memcpy.p0i8.p0i8.i32" _ _ = Just (True,intr_memcpy)
---intrinsics "llvm.memset.p0i8.i32" = Just intr_memset
---intrinsics "llvm.memset.p0i8.i64" = Just intr_memset
+intrinsics "llvm.memset.p0i8.i32" _ _ = Just (True,intr_memset)
+intrinsics "llvm.memset.p0i8.i64" _ _ = Just (True,intr_memset)
 intrinsics "llvm.stacksave" _ _ = Just (True,intr_stacksave)
 intrinsics "llvm.stackrestore" _ _ = Just (False,intr_stackrestore)
 intrinsics "nbis_restrict" _ _ = Just (False,intr_restrict)
@@ -456,6 +462,8 @@ intrinsics "nbis_watch" _ _ = Just (False,intr_watch)
 intrinsics "llvm.lifetime.start" _ _ = Just (False,intr_lifetime_start)
 intrinsics "llvm.lifetime.end" _ _ = Just (False,intr_lifetime_end)
 intrinsics "strlen" rtp _ = Just (True,intr_strlen (bitWidth' rtp))
+intrinsics "malloc" _ _ = Just (True,intr_malloc)
+intrinsics "free" _ _ = Just (False,intr_free)
 intrinsics _ _ _ = Nothing
 
 intr_memcpy [(Right to,_),(Right from,_),(Left len,_),_,_] = do
@@ -469,8 +477,17 @@ intr_memcpy [(Right to,_),(Right from,_),(Left len,_),_,_] = do
                                            , copyMayOverlap = False }) nloc)
   return $ Just (Right to)
 
---intr_memset _ [(Right dest,_),(val,_),(Left (ConstValue len _),_),_,_] = do
---  reError "memset not implemented"
+intr_memset [(Right dest,_),(Left val,_),(Left len,_),_,_] = do
+  let len' = case len of
+        ConstValue l _ -> Left l
+        DirectValue l -> Right l
+      val' = case val of
+        ConstValue l _ -> Left l
+        DirectValue l -> Right l
+  loc <- reMemLoc
+  nloc <- reNewMemLoc
+  reMemInstr (MISet loc dest val' len' nloc)
+  return $ Just (Right dest)
 
 intr_restrict [(Left val,_)] = do
   re <- ask
@@ -523,3 +540,19 @@ intr_strlen width [(Right ptr,_)] = do
   loc <- reMemLoc
   reMemInstr (MIStrLen loc ptr res)
   return (Just $ Left $ DirectValue res)
+
+intr_malloc [(Left sz,_)] = do
+  let sz' = case sz of
+        ConstValue l _ -> Left l
+        DirectValue l -> Right l
+  loc <- reMemLoc
+  nloc <- reNewMemLoc
+  ptr <- reNewPtr
+  reMemInstr (MIAlloc loc (IntegerType 8) sz' ptr nloc)
+  return (Just $ Right ptr)
+
+intr_free [(Right ptr,_)] = do
+  loc <- reMemLoc
+  nloc <- reNewMemLoc
+  reMemInstr (MIFree loc ptr nloc)
+  return Nothing

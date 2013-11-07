@@ -66,6 +66,7 @@ data OperandDesc a
   | ODGlobal (Ptr GlobalVariable)
   | ODArgument (Ptr Argument)
   | ODGetElementPtr a [a]
+  | ODBitcast a
   deriving (Show,Eq,Ord)
 
 reifyInstr :: Ptr TargetLibraryInfo
@@ -318,6 +319,9 @@ reifyOperand ptr = do
                         ptr <- getOperand expr 0 >>= reifyOperand
                         idx <- mapM (\i -> getOperand expr i >>= reifyOperand) [1..(sz-1)]
                         return $ ODGetElementPtr ptr idx
+                      CastOp BitCast -> do
+                        ptr <- getOperand expr 0 >>= reifyOperand
+                        return $ ODBitcast ptr
                       _ -> do
                            valueDump expr
                            error "Unknown constant expr"
