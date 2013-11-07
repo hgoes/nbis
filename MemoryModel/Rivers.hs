@@ -441,8 +441,8 @@ updateInstruction upd mem = do
                                      cond = (pointerObject ptrInfo) .==. objRepr (riverPointerOffset mem) objRef
                                      (nobj,res,errs) = f (act .&&. cond) obj off
                                  in (case nobj of
-                                        Nothing -> newObjs
-                                        Just nobj' -> Map.insert objRef nobj' newObjs,
+                                        Nothing -> objs
+                                        Just nobj' -> Map.insert objRef nobj' objs,
                                      res:allRes,
                                      errs++allErrs)
                       Just offs
