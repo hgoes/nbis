@@ -497,6 +497,13 @@ startingContext cfg fname = case Map.lookup fname (unrollFunctions cfg) of
                                           -> ((succ ptr',(ptr',tp,cont):prog'),ptr')
                                          ) (0,[]) (unrollCfgGlobals cfg)
     mem <- memNew (Proxy::Proxy Integer) (unrollPointerWidth cfg) (unrollTypes cfg) (unrollStructs cfg) [ (ptr,tp,cont) | (ptr,PointerType tp,cont) <- prog ]
+    startArgs <- mapM (\(arg,tp) -> case tp of
+                          PointerType _ -> error "No support for nondeterministic pointers yet."
+                          _ -> do
+                            res <- varNamedAnn "arg" (typeWidth (unrollPointerWidth cfg) (unrollStructs cfg) tp*8)
+                            ref <- liftIO $ newIORef (MergedValue False (Left $ DirectValue res))
+                            return (Left arg,ref)
+                      ) (unrollFunInfoArguments info)
     return (UnrollContext { unrollOrder = order
                           , currentMergeNodes = Map.empty
                           , nextMergeNodes = Map.empty
@@ -505,7 +512,7 @@ startingContext cfg fname = case Map.lookup fname (unrollFunctions cfg) of
                                                                            , nodeIdBlock = blk
                                                                            , nodeIdSubblock = sblk
                                                                            , nodeIdCallStack = Nothing }
-                                                     , edgeConds = [(fname,nullPtr,0,constant True,[Map.empty],0,Nothing)]
+                                                     , edgeConds = [(fname,nullPtr,0,constant True,[Map.fromList startArgs],0,Nothing)]
                                                      , edgeCreatedMergeNodes = Set.empty
                                                      }]
                           , outgoingEdges = []
