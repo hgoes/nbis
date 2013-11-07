@@ -1041,7 +1041,14 @@ objectEq (StaticObject _ w1) (StaticObject _ w2) = case eqs w1 w2 of
       Nothing -> Nothing
       Just rest -> Just $ (x .==. y):rest
     eqs _ _ = Nothing
-objectEq (DynamicObject _ arr1 _) (DynamicObject _ arr2 _) = arr1 .==. arr2
+objectEq (DynamicObject _ arr1 limit1) (DynamicObject _ arr2 limit2)
+  = case (limit1,limit2) of
+  (Right l1,Right l2) -> (arr1 .==. arr2) .&&. (l1 .==. l2)
+  (Left l1,Left l2) -> if l1==l2
+                       then arr1 .==. arr2
+                       else constant False
+  (Left l1,Right l2) -> ((constantAnn (BitVector l1) (extractAnnotation l2)) .==. l2) .&&. (arr1 .==. arr2)
+  (Right l1,Left l2) -> ((constantAnn (BitVector l2) (extractAnnotation l1)) .==. l1) .&&. (arr1 .==. arr2)
 
 objectSkel :: RiverObject -> SMT RiverObject
 objectSkel (StaticObject tp ws) = do
