@@ -58,7 +58,7 @@ main = do
   when (showHelp opts) $ do
     putStrLn nbisInfo
     exitSuccess
-  progs <- mapM (getProgram isIntrinsic) (files opts)
+  progs <- mapM (getProgram isIntrinsic (entryPoint opts)) (files opts)
   gen <- getStdGen
   let program = foldl1 mergePrograms progs
       cfg = case manualMergeNodes opts of

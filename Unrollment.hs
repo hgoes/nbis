@@ -220,7 +220,9 @@ mergePointConfig' entry (funs,globs,ptrWidth,alltps,structs) select
                                           _ -> False ] ]
                       | ((fun,blk,sblk),(nd,instrs)) <- Map.toList blk_mp ]) :: Gr.Gr (String,Ptr BasicBlock,Integer) ()
     Just (_,_,(start_blk,_,_):_,_,_) = Map.lookup entry funs
-    Just (start_nd,_) = Map.lookup (entry,start_blk,0) blk_mp
+    start_nd = case Map.lookup (entry,start_blk,0) blk_mp of
+      Nothing -> error $ "Failed to find entry point "++entry
+      Just (x,_) -> x
     [dffTree] = Gr.dff [start_nd] prog_gr
     order = reverse $ fmap (\nd -> let Just inf = Gr.lab prog_gr nd in inf) $ Gr.postorder dffTree
     selectedMergePoints = select ext_funs prog_gr

@@ -103,8 +103,8 @@ reifyDomTree tree = do
 
 data APass = forall p. PassC p => APass (IO (Ptr p))
 
-passes :: MVar (Map String ([LoopDesc],Maybe DomTree)) -> [APass]
-passes var
+passes :: String -> MVar (Map String ([LoopDesc],Maybe DomTree)) -> [APass]
+passes entry var
   = [APass createPromoteMemoryToRegisterPass
     ,APass createConstantPropagationPass
     ,APass createIndVarSimplifyPass
@@ -114,7 +114,7 @@ passes var
     ,APass createLoopRotatePass
     ,APass createLoopUnrollPass
     ,APass (do
-               m <- newCString "main"
+               m <- newCString entry
                arr <- newArray [m]
                export_list <- newArrayRef arr 1
                --export_list <- newArrayRefEmpty
@@ -153,13 +153,13 @@ passes var
                 return False))
     ]
 
-applyOptimizations :: Ptr Module -> IO (Map String ([LoopDesc],Maybe DomTree))
-applyOptimizations mod = do
+applyOptimizations :: Ptr Module -> String -> IO (Map String ([LoopDesc],Maybe DomTree))
+applyOptimizations mod entry = do
   var <- newEmptyMVar
   pm <- newPassManager
   mapM (\(APass c) -> do
            pass <- c
-           passManagerAdd pm pass) (passes var)
+           passManagerAdd pm pass) (passes entry var)
   passManagerRun pm mod
   deletePassManager pm
   res <- takeMVar var
@@ -186,14 +186,14 @@ getDataLayout mod = do
   return dl
 #endif
 
-getProgram :: (String -> TypeDesc -> [TypeDesc] -> Bool) -> String -> IO ProgDesc
-getProgram is_intr file = do
+getProgram :: (String -> TypeDesc -> [TypeDesc] -> Bool) -> String -> String -> IO ProgDesc
+getProgram is_intr entry file = do
   Just buf <- getFileMemoryBufferSimple file
   diag <- newSMDiagnostic
   ctx <- newLLVMContext
   mod <- parseIR buf diag ctx
   print "Running optimizations..."
-  loop_mp <- applyOptimizations mod
+  loop_mp <- applyOptimizations mod entry
   print "done."
   tli <- getTargetLibraryInfo mod
   dl <- getDataLayout mod
