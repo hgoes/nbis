@@ -101,7 +101,11 @@ valBinOp op (ConstValue lhs w) (ConstValue rhs _)
                    Sub -> lhs - rhs
                    Shl -> shiftL lhs (fromIntegral rhs)
                    Or -> lhs .|. rhs
-                   Mul -> lhs * rhs) w
+                   Mul -> lhs * rhs
+                   SRem -> lhs `rem` rhs
+                   SDiv -> lhs `div` rhs
+                   _ -> error $ "Unsupported operator for constant values: "++show op
+               ) w
 valBinOp op l@(ConditionValue lhs w) r@(ConditionValue rhs _) = case op of
   Xor -> ConditionValue (app SMT2.xor [lhs,rhs]) w
   Add -> DirectValue (bvadd (valValue l) (valValue r))
@@ -111,6 +115,7 @@ valBinOp op l@(ConditionValue lhs w) r@(ConditionValue rhs _) = case op of
   LShr -> DirectValue (bvlshr (valValue l) (valValue r))
   Or -> ConditionValue (lhs .||. rhs) w
   Mul -> DirectValue (bvmul (valValue l) (valValue r))
+  SDiv -> DirectValue (bvsdiv (valValue l) (valValue r))
   _ -> error $ "nbis: Unsupported binary operator "++show op
 valBinOp op lhs rhs 
   = let lhs' = valValue lhs
@@ -125,6 +130,7 @@ valBinOp op lhs rhs
           Or -> bvor
           Mul -> bvmul
           SRem -> bvsrem
+          SDiv -> bvsdiv
           _ -> error $ "nbis: Unsupported binary operator "++show op
     in DirectValue (rop lhs' rhs')
 
