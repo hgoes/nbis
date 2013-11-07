@@ -79,6 +79,8 @@ memInstrSrc (MIIndex _ _ _ _ _) = Nothing
 memInstrSrc (MIPhi _ _) = Nothing
 memInstrSrc (MICopy m _ _ _ _) = Just m
 memInstrSrc (MIStrLen m _ _) = Just m
+memInstrSrc (MISet m _ _ _ _) = Just m
+memInstrSrc (MIFree m _ _) = Just m
 
 memInstrTrg :: MemoryInstruction m p -> Maybe m
 memInstrTrg (MINull _ _) = Nothing
@@ -94,6 +96,8 @@ memInstrTrg (MIIndex _ _ _ _ _) = Nothing
 memInstrTrg (MIPhi _ m) = Just m
 memInstrTrg (MICopy _ _ _ _ m) = Just m
 memInstrTrg (MIStrLen _ _ _) = Nothing
+memInstrTrg (MISet _ _ _ _ m) = Just m
+memInstrTrg (MIFree _ _ m) = Just m
 
 flattenMemContent :: MemContent -> [(Integer,Integer)]
 flattenMemContent (MemCell w v) = [(w,v)]
