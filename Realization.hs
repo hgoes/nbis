@@ -64,7 +64,8 @@ data RealizationInfo = RealizationInfo { rePossiblePhis :: Set (Ptr BasicBlock)
                                        , reLocallyDefined :: Set (Ptr Instruction)
                                        , reSuccessors :: Set (Ptr BasicBlock)
                                        , reCalls :: Set (String,Ptr Instruction)
-                                       , reReturns :: Bool } deriving (Show)
+                                       , reReturns :: Bool
+                                       , rePotentialErrors :: [ErrorDesc] } deriving (Show)
 
 type RealizationMonad mem ptr = RWST (RealizationEnv ptr) (RealizationOutput mem ptr) (RealizationState mem ptr) SMT
 
@@ -165,6 +166,9 @@ reUndef tp = Realization $ \info -> (info,case tp of
                                           v <- lift $ varNamedAnn "undef" w
                                           return $ Left $ DirectValue v)
 
+reErrorAnn :: ErrorDesc -> Realization mem ptr ()
+reErrorAnn desc = Realization $ \info -> (info { rePotentialErrors = desc:(rePotentialErrors info) },return ())
+
 argToExpr :: (Ord ptr,Enum ptr,Enum mem) => Operand -> Realization mem ptr (Either Val ptr)
 argToExpr expr = reInject getType result
   where
@@ -227,7 +231,7 @@ data BlockFinalization ptr = Jump (CondList (Ptr BasicBlock))
                            deriving (Show)
 
 preRealize :: Realization mem ptr a -> (RealizationInfo,RealizationMonad mem ptr a)
-preRealize r = runRealization r (RealizationInfo Set.empty Map.empty Map.empty Set.empty Set.empty Set.empty Set.empty False)
+preRealize r = runRealization r (RealizationInfo Set.empty Map.empty Map.empty Set.empty Set.empty Set.empty Set.empty False [])
 
 postRealize :: RealizationEnv ptr -> mem -> mem -> ptr -> RealizationMonad mem ptr a -> SMT (a,RealizationState mem ptr,RealizationOutput mem ptr)
 postRealize env cur_mem next_mem next_ptr act = runRWST act env (RealizationState { reCurMemLoc = cur_mem
@@ -336,7 +340,9 @@ realizeInstruction assignInstr@(IAssign trg name expr)
                        all@((_,Right _):_) -> Right (fmap (\(cond,Right p) -> (cond,p)) all)
                        all@((_,Left _):_) -> Left (fmap (\(cond,Left v) -> (cond,v)) all)) <$>
                    (traverse reGetPhi args)
-      ILoad arg -> reInject (\(Right ptr) -> do
+      ILoad arg -> reErrorAnn NullDeref *>
+                   reErrorAnn Overrun *>
+                   reInject (\(Right ptr) -> do
                                 loc <- reMemLoc
                                 case operandType arg of
                                   PointerType (PointerType tp) -> do
@@ -416,54 +422,58 @@ realizeInstruction assignInstr@(IAssign trg name expr)
                                        DirectValue bv -> Right bv
                                    ) <$> argToExpr sz
       _ -> error $ "Unknown expression: "++show expr
-realizeInstruction (IStore val to) = reInject (\(ptr,val) -> do
-                                                  loc <- reMemLoc
-                                                  new_loc <- reNewMemLoc
-                                                  case val of
-                                                    Right ptr2 -> reMemInstr (MIStorePtr loc ptr2 ptr new_loc)
-                                                    Left v -> reMemInstr (MIStore loc (valValue v) ptr new_loc)
-                                                  return Nothing) $
-                                     (\(Right ptr) val -> (ptr,val)) <$>
-                                     (argToExpr to) <*>
-                                     (argToExpr val)
+realizeInstruction (IStore val to)
+  = reErrorAnn NullDeref *>
+    reErrorAnn Overrun *>
+    (reInject (\(ptr,val) -> do
+                  loc <- reMemLoc
+                  new_loc <- reNewMemLoc
+                  case val of
+                    Right ptr2 -> reMemInstr (MIStorePtr loc ptr2 ptr new_loc)
+                    Left v -> reMemInstr (MIStore loc (valValue v) ptr new_loc)
+                  return Nothing) $
+     (\(Right ptr) val -> (ptr,val)) <$>
+     (argToExpr to) <*>
+     (argToExpr val))
 realizeInstruction (ITerminator (ICall trg f args)) = case operandDesc f of
   ODFunction rtp fn argtps -> let args' = traverse (\arg -> (\r -> (r,operandType arg)) <$> argToExpr arg) args
                               in case intrinsics fn rtp argtps of
                                 Nothing -> reAddCall fn trg *> ((\args'' -> Just $ Call fn (fmap fst args'') trg) <$> args')
-                                Just (def,intr) -> (if def
-                                                    then reDefineVar trg (fn++"Result") (reInject (\args'' -> do
-                                                                                                      Just res <- intr args''
-                                                                                                      return res) args')
-                                                    else reInject (\args'' -> intr args'' >> return ()) args') *> pure Nothing
+                                Just (def,errs,intr) -> (traverse_ reErrorAnn errs) *>
+                                                        (if def
+                                                         then reDefineVar trg (fn++"Result") (reInject (\args'' -> do
+                                                                                                           Just res <- intr args''
+                                                                                                           return res) args')
+                                                         else reInject (\args'' -> intr args'' >> return ()) args') *> pure Nothing
 
 isIntrinsic :: String -> TypeDesc -> [TypeDesc] -> Bool
-isIntrinsic name rtp argtps = case intrinsics name rtp argtps :: Maybe (Bool,[(Either Val Int,TypeDesc)] -> RealizationMonad Int Int (Maybe (Either Val Int))) of
+isIntrinsic name rtp argtps = case intrinsics name rtp argtps :: Maybe (Bool,[ErrorDesc],[(Either Val Int,TypeDesc)] -> RealizationMonad Int Int (Maybe (Either Val Int))) of
   Nothing -> False
   Just _ -> True
 
-intrinsics :: (Enum ptr,Enum mem) => String -> TypeDesc -> [TypeDesc] -> Maybe (Bool,[(Either Val ptr,TypeDesc)] -> RealizationMonad mem ptr (Maybe (Either Val ptr)))
-intrinsics "llvm.memcpy.p0i8.p0i8.i64" _ _ = Just (True,intr_memcpy)
-intrinsics "llvm.memcpy.p0i8.p0i8.i32" _ _ = Just (True,intr_memcpy)
-intrinsics "llvm.memset.p0i8.i32" _ _ = Just (True,intr_memset)
-intrinsics "llvm.memset.p0i8.i64" _ _ = Just (True,intr_memset)
-intrinsics "llvm.stacksave" _ _ = Just (True,intr_stacksave)
-intrinsics "llvm.stackrestore" _ _ = Just (False,intr_stackrestore)
-intrinsics "nbis_restrict" _ _ = Just (False,intr_restrict)
-intrinsics "nbis_assert" _ _ = Just (False,intr_assert)
-intrinsics "nbis_nondet_i64" _ _ = Just (True,intr_nondet 64)
-intrinsics "nbis_nondet_i32" _ _ = Just (True,intr_nondet 32)
-intrinsics "nbis_nondet_i16" _ _ = Just (True,intr_nondet 16)
-intrinsics "nbis_nondet_i8" _ _ = Just (True,intr_nondet 8)
-intrinsics "nbis_nondet_u64" _ _ = Just (True,intr_nondet 64)
-intrinsics "nbis_nondet_u32" _ _ = Just (True,intr_nondet 32)
-intrinsics "nbis_nondet_u16" _ _ = Just (True,intr_nondet 16)
-intrinsics "nbis_nondet_u8" _ _ = Just (True,intr_nondet 8)
-intrinsics "nbis_watch" _ _ = Just (False,intr_watch)
-intrinsics "llvm.lifetime.start" _ _ = Just (False,intr_lifetime_start)
-intrinsics "llvm.lifetime.end" _ _ = Just (False,intr_lifetime_end)
-intrinsics "strlen" rtp _ = Just (True,intr_strlen (bitWidth' rtp))
-intrinsics "malloc" _ _ = Just (True,intr_malloc)
-intrinsics "free" _ _ = Just (False,intr_free)
+intrinsics :: (Enum ptr,Enum mem) => String -> TypeDesc -> [TypeDesc] -> Maybe (Bool,[ErrorDesc],[(Either Val ptr,TypeDesc)] -> RealizationMonad mem ptr (Maybe (Either Val ptr)))
+intrinsics "llvm.memcpy.p0i8.p0i8.i64" _ _ = Just (True,[Overrun],intr_memcpy)
+intrinsics "llvm.memcpy.p0i8.p0i8.i32" _ _ = Just (True,[Overrun],intr_memcpy)
+intrinsics "llvm.memset.p0i8.i32" _ _ = Just (True,[Overrun],intr_memset)
+intrinsics "llvm.memset.p0i8.i64" _ _ = Just (True,[Overrun],intr_memset)
+intrinsics "llvm.stacksave" _ _ = Just (True,[],intr_stacksave)
+intrinsics "llvm.stackrestore" _ _ = Just (False,[],intr_stackrestore)
+intrinsics "nbis_restrict" _ _ = Just (False,[],intr_restrict)
+intrinsics "nbis_assert" _ _ = Just (False,[Custom],intr_assert)
+intrinsics "nbis_nondet_i64" _ _ = Just (True,[],intr_nondet 64)
+intrinsics "nbis_nondet_i32" _ _ = Just (True,[],intr_nondet 32)
+intrinsics "nbis_nondet_i16" _ _ = Just (True,[],intr_nondet 16)
+intrinsics "nbis_nondet_i8" _ _ = Just (True,[],intr_nondet 8)
+intrinsics "nbis_nondet_u64" _ _ = Just (True,[],intr_nondet 64)
+intrinsics "nbis_nondet_u32" _ _ = Just (True,[],intr_nondet 32)
+intrinsics "nbis_nondet_u16" _ _ = Just (True,[],intr_nondet 16)
+intrinsics "nbis_nondet_u8" _ _ = Just (True,[],intr_nondet 8)
+intrinsics "nbis_watch" _ _ = Just (False,[],intr_watch)
+intrinsics "llvm.lifetime.start" _ _ = Just (False,[],intr_lifetime_start)
+intrinsics "llvm.lifetime.end" _ _ = Just (False,[],intr_lifetime_end)
+intrinsics "strlen" rtp _ = Just (True,[],intr_strlen (bitWidth' rtp))
+intrinsics "malloc" _ _ = Just (True,[],intr_malloc)
+intrinsics "free" _ _ = Just (False,[DoubleFree],intr_free)
 intrinsics _ _ _ = Nothing
 
 intr_memcpy [(Right to,_),(Right from,_),(Left len,_),_,_] = do
