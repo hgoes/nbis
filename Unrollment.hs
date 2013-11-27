@@ -28,7 +28,7 @@ import qualified Data.Graph.Inductive as Gr
 import Data.Traversable
 import Data.Foldable
 import Data.Proxy
-import Prelude hiding (sequence,mapM,mapM_,foldl,all,concat)
+import Prelude hiding (sequence,mapM,mapM_,foldl,all,concat,any,minimum)
 import Data.Ord
 import Data.Maybe (catMaybes)
 import Control.Monad.Trans (lift,liftIO)
@@ -106,12 +106,17 @@ data UnrollConfig mloc ptr = UnrollCfg { unrollDoMerge :: String -> Ptr BasicBlo
                                        , unrollFunctions :: Map String (UnrollFunInfo mloc ptr)
                                        , unrollCfgGlobals :: Map (Ptr GlobalVariable) (TypeDesc, Maybe MemContent)
                                        , unrollBlockOrder :: [(String,Ptr BasicBlock,Integer)]
+                                       , unrollDistances :: Map (Ptr BasicBlock,Integer) DistanceInfo
                                        }
 
 data UnrollFunInfo mloc ptr = UnrollFunInfo { unrollFunInfoBlocks :: Map (Ptr BasicBlock,Integer) (Maybe String,RealizationInfo,RealizationMonad mloc ptr (BlockFinalization ptr),Set (Ptr Instruction))
                                             , unrollFunInfoStartBlock :: (Ptr BasicBlock,Integer)
                                             , unrollFunInfoArguments :: [(Ptr Argument, TypeDesc)]
                                             }
+
+data DistanceInfo = DistInfo { distanceToReturn :: Maybe Integer
+                             , distanceToError :: Maybe Integer
+                             } deriving (Show,Eq,Ord)
 
 type UnrollMonad a mem mloc ptr = StateT (UnrollEnv a mem mloc ptr) SMT
 
@@ -164,6 +169,7 @@ mergePointConfig' entry (funs,globs,ptrWidth,alltps,structs) select
               , unrollDoMerge = \fname blk sblk -> Set.member (fname,blk,sblk) selectedMergePoints
               , unrollCfgGlobals = globs
               , unrollBlockOrder = order
+              , unrollDistances = distInfo
               }
   where
     ext_funs = fmap (\(args,_,blks,_,_) -> let (start_blk,_,_) = head blks
@@ -226,6 +232,7 @@ mergePointConfig' entry (funs,globs,ptrWidth,alltps,structs) select
     [dffTree] = Gr.dff [start_nd] prog_gr
     order = reverse $ fmap (\nd -> let Just inf = Gr.lab prog_gr nd in inf) $ Gr.postorder dffTree
     selectedMergePoints = select ext_funs prog_gr
+    distInfo = calculateDistanceInfo (const True) ext_funs entry
 
 reachabilityInfo :: Map (Ptr BasicBlock,Integer) (Maybe String,RealizationInfo,RealizationMonad mloc ptr (BlockFinalization ptr))
                     -> Map (Ptr BasicBlock,Integer) (Map (Ptr BasicBlock,Integer) (Set (Ptr BasicBlock,Integer)))
@@ -798,3 +805,115 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
 
 allProxies :: UnrollEnv a mem mloc ptr -> [SMTExpr Bool]
 allProxies env = [ mergeActivationProxy nd | nd <- Map.elems (unrollMergeNodes env) ]
+
+data DistanceState
+  = DistanceState { calculatedDistances :: Map (Ptr BasicBlock,Integer) DistanceInfo
+                  , delayedDistances :: Map (Ptr BasicBlock,Integer)
+                                        [((Ptr BasicBlock,Integer),DistanceInfo -> DistanceInfo)]
+                  , delayedDistanceTargets :: Set (Ptr BasicBlock,Integer)
+                  }
+
+instance Show DistanceState where
+  show dist = "{ calulated: "++show (Map.keys $ calculatedDistances dist)++", delayed: "++show (Set.toList $ delayedDistanceTargets dist)++" }"
+
+addDistanceInfo :: (Ptr BasicBlock,Integer) -> DistanceInfo -> DistanceState -> DistanceState
+addDistanceInfo blk info st
+  = let st1 = st { calculatedDistances = Map.insert blk info (calculatedDistances st) }
+        st2 = case Map.updateLookupWithKey (\_ _ -> Nothing) blk (delayedDistances st1) of
+          (Nothing,_) -> st1
+          (Just delays,ndel) -> foldl (\cst (delBlk,f)
+                                        -> addDistanceInfo delBlk (f info)
+                                           (cst { delayedDistanceTargets = Set.delete delBlk
+                                                                           (delayedDistanceTargets cst)
+                                                })
+                                      ) (st1 { delayedDistances = ndel }) delays
+    in st2
+
+delayDistanceInfo :: (Ptr BasicBlock,Integer) -> (Ptr BasicBlock,Integer) -> (DistanceInfo -> DistanceInfo)
+                     -> DistanceState -> DistanceState
+delayDistanceInfo blk dep f st
+  = st { delayedDistances = Map.insertWith (++) dep [(blk,f)]
+                            (delayedDistances st)
+       , delayedDistanceTargets = Set.insert blk (delayedDistanceTargets st)
+       }
+
+isDistanceDelayed :: (Ptr BasicBlock,Integer) -> DistanceState -> Bool
+isDistanceDelayed blk st = Set.member blk (delayedDistanceTargets st)
+
+getCalculatedDistance :: (Ptr BasicBlock,Integer) -> DistanceState -> Maybe DistanceInfo
+getCalculatedDistance blk st = Map.lookup blk (calculatedDistances st)
+
+addDistanceDependingOn :: (Ptr BasicBlock,Integer) -> Maybe DistanceInfo -> (Ptr BasicBlock,Integer) -> (DistanceInfo -> DistanceInfo) -> DistanceState -> (Maybe DistanceInfo,DistanceState)
+addDistanceDependingOn dep Nothing trg f state
+  = (Nothing,delayDistanceInfo trg dep f state)
+addDistanceDependingOn dep (Just depRes) trg f state
+  = let res = f depRes
+    in (Just res,addDistanceInfo trg res state)
+
+calculateDistanceInfo :: (ErrorDesc -> Bool) -> Map String (UnrollFunInfo mloc ptr) -> String -> Map (Ptr BasicBlock,Integer) DistanceInfo
+calculateDistanceInfo isInteresting mp fun
+  = let Just finfo = Map.lookup fun mp
+        (_,distState) = calculateBlk finfo (unrollFunInfoStartBlock finfo) (DistanceState { calculatedDistances = Map.empty
+                                                                                          , delayedDistances = Map.empty
+                                                                                          , delayedDistanceTargets = Set.empty }) Set.empty
+    in if Set.null (delayedDistanceTargets distState)
+       then calculatedDistances distState
+       else error $ "The following blocks are delayed indefinitely: "++show (Set.toList (delayedDistanceTargets distState))
+  where
+    calculateBlk finfo blk state stack = case getCalculatedDistance blk state of -- Is the result already available?
+      Just dist -> (Just dist,state)
+      Nothing
+        -> if Set.member blk stack -- Is the node in the search stack?
+           then (Nothing,state)
+           else (if isDistanceDelayed blk state -- Is the node already delayed?
+                 then (Nothing,state)
+                 else case Map.lookup blk (unrollFunInfoBlocks finfo) of
+                   Just (_,info,_,_)
+                     -> let hasErr = any isInteresting (rePotentialErrors info)
+                            isRet = reReturns info
+                        in if isRet
+                           then (let dist = DistInfo (Just 0) (if hasErr
+                                                               then Just 0
+                                                               else Nothing)
+                                 in (Just dist,addDistanceInfo blk dist state))
+                           else case Set.toList (reCalls info) of
+                             [(fn,_)]
+                               -> let Just finfo' = Map.lookup fn mp
+                                      sblk = unrollFunInfoStartBlock finfo'
+                                      (distF,state1)
+                                        = calculateBlk finfo' sblk state
+                                          (Set.insert blk stack)
+                                      nxtBlk = (fst blk,snd blk+1)
+                                      (distN,state2)
+                                        = calculateBlk finfo nxtBlk state1
+                                          (Set.insert blk stack)
+                                  in case distF of
+                                    Nothing -> (Nothing,state1)
+                                    Just distF' -> case distanceToReturn distF' of
+                                      Nothing -> let dist = DistInfo Nothing (if hasErr
+                                                                              then Just 0
+                                                                              else fmap (+1) $ distanceToError distF')
+                                                 in (Just dist,addDistanceInfo blk dist state)
+                                      Just lenF -> addDistanceDependingOn nxtBlk distN blk (\distN' -> DistInfo { distanceToReturn = fmap (\x -> x+lenF+1) (distanceToReturn distN')
+                                                                                                                , distanceToError = if hasErr
+                                                                                                                                    then Just 0
+                                                                                                                                    else case distanceToReturn distF' of
+                                                                                                                                      Just distErrF -> Just (distErrF+1)
+                                                                                                                                      Nothing -> fmap (\x -> x+lenF+1) (distanceToError distN') }
+                                                                                           ) state2
+                             _ -> let (nstate,dists) = mapAccumL (\cstate sucBlk -> let (res,cstate') = calculateBlk finfo sucBlk cstate (Set.insert blk stack)
+                                                                                    in (cstate',res)
+                                                                 ) state (fmap (\blk -> (blk,0)) $ Set.toList (reSuccessors info))
+                                      dists' = catMaybes dists
+                                      distToRet = case catMaybes (fmap distanceToReturn dists') of
+                                        [] -> Nothing
+                                        xs -> Just $ (minimum xs)+1
+                                      distToErr = if hasErr
+                                                  then Just 0
+                                                  else case catMaybes (fmap distanceToError dists') of
+                                                    [] -> Nothing
+                                                    xs -> Just $ (minimum xs)+1
+                                      dist = DistInfo { distanceToReturn = distToRet
+                                                      , distanceToError = distToErr }
+                                  in (Just dist,addDistanceInfo blk dist nstate)
+                             )
