@@ -2,20 +2,13 @@
 module Program where
 
 import MemoryModel
-import Analyzation
 import TypeDesc
 import InstrDesc
 
-import Control.Monad.Trans
 import Data.Map as Map hiding (foldl)
 import Data.Set as Set hiding (foldl)
-import qualified Foreign.Marshal.Alloc as Alloc
 import Foreign.Ptr as FFI
-import Foreign.Storable
-import Language.SMTLib2
 import Prelude as P hiding (foldl,concat)
-import Data.Foldable
-import Foreign.Ptr
 import Foreign.C.String
 import Foreign.Marshal.Array
 import Data.Maybe (catMaybes)
@@ -23,7 +16,6 @@ import Control.Concurrent.MVar
 import Data.Proxy
 import Data.Tree
 
-import LLVM.FFI.Instruction
 import LLVM.FFI.BasicBlock
 import LLVM.FFI.Constant
 import LLVM.FFI.MemoryBuffer
@@ -82,6 +74,7 @@ getUsedTypes mod = do
 
 data LoopDesc = LoopDesc { loopDescPtr :: Ptr Loop
                          , loopDescUniquePath :: Bool
+                         , loopDescHeader :: Ptr BasicBlock
                          , loopDescBlocks :: [Ptr BasicBlock]
                          , loopDescSubs :: [LoopDesc]
                          } deriving Show
@@ -89,9 +82,10 @@ data LoopDesc = LoopDesc { loopDescPtr :: Ptr Loop
 reifyLoop :: Ptr Loop -> IO LoopDesc
 reifyLoop loop = do
   backEdges <- loopGetNumBackEdges loop
+  hdr <- loopGetHeader loop
   blks <- loopGetBlocks loop >>= vectorToList
   subs <- loopGetSubLoops loop >>= vectorToList >>= mapM reifyLoop
-  return $ LoopDesc loop (backEdges==1) blks subs
+  return $ LoopDesc loop (backEdges==1) hdr blks subs
 
 type DomTree = Tree (Ptr BasicBlock)
 
@@ -107,6 +101,7 @@ passes :: String -> MVar (Map String ([LoopDesc],Maybe DomTree)) -> [APass]
 passes entry var
   = [APass createPromoteMemoryToRegisterPass
     ,APass createConstantPropagationPass
+    ,APass createSimplifyLibCallsPass
     ,APass createIndVarSimplifyPass
     ,APass createLoopSimplifyPass
     ,APass createCFGSimplificationPass
@@ -143,7 +138,6 @@ passes entry var
                                                       end <- loopInfoBaseEnd base
                                                       loop_list <- vectorIteratorToList begin end
                                                       loops <- mapM reifyLoop loop_list
-                                                      print "REIFY DOMTREE"
                                                       dt <- dominatorTreeGetRootNode analysis_dt >>= reifyDomTree
                                                       return (loops,Just dt)
                                                   )
