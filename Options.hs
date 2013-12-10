@@ -1,7 +1,9 @@
 module Options where
 
+import MemoryModel
 import System.Environment (getArgs)
 import System.Console.GetOpt
+import qualified Data.List as List
 
 data MemoryModelOption = Rivers
                        | Snow
@@ -13,8 +15,7 @@ data Options = Options
                , files :: [String]
                , memoryModelOption :: MemoryModelOption
                , solver :: Maybe String
-               , checkUser :: Bool
-               , checkMemoryAccess :: Bool
+               , checkErrors :: [ErrorDesc]
                , showHelp :: Bool
                , manualMergeNodes :: Maybe [(String,String,Integer)]
                } deriving (Eq,Ord,Show)
@@ -28,8 +29,7 @@ defaultOptions = Options { entryPoint = "main"
                          , files = []
                          , memoryModelOption = Rivers
                          , solver = Nothing
-                         , checkUser = False
-                         , checkMemoryAccess = False
+                         , checkErrors = [Custom]
                          , showHelp = False
                          , manualMergeNodes = Nothing }
 
@@ -42,11 +42,22 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
                                                                            _ -> error $ "Unknown memory model "++show str
                                                                       }) "model") "Memory model to use (rivers or snow)"
               ,Option [] ["solver"] (ReqArg (\str opt -> opt { solver = Just str }) "smt-binary") "The SMT solver to use to solve the generated instance"
-              ,Option [] ["check-user"] (NoArg (\opt -> opt { checkUser = True })) "Validate user assertions"
-              ,Option [] ["check-mem"] (NoArg (\opt -> opt { checkMemoryAccess = True })) "Validate memory accesses"
+              ,Option [] ["check-errors"] (ReqArg (\str opt -> opt { checkErrors = fmap (\n -> case n of
+                                                                                            "user" -> Custom
+                                                                                            "null" -> NullDeref
+                                                                                            "invalid" -> Overrun
+                                                                                            "free-access" -> FreeAccess
+                                                                                            "double-free" -> DoubleFree
+                                                                                        ) (splitOptions str) }) "opts") "A comma seperated list of bug types which should be checked:\n  user - User defined assertions\n  null - Null pointer dereferentiations\n  invalid - Invalid memory accesses\n  free-access - Access to freed memory locations\n  double-free - Double frees of memory locations"
               ,Option [] ["merge-nodes"] (ReqArg (\str opt -> opt { manualMergeNodes = Just (read str) }) "list") "A list of merge nodes to use"
               ,Option ['h'] ["help"] (NoArg (\opt -> opt { showHelp = True })) "Show this help"
               ]
+
+splitOptions :: String -> [String]
+splitOptions "" = []
+splitOptions xs = case List.break (==',') xs of
+  (x,[]) -> [x]
+  (x,',':rest) -> x:splitOptions rest
 
 getOptions :: IO Options
 getOptions = do
