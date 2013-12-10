@@ -5,7 +5,6 @@ import Data.List (nub)
 
 import Language.SMTLib2
 import Language.SMTLib2.Internals
-import Language.SMTLib2.Functions
 
 isFalse :: SMTExpr Bool -> Bool
 isFalse (Const False _) = True
@@ -23,22 +22,22 @@ simplifier (App f xs)
       Nothing -> Const False ()
       Just [] -> Const True ()
       Just [x] -> x
-      Just xs -> App And xs
+      Just xs -> App (SMTLogic And) xs
   Just Or -> case cast xs of
     Just ys -> case simplifyOr ys of
       Nothing -> Const True ()
       Just [] -> Const False ()
       Just [x] -> x
-      Just xs -> App Or (nub xs)
+      Just xs -> App (SMTLogic Or) (nub xs)
   Just _ -> App f xs
-  Nothing -> case cast f of
-    Just Not -> case cast xs of
+  Nothing -> case f of
+    SMTNot -> case cast xs of
       Just x -> let x' = simplifier x
                 in if isFalse x'
                    then Const True ()
                    else (if isTrue x'
                          then Const False ()
-                         else App Not x')
+                         else App SMTNot x')
     _ -> App f xs
   where
     simplifyAnd [] = Just []
