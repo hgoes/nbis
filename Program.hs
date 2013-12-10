@@ -157,7 +157,6 @@ applyOptimizations mod entry = do
   passManagerRun pm mod
   deletePassManager pm
   res <- takeMVar var
-  moduleDump mod
   return res
 
 getTargetLibraryInfo :: Ptr Module -> IO (Ptr TargetLibraryInfo)
@@ -186,9 +185,7 @@ getProgram is_intr entry file = do
   diag <- newSMDiagnostic
   ctx <- newLLVMContext
   mod <- parseIR buf diag ctx
-  print "Running optimizations..."
   loop_mp <- applyOptimizations mod entry
-  print "done."
   tli <- getTargetLibraryInfo mod
   dl <- getDataLayout mod
   ptrWidth <- dataLayoutPointerSize dl 0
