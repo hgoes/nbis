@@ -22,6 +22,7 @@ data ErrorDesc = Custom
                | Overrun
                | Underrun
                | FreeAccess
+               | DoubleFree
                deriving (Show,Eq,Ord)
 
 type DynNum = Either Integer (SMTExpr (BitVector BVUntyped))
@@ -51,19 +52,19 @@ data CopyOptions = CopyOpts { copySizeLimit :: Maybe DynNum -- ^ A size in bytes
 
 type MemoryProgram m p = [MemoryInstruction m p]
 
-class MemoryModel m mloc ptr where
+class MemoryModel mem mloc ptr where
   memNew :: Proxy mloc
             -> Integer      -- ^ Pointer width
             -> Set TypeDesc      -- ^ A set of all types occuring in the program
             -> Map String [TypeDesc] -- ^ The content of all named structs
             -> [(ptr,TypeDesc,Maybe MemContent)] -- ^ Global variables
-            -> SMT m
-  makeEntry :: Proxy ptr -> m -> mloc -> SMT m
-  addProgram :: m -> SMTExpr Bool -> [mloc] -> MemoryProgram mloc ptr -> Map ptr TypeDesc -> SMT m
-  connectLocation :: m -> Proxy ptr -> SMTExpr Bool -> mloc -> mloc -> SMT m
-  connectPointer :: m -> Proxy mloc -> SMTExpr Bool -> ptr -> ptr -> SMT m
-  memoryErrors :: m -> Proxy mloc -> Proxy ptr -> [(ErrorDesc,SMTExpr Bool)]
-  debugMem :: m -> Proxy mloc -> Proxy ptr -> String
+            -> SMT mem
+  makeEntry :: Proxy ptr -> mem -> mloc -> SMT mem
+  addProgram :: mem -> SMTExpr Bool -> [mloc] -> MemoryProgram mloc ptr -> Map ptr TypeDesc -> SMT mem
+  connectLocation :: mem -> Proxy ptr -> SMTExpr Bool -> mloc -> mloc -> SMT mem
+  connectPointer :: mem -> Proxy mloc -> SMTExpr Bool -> ptr -> ptr -> SMT mem
+  memoryErrors :: mem -> Proxy mloc -> Proxy ptr -> [(ErrorDesc,SMTExpr Bool)]
+  debugMem :: mem -> Proxy mloc -> Proxy ptr -> String
 
 memInstrSrc :: MemoryInstruction m p -> Maybe m
 memInstrSrc (MINull _ _) = Nothing
