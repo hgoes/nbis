@@ -152,7 +152,8 @@ instance (Ord ptr,Ord mloc,Show ptr,Show mloc) => MemoryModel (RiverMemory mloc 
   memoryErrors mem _ _ = riverErrors mem
   debugMem mem _ _ = debugRiver mem
 
-addInstructions :: (Ord ptr,Ord mloc,Show ptr,Show mloc) => Map ptr TypeDesc
+addInstructions :: (Ord ptr,Ord mloc,Show ptr,Show mloc)
+                   => Map ptr TypeDesc
                    -> RiverMemory mloc ptr
                    -> [(SMTExpr Bool,MemoryInstruction mloc ptr)]
                    -> SMT (RiverMemory mloc ptr)
@@ -223,7 +224,8 @@ mergeUpdates cond u1 u2
                                                                           })) (newObjects u1) (newObjects u2)
            }
 
-getObject :: Ord mloc => RiverMemory mloc ptr -> mloc -> RiverObjectRef -> SMT (ObjectInfo,RiverMemory mloc ptr)
+getObject :: Ord mloc => RiverMemory mloc ptr -> mloc -> RiverObjectRef
+             -> SMT (ObjectInfo,RiverMemory mloc ptr)
 getObject mem loc ref = case Map.lookup ref (riverObjectTypes mem) of
   Just (tp,sz) -> case Map.lookup loc (riverLocations mem) of
     Nothing -> do
@@ -243,11 +245,17 @@ getObject mem loc ref = case Map.lookup ref (riverObjectTypes mem) of
                                             (riverLocations mem)
                          })
       Just obj -> return (obj,mem)
+  Nothing -> error $ "Failed to retrieve object "++show ref
 
 unionReachability :: RiverReachability -> RiverReachability -> RiverReachability
 unionReachability = Map.unionWith (\reach1 reach2 -> case (reach1,reach2) of
                                       (Just r1,Just r2) -> Just (Set.union r1 r2)
                                       _ -> Nothing)
+
+data Choice a b
+  = OnlyLeft a
+  | OnlyRight b
+  | Both a b
 
 updateInstruction :: (Ord mloc,Ord ptr) => Update mloc ptr -> RiverMemory mloc ptr -> SMT (Update mloc ptr,[(ErrorDesc,SMTExpr Bool)])
 updateInstruction upd mem = do
@@ -338,26 +346,25 @@ updateInstruction upd mem = do
                                    )
                                   ) Map.empty $
                        Map.difference (ptrStoresByTrgPtr $ riverProgram mem) (newPtrReachability upd)
-      newObjReachStoreMp = Map.intersectionWithKey
-                           (\ptrSrc stores nreach
-                            -> let Just ptrSrcInfo = Map.lookup ptrSrc (riverPointers mem)
-                               in Map.foldlWithKey'
-                                  (\cupd (mfrom,mto) (ptrTrg,act)
-                                   -> let Just ptrTrgInfo = Map.lookup ptrTrg (riverPointers mem)
-                                      in Map.insert mto (fmap (const nreach) (pointerReachability ptrTrgInfo)) cupd
-                                  ) Map.empty stores
+      newObjReachStoreMp = Map.intersectionWith
+                           (\stores nreach
+                            -> Map.foldlWithKey'
+                               (\cupd (_,mto) (ptrTrg,act)
+                                -> let Just ptrTrgInfo = Map.lookup ptrTrg (riverPointers mem)
+                                   in Map.insert mto (fmap (const nreach) (pointerReachability ptrTrgInfo)) cupd
+                               ) Map.empty stores
                            ) (ptrStoresBySrcPtr $ riverProgram mem)
                            (newPtrReachability upd)
       newObjReachStore = Map.foldl' Map.union Map.empty newObjReachStoreMp
-      newPtrReachLoadsMp = Map.intersectionWithKey
-                           (\mfrom loads nreach
-                             -> foldl' (\cupd (src,trg,act)
+      newPtrReachLoadsMp = Map.intersectionWith
+                           (\loads nreach
+                             -> foldl' (\cupd (src,trg,_)
                                         -> let Just srcInfo = Map.lookup src (riverPointers mem)
                                                nreach' = Map.foldlWithKey'
                                                          (\cupd' reachObj _
                                                           -> case Map.lookup reachObj nreach of
                                                             Nothing -> cupd'
-                                                            Just nreach' -> unionReachability cupd' nreach'
+                                                            Just nreach'' -> unionReachability cupd' nreach''
                                                          ) Map.empty (pointerReachability srcInfo)
                                            in if Map.null nreach'
                                               then cupd
@@ -411,6 +418,36 @@ updateInstruction upd mem = do
                        (\trgs nreach
                         -> fmap (const nreach) trgs
                        ) (locPhisBySrc $ riverProgram mem) (newObjReachability upd)
+      setMp = Map.intersectionWithKey
+              (\ptrTrg sets nreach
+               -> let Just ptrTrgInfo = Map.lookup ptrTrg (riverPointers mem)
+                  in Map.foldlWithKey'
+                     (\(cupd,errs) (mfrom,mto) (byte,len,act)
+                      -> let Just locFrom = Map.lookup mfrom (riverLocations mem)
+                             newObjs1 = Map.findWithDefault Map.empty mfrom (newObjects upd)
+                             (newObjs2,nerrs) = updateSet byte len locFrom ptrTrgInfo act nreach
+                         in (Map.insert mto (Map.union newObjs2 newObjs1) cupd,nerrs++errs)
+                     ) (Map.empty,[]) sets
+              ) (memSetsByPtr $ riverProgram mem) (newPtrReachability upd)
+      (setUpds,setErrs) = Map.foldl' (\(cupd,cerr) (nupd,nerr) -> (Map.union cupd nupd,nerr++cerr)
+                                     ) (Map.empty,[]) setMp
+      noSetUpds = Map.foldl' (Map.foldlWithKey'
+                              (\cupd (mfrom,mto) _ -> case Map.lookup mfrom (newObjects upd) of
+                                  Nothing -> cupd
+                                  Just nobjs -> Map.insert mto nobjs cupd
+                              )
+                             ) Map.empty $
+                  Map.difference (memSetsByPtr $ riverProgram mem) (newPtrReachability upd)
+      {-copyMp = Map.intersectionWithKey
+               (\ptrSrc copies nreach
+                -> let Just ptrSrcInfo = Map.lookup ptrSrc (riverPointers mem)
+                   in Map.foldlWithKey'
+                      (\(cupd,errs) (mfrom,mto) (ptrTrg,opts)
+                        -> let Just locFrom = Map.lookup mfrom (riverLocations mem)
+                               newObjs1 = Map.findWithDefault Map.empty mfrom (newObjects upd)
+                               (newObjs2,nerrs) = updateCopy 
+                                         ) (memCopyBySrcPtr $ riverProgram mem) (newPtrReachability upd)-}
+
   return (allocUpds `mappend`
           (noUpdate { newPtrReachability = loadPtrUpds }) `mappend`
           (noUpdate { newObjects = storeUpds }) `mappend`
@@ -423,8 +460,10 @@ updateInstruction upd mem = do
           (noUpdate { newPtrReachability = newPtrReachCast }) `mappend`
           (noUpdate { newPtrReachability = newPtrReachIdx }) `mappend`
           (noUpdate { newObjects = newObjsPhi }) `mappend`
-          (noUpdate { newObjReachability = newObjReachPhi }),
-          loadErrs'++loadPtrErrs++storeErrs++ptrStoreErrs)
+          (noUpdate { newObjReachability = newObjReachPhi }) `mappend`
+          (noUpdate { newObjects = setUpds }) `mappend`
+          (noUpdate { newObjects = noSetUpds }),
+          loadErrs'++loadPtrErrs++storeErrs++ptrStoreErrs++setErrs)
   where
     updateMem :: (SMTExpr Bool -> ObjectInfo -> Offset -> (Maybe ObjectInfo,a,[(ErrorDesc,SMTExpr Bool)]))
                  -> PointerInfo -> RiverLocation -> SMTExpr Bool
@@ -456,7 +495,7 @@ updateInstruction upd mem = do
                                                           offRepr (riverPointerWidth mem)
                                                           (riverPointerOffset mem) soff)
                                                   (obj',res',errs') = f (act .&&. cond) obj off
-                                                  nobj = case obj' of
+                                                  nobj' = case obj' of
                                                     Nothing -> cobj
                                                     Just o -> case cobj of
                                                       Nothing -> Just o
@@ -466,7 +505,7 @@ updateInstruction upd mem = do
                                                                                    , objectReachability = unionReachability
                                                                                                           (objectReachability o)
                                                                                                           (objectReachability o') }
-                                              in (nobj,res':res,errs'++cerrs)
+                                              in (nobj',res':res,errs'++cerrs)
                                           ) (Nothing,[],[]) offs
                            in (case nobj of
                                   Nothing -> objs
@@ -489,7 +528,7 @@ updateInstruction upd mem = do
                                                 Just loadRes' -> assert $ cond .=>. (res .==. loadRes')
                                           in (Nothing,action,errs)
                                      ) ptrInfo locInfo act nreach
-      sequence loads
+      sequence_ loads
       return errs
     updatePtrLoad :: PointerInfo -> RiverLocation -> PointerInfo -> SMTExpr Bool
                      -> RiverReachability -> SMT (RiverReachability,[(ErrorDesc,SMTExpr Bool)])
@@ -503,7 +542,7 @@ updateInstruction upd mem = do
                                                                                       (pointerOffset ptrToInfo)) .==. loadRes')
                                           in (Nothing,(action,objectReachability obj),errs)
                                      ) ptrFromInfo locInfo act nreach
-      sequence $ fmap fst loads
+      sequence_ $ fmap fst loads
       return (foldl unionReachability Map.empty $ fmap snd loads,errs)
     updateStore :: SMTExpr (BitVector BVUntyped) -> RiverLocation -> PointerInfo -> SMTExpr Bool
                    -> RiverReachability -> (Map RiverObjectRef ObjectInfo,[(ErrorDesc,SMTExpr Bool)])
@@ -516,6 +555,21 @@ updateInstruction upd mem = do
                                              in (Just $ obj { objectRepresentation = obj' },(),errs')
                                          ) ptr' locFrom act nreach
         in (newObjs,errs)
+    updateSet :: DynNum -> DynNum -> RiverLocation -> PointerInfo -> SMTExpr Bool
+              -> RiverReachability -> (Map RiverObjectRef ObjectInfo,[(ErrorDesc,SMTExpr Bool)])
+    updateSet byte len locFrom ptrInfo act nreach
+      = let (newObjs,_,errs) = updateMem (\cond obj off
+                                          -> let (obj',errs') = setObject cond byte len
+                                                                (objectRepresentation obj) off
+                                             in (Just $ obj { objectRepresentation = obj' },(),errs')
+                                         ) ptrInfo locFrom act nreach
+        in (newObjs,errs)
+    {-updateCopyBySrc :: CopyOptions -> RiverLocation -> PointerInfo -> PointerInfo -> SMTExpr Bool
+                    -> RiverReachability -> (Map RiverObjectRef ObjectInfo,[(ErrorDesc,SMTExpr Bool)])
+    updateCopyBySrc opts locFrom ptrFrom ptrTo act nreach
+      = Map.mapWithKey (\objToReach (pointerReachability ptrTo)
+        let (newObjs,_,errs) = updateMem (\cond obj off
+                                          -> let (obj',errs') = copyObject cond opts (objectRepresentation obj) (-}
 
 applyUpdate :: (Ord mloc,Ord ptr,Show mloc,Show ptr) => RiverMemory mloc ptr -> Update mloc ptr -> RiverMemory mloc ptr
 applyUpdate mem upd
@@ -630,8 +684,8 @@ initUpdate _ mem act instr@(MIAlloc mfrom tp sz ptr mto) = do
                                                                         , objectReachability = Map.empty })) (newObjects upd')
                , newPtrReachability = Map.insert ptr (Map.singleton (riverNextObject mem) (Just $ Set.singleton 0)) (newPtrReachability upd')
                })
-initUpdate ptrs mem act instr@(MILoad mfrom ptr res) = do
-  (ptrInfo,mem1) <- getPointer mem ptrs ptr
+initUpdate ptrs mem act instr@(MILoad mfrom ptr _) = do
+  (_,mem1) <- getPointer mem ptrs ptr
   let mem2 = mem1 { riverLocations = insertIfNotPresent mfrom (RiverLocation Map.empty)
                                      (riverLocations mem1)
                   }
@@ -640,15 +694,15 @@ initUpdate ptrs mem act instr@(MILoad mfrom ptr res) = do
   return (mem2 { riverErrors = errs++(riverErrors mem2) },upd')
 initUpdate ptrs mem act instr@(MILoadPtr mfrom ptrFrom ptrTo) = do
   (_,mem1) <- getPointer mem ptrs ptrFrom
-  (ptrInfo,mem2) <- getPointer mem1 ptrs ptrTo
+  (_,mem2) <- getPointer mem1 ptrs ptrTo
   let mem3 = mem2 { riverLocations = insertIfNotPresent mfrom (RiverLocation Map.empty)
                                      (riverLocations mem2) }
       upd1 = updateFromPtr mem3 ptrFrom
       upd2 = updateFromPtr mem3 ptrTo
   (upd3,errs) <- updateInstruction (mappend upd1 upd2) (mem3 { riverProgram = addInstruction act instr memGraphEmpty })
   return (mem3 { riverErrors = errs++(riverErrors mem3) },upd3)
-initUpdate ptrs mem act instr@(MIStore mfrom word ptr mto) = do
-  (ptrInfo,mem1) <- getPointer mem ptrs ptr
+initUpdate ptrs mem act instr@(MIStore mfrom _ ptr mto) = do
+  (_,mem1) <- getPointer mem ptrs ptr
   let mem2 = mem1 { riverLocations = insertIfNotPresent mfrom (RiverLocation Map.empty) $
                                      insertIfNotPresent mto (RiverLocation Map.empty) $
                                      riverLocations mem1
@@ -659,7 +713,7 @@ initUpdate ptrs mem act instr@(MIStore mfrom word ptr mto) = do
   return (mem2 { riverErrors = errs++(riverErrors mem2) },upd3)
 initUpdate ptrs mem act instr@(MIStorePtr mfrom ptrFrom ptrTo mto) = do
   (_,mem1) <- getPointer mem ptrs ptrFrom
-  (ptrInfo,mem2) <- getPointer mem1 ptrs ptrTo
+  (_,mem2) <- getPointer mem1 ptrs ptrTo
   let mem3 = mem2 { riverLocations = insertIfNotPresent mfrom (RiverLocation Map.empty) $
                                      insertIfNotPresent mto (RiverLocation Map.empty) $
                                      riverLocations mem2
@@ -712,7 +766,7 @@ initUpdate ptrs mem act instr@(MICast _ _ ptrFrom ptrTo) = do
       upd = updateFromPtr mem2 ptrFrom
   (upd',errs) <- updateInstruction upd (mem2 { riverProgram = addInstruction act instr memGraphEmpty })
   return (mem2 { riverErrors = errs++(riverErrors mem2) },upd')
-initUpdate ptrs mem act instr@(MIIndex tpFrom tpTo idx ptrFrom ptrTo) = do
+initUpdate ptrs mem act instr@(MIIndex tpFrom _ idx ptrFrom ptrTo) = do
   (infoFrom,mem1) <- getPointer mem ptrs ptrFrom
   let tp_to = ptrs!ptrTo
       off = buildOffset (riverPointerWidth mem1) (riverStructs mem1) tpFrom idx
@@ -726,7 +780,7 @@ initUpdate ptrs mem act instr@(MIIndex tpFrom tpTo idx ptrFrom ptrTo) = do
       upd = updateFromPtr mem2 ptrFrom
   (upd',errs) <- updateInstruction upd (mem2 { riverProgram = addInstruction act instr memGraphEmpty })
   return (mem2 { riverErrors = errs++(riverErrors mem2) },upd')
-initUpdate ptrs mem act instr@(MIPhi cases mto) = do
+initUpdate _ mem act instr@(MIPhi cases mto) = do
   let (mem1,upd) = buildCases (mem { riverLocations = insertIfNotPresent mto (RiverLocation Map.empty)
                                                       (riverLocations mem)
                                    }) cases
@@ -744,6 +798,39 @@ initUpdate ptrs mem act instr@(MIPhi cases mto) = do
             upd1 = updateFromLoc cmem1 loc
             (cmem2,upd2) = buildCases cmem1 locs
         in (cmem2,mergeUpdates (Just c) upd1 upd2)
+initUpdate ptrs mem act instr@(MISet mfrom ptr _ _ mto) = do
+  (_,mem1) <- getPointer mem ptrs ptr
+  let mem2 = mem1 { riverLocations = insertIfNotPresent mfrom (RiverLocation Map.empty) $
+                                     insertIfNotPresent mto (RiverLocation Map.empty) $
+                                     riverLocations mem1
+                  }
+      upd1 = updateFromPtr mem2 ptr
+      upd2 = updateFromLoc mem2 mfrom
+      upd = upd1 `mappend` upd2
+  (upd',errs) <- updateInstruction upd (mem2 { riverProgram = addInstruction act instr memGraphEmpty })
+  return (mem2 { riverErrors = errs++(riverErrors mem1) },upd')
+initUpdate ptrs mem act instr@(MICopy mfrom ptrFrom ptrTo _ mto) = do
+  (_,mem1) <- getPointer mem ptrs ptrFrom
+  (_,mem2) <- getPointer mem1 ptrs ptrTo
+  let mem3 = mem2 { riverLocations = insertIfNotPresent mfrom (RiverLocation Map.empty) $
+                                     insertIfNotPresent mto (RiverLocation Map.empty) $
+                                     riverLocations mem2 }
+      upd1 = updateFromPtr mem3 ptrFrom
+      upd2 = updateFromPtr mem3 ptrTo
+      upd3 = updateFromLoc mem3 mfrom
+      upd = mconcat [upd1,upd2,upd3]
+  (upd',errs) <- updateInstruction upd (mem3 { riverProgram = addInstruction act instr memGraphEmpty })
+  return (mem3 { riverErrors = errs++(riverErrors mem3) },upd')
+initUpdate ptrs mem act instr@(MIFree mfrom ptr mto) = do
+  (_,mem1) <- getPointer mem ptrs ptr
+  let mem2 = mem1 { riverLocations = insertIfNotPresent mfrom (RiverLocation Map.empty) $
+                                     insertIfNotPresent mto (RiverLocation Map.empty) $
+                                     riverLocations mem1 }
+      upd1 = updateFromPtr mem2 ptr
+      upd2 = updateFromLoc mem2 mfrom
+      upd = upd1 `mappend` upd2
+  (upd',errs) <- updateInstruction upd (mem2 { riverProgram = addInstruction act instr memGraphEmpty })
+  return (mem2 { riverErrors = errs++(riverErrors mem2) },upd')
 
 applyUpdateRec :: (Ord mloc,Ord ptr,Show mloc,Show ptr) => RiverMemory mloc ptr -> Update mloc ptr -> SMT (RiverMemory mloc ptr)
 applyUpdateRec mem upd
@@ -834,7 +921,7 @@ buildOffset ptrWidth structs tp (i:is)
                                                                  skipWidth = sum $ fmap (typeWidth ptrWidth structs) skip
                                                              in (Offset { staticOffset = skipWidth
                                                                         , dynamicOffset = Nothing },tp)
-                                   (ArrayType _ tp,i) -> (case i of
+                                   (ArrayType _ tp,_) -> (case i of
                                                              Left i' -> Offset { staticOffset = i'*(typeWidth ptrWidth structs tp)
                                                                                , dynamicOffset = Nothing }
                                                              Right i' -> Offset { staticOffset = 0
@@ -871,7 +958,7 @@ getLocation mem loc def = case Map.lookup loc (riverLocations mem) of
   Nothing -> (def,mem { riverLocations = Map.insert loc def (riverLocations mem) })
 
 mkGlobal :: Integer -> Map String [TypeDesc] -> TypeDesc -> MemContent -> SMT RiverObject
-mkGlobal pw structs tp (MemCell w v) = do
+mkGlobal _ _ tp (MemCell w v) = do
   obj <- defConstNamed "global" (constantAnn (BitVector v) w)
   return $ StaticObject tp [obj]
 mkGlobal pw structs tp (MemArray els) = do
@@ -942,17 +1029,35 @@ extractWord start len (w:ws)
     wlen = extractAnnotation w
 
 storeWord :: Integer -> SMTExpr (BitVector BVUntyped) -> [SMTExpr (BitVector BVUntyped)] -> Maybe [SMTExpr (BitVector BVUntyped)]
-storeWord start bv (w:ws)
-  | start==0 && bvlen==wlen = Just $ bv:ws
-  | start==0 && bvlen<=wlen = Just $ (bvconcat bv (bvextract' 0 (wlen-bvlen) w)):ws
-  | start+bvlen<=wlen = Just $ (bvconcat (bvextract' (wlen-start) start w)
-                                (bvconcat bv (bvextract' 0 (wlen-bvlen-start) w))):ws
-  | start >= wlen = case storeWord (start-wlen) bv ws of
+storeWord start bv = storeWords start [bv]
+
+splitBVString :: Integer -> [SMTExpr (BitVector BVUntyped)] -> Maybe ([SMTExpr (BitVector BVUntyped)],[SMTExpr (BitVector BVUntyped)])
+splitBVString 0 bs = Just ([],bs)
+splitBVString _ [] = Nothing
+splitBVString n (b:bs) = case compare n blen of
+  EQ -> Just ([b],bs)
+  LT -> Just ([bvextract' (blen-n) n b],(bvextract' 0 (blen-n) b):bs)
+  GT -> case splitBVString (n-blen) bs of
     Nothing -> Nothing
-    Just ws' -> Just $ w:ws'
+    Just (xs,ys) -> Just (b:xs,ys)
   where
-    bvlen = extractAnnotation bv
-    wlen = extractAnnotation w
+    blen = extractAnnotation b
+
+modifyBVString :: Integer -> Integer -> ([SMTExpr (BitVector BVUntyped)] -> (a,[SMTExpr (BitVector BVUntyped)])) -> [SMTExpr (BitVector BVUntyped)] -> Maybe (a,[SMTExpr (BitVector BVUntyped)])
+modifyBVString start len f bs = do
+  (before,rest) <- splitBVString start bs
+  (cur,after) <- splitBVString len rest
+  let (res,cur') = f cur
+  return (res,before++cur'++after)
+
+lengthBVString :: [SMTExpr (BitVector BVUntyped)] -> Integer
+lengthBVString = sum . fmap extractAnnotation
+
+storeWords :: Integer -> [SMTExpr (BitVector BVUntyped)] -> [SMTExpr (BitVector BVUntyped)] -> Maybe [SMTExpr (BitVector BVUntyped)]
+storeWords off bv = fmap snd . modifyBVString off (lengthBVString bv) (const ((),bv))
+
+setWord :: Integer -> Integer -> SMTExpr (BitVector BVUntyped) -> [SMTExpr (BitVector BVUntyped)] -> Maybe [SMTExpr (BitVector BVUntyped)]
+setWord off sz bv = storeWords off (List.genericReplicate sz bv)
 
 storeObject :: Integer -> Map String [TypeDesc] -> SMTExpr Bool -> SMTExpr (BitVector BVUntyped) -> RiverObject -> Offset -> (RiverObject,[(ErrorDesc,SMTExpr Bool)])
 storeObject pw structs act word o@(StaticObject tp obj) off = case dynamicOffset off of
@@ -968,6 +1073,29 @@ storeObject _ _ act word (DynamicObject tp arr limit) off = case compare el_widt
     (idx_width,el_width) = extractAnnotation arr
     off' = (offsetToExpr (idx_width `div` 8) off) `bvudiv` (constantAnn (BitVector $ el_width `div` 8) idx_width)
     errs = checkLimits act (el_width `div` 8) idx_width limit off
+
+setObject :: SMTExpr Bool -> DynNum -> DynNum -> RiverObject -> Offset -> (RiverObject,[(ErrorDesc,SMTExpr Bool)])
+setObject act byte (Left len) (StaticObject tp obj) off
+  = case dynamicOffset off of
+    Nothing -> case setWord (staticOffset off*8) len byte' obj of
+      Nothing -> (StaticObject tp obj,[(Overrun,act)])
+      Just nobj -> (StaticObject tp nobj,[])
+  where
+    byte' = case byte of
+      Right b -> if extractAnnotation b==8
+                 then b
+                 else bvextract' 0 8 b
+      Left b -> constantAnn (BitVector b) 8
+
+copyObject :: SMTExpr Bool -> CopyOptions -> RiverObject -> Offset -> RiverObject -> Offset -> (RiverObject,[(ErrorDesc,SMTExpr Bool)])
+copyObject act (CopyOpts { copySizeLimit = Just (Left len)
+                         , copyStopper = Nothing
+                         , copyMayOverlap = overlap }) (StaticObject _ objFrom) offFrom (StaticObject tp objTo) offTo
+  = case dynamicOffset offFrom of
+    Nothing -> case dynamicOffset offTo of
+      Nothing -> case modifyBVString (staticOffset offFrom*8) (len*8) (\x -> (x,x)) objFrom of
+        Just (copyBV,_) -> case modifyBVString (staticOffset offTo*8) (len*8) (const ((),copyBV)) objTo of
+          Just (_,resBV) -> (StaticObject tp resBV,[])
 
 checkLimits :: SMTExpr Bool -> Integer -> Integer -> Either Integer (SMTExpr (BitVector BVUntyped)) -> Offset -> [(ErrorDesc,SMTExpr Bool)]
 checkLimits act elSize idx_width limit off
@@ -1056,14 +1184,16 @@ objectSkel (StaticObject tp ws) = do
   return (StaticObject tp v)
 objectSkel (DynamicObject tp arr limit) = do
   arr' <- varAnn (extractAnnotation arr)
-  limit' <- varAnn 64
+  limit' <- varAnn (case limit of
+                       Right l -> extractAnnotation l
+                       _ -> 64)
   return $ DynamicObject tp arr' (Right limit')
 
 toDynObj :: Integer -> Map String [TypeDesc] -> RiverObject -> RiverObject
 toDynObj pw structs (StaticObject tp w) = case tp of
   ArrayType sz tp' -> case mkArr 0 w startArr of
     Nothing -> DynamicObject tp' arr limit
-    Just arr -> DynamicObject tp' arr limit
+    Just arr' -> DynamicObject tp' arr' limit
     where
       elSize = typeWidth pw structs tp'
       concatWord = foldl1 bvconcat w
@@ -1071,17 +1201,17 @@ toDynObj pw structs (StaticObject tp w) = case tp of
       arr = foldl (\arr idx -> store arr (constantAnn (BitVector idx) 64) (bvextract' (idx*elSize*8) (elSize*8) concatWord)
                   ) startArr [0..(sz-1)]
       limit = Left sz
-      mkArr idx [] arr = Just arr
-      mkArr idx (w:ws) arr = case mkArr (idx+1) ws arr of
+      mkArr _ [] arr' = Just arr'
+      mkArr idx (w:ws) arr' = case mkArr (idx+1) ws arr' of
         Nothing -> Nothing
-        Just arr' -> if extractAnnotation w==elSize*8
-                     then Just $ store arr' (constantAnn (BitVector idx) 64) w
-                     else Nothing
+        Just arr'' -> if extractAnnotation w==elSize*8
+                      then Just $ store arr'' (constantAnn (BitVector idx) 64) w
+                      else Nothing
 toDynObj _ _ obj = obj
 
 toStaticObj :: RiverObject -> RiverObject
 toStaticObj (DynamicObject tp arr (Left sz))
-  = let (idxWidth,elWidth) = extractAnnotation arr
+  = let (idxWidth,_) = extractAnnotation arr
         tp' = ArrayType sz tp
         word = [ select arr (constantAnn (BitVector idx) idxWidth) | idx <- [0..(sz-1)] ]
     in StaticObject tp' word

@@ -6,6 +6,7 @@ import LLVM.FFI.BasicBlock (BasicBlock)
 import LLVM.FFI.Instruction (Instruction)
 import LLVM.FFI.Value
 import LLVM.FFI.Constant
+import LLVM.FFI.Loop
 
 import Value
 import Realization
@@ -13,7 +14,6 @@ import Program
 import Analyzation
 import TypeDesc
 import MemoryModel
-import ConditionList
 import Circuit
 import InstrDesc
 import SMTHelper
@@ -28,14 +28,16 @@ import qualified Data.Graph.Inductive as Gr
 import Data.Traversable
 import Data.Foldable
 import Data.Proxy
-import Prelude hiding (sequence,mapM,mapM_,foldl,all,concat,any,minimum)
+import Prelude hiding (sequence,mapM,mapM_,foldl,all,concat,any,minimum,sum)
 import Data.Ord
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes,mapMaybe)
 import Control.Monad.Trans (lift,liftIO)
 import Control.Monad.State.Strict (get,put,modify,StateT,runStateT)
 import Control.Monad.ST
 import Data.IORef
 import System.Random
+import Data.Tree
+import Data.Monoid
 
 import Debug.Trace
 
@@ -84,29 +86,28 @@ data UnrollContext a mloc ptr = UnrollContext { unrollOrder :: [(String,Ptr Basi
                                               , outgoingEdges :: [Edge a mloc ptr]
                                               }
 
+type UnrollQueue a mloc ptr = [(UnrollContext a mloc ptr,UnrollBudget)]
+
 data Edge a mloc ptr = Edge { edgeTarget :: NodeId
                             , edgeConds :: [(String,Ptr BasicBlock,Integer,SMTExpr Bool,[ValueMap ptr],mloc,Maybe (UnrollNodeInfo a))]
                             , edgeCreatedMergeNodes :: Set NodeId
+                            , edgeBudget :: UnrollBudget
                             }
-
-data ReturnInfo ptr = ReturnCreate { returnCreateFun :: String
-                                   , returnCreateBlk :: Ptr BasicBlock
-                                   , returnCreateSBlk :: Integer
-                                   , returnCreateInputs :: ValueMap ptr
-                                   , returnCreateArgs :: Map (Ptr Argument) (Either Val ptr)
-                                   , returnCreateMergeNodes :: Map (Ptr BasicBlock,Integer) Integer
-                                   }
-                    | ReturnMerge { returnMergeNode :: Integer
-                                  }
 
 data UnrollConfig mloc ptr = UnrollCfg { unrollDoMerge :: String -> Ptr BasicBlock -> Integer -> Bool
                                        , unrollPointerWidth :: Integer
                                        , unrollStructs :: Map String [TypeDesc]
                                        , unrollTypes :: Set TypeDesc
-                                       , unrollFunctions :: Map String (UnrollFunInfo mloc ptr)
+                                       --, unrollFunctions :: Map String (UnrollFunInfo mloc ptr)
+                                       , unrollGraph :: BlockGraph mloc ptr
                                        , unrollCfgGlobals :: Map (Ptr GlobalVariable) (TypeDesc, Maybe MemContent)
                                        , unrollBlockOrder :: [(String,Ptr BasicBlock,Integer)]
-                                       , unrollDistances :: Map (Ptr BasicBlock,Integer) DistanceInfo
+                                       --, unrollDistances :: Map (Ptr BasicBlock,Integer) DistanceInfo
+                                       , unrollDynamicOrder :: UnrollBudget -> UnrollBudget -> Ordering
+                                       , unrollPerformCheck :: UnrollBudget -> UnrollBudget -> Bool
+                                       , unrollDoRealize :: UnrollBudget -> Bool
+                                       , unrollCheckedErrors :: ErrorDesc -> Bool
+                                       , unrollLoopHeaders :: Map (Ptr BasicBlock) LoopDesc
                                        }
 
 data UnrollFunInfo mloc ptr = UnrollFunInfo { unrollFunInfoBlocks :: Map (Ptr BasicBlock,Integer) (Maybe String,RealizationInfo,RealizationMonad mloc ptr (BlockFinalization ptr),Set (Ptr Instruction))
@@ -120,23 +121,123 @@ data DistanceInfo = DistInfo { distanceToReturn :: Maybe Integer
 
 type UnrollMonad a mem mloc ptr = StateT (UnrollEnv a mem mloc ptr) SMT
 
+data UnrollBudget = UnrollBudget { unrollDepth :: Integer
+                                 , unrollUnwindDepth :: Integer
+                                 , unrollUnrollDepth :: Map (Ptr Loop) Integer
+                                 , unrollErrorDistance :: Integer
+                                 , unrollErrorDistanceOffset :: Integer
+                                 , unrollContextDepth :: Integer
+                                 } deriving (Show,Eq,Ord)
+
+data BlockEdge = EdgeJmp
+               | EdgeSucc (Maybe Integer)
+               | EdgeCall
+               | EdgeRet
+               deriving (Eq,Ord,Show)
+
+data BlockInfo mloc ptr = BlockInfo { blockInfoFun :: String
+                                    , blockInfoBlk :: Ptr BasicBlock
+                                    , blockInfoBlkName :: Maybe String
+                                    , blockInfoSubBlk :: Integer
+                                    , blockInfoInstrs :: [InstrDesc Operand]
+                                    , blockInfoRealizationInfo :: RealizationInfo
+                                    , blockInfoRealization :: RealizationMonad mloc ptr (BlockFinalization ptr)
+                                    , blockInfoDistance :: DistanceInfo
+                                    }
+
+data FunInfo = FunInfo { funInfoStartBlk :: Gr.Node
+                       , funInfoArguments :: [(Ptr Argument,TypeDesc)]
+                       } deriving (Show)
+
+data BlockGraph mloc ptr = BlockGraph { blockGraph :: Gr.Gr (BlockInfo mloc ptr) BlockEdge
+                                      , blockFunctions :: Map String FunInfo
+                                      , blockMap :: Map (Ptr BasicBlock,Integer) Gr.Node
+                                      } deriving (Show)
+
+instance Monoid DistanceInfo where
+  mempty = DistInfo Nothing Nothing
+  mappend d1 d2 = DistInfo { distanceToReturn = case (distanceToReturn d1,distanceToReturn d2) of
+                                (Just d1',Just d2') -> Just $ min d1' d2'
+                                (Just d1',Nothing) -> Just d1'
+                                (Nothing,Just d2') -> Just d2'
+                                (Nothing,Nothing) -> Nothing
+                           , distanceToError = case (distanceToError d1,distanceToError d2) of
+                                (Just d1',Just d2') -> Just $ min d1' d2'
+                                (Just d1',Nothing) -> Just d1'
+                                (Nothing,Just d2') -> Just d2'
+                                (Nothing,Nothing) -> Nothing
+                           }
+
+
+mkBlockGraph :: (Ord ptr,Enum mloc,Enum ptr) => ProgDesc -> BlockGraph mloc ptr
+mkBlockGraph (funs,_,_,_,_)
+  = BlockGraph { blockGraph = Gr.mkGraph nodeList edgeList
+               , blockFunctions = funInfo
+               , blockMap = nodeMp
+               }
+  where
+    nodeList = [ (nd,BlockInfo { blockInfoFun = fn
+                               , blockInfoBlk = blk
+                               , blockInfoBlkName = name
+                               , blockInfoSubBlk = sblk
+                               , blockInfoInstrs = instrs
+                               , blockInfoDistance = DistInfo Nothing Nothing
+                               , blockInfoRealizationInfo = rinfo
+                               , blockInfoRealization = real
+                               })
+               | (fn,(_,_,blks,_,_)) <- Map.toList funs
+               , (blk,name,subs) <- blks
+               , (sblk,instrs) <- zip [0..] subs
+               , let (rinfo,real) = preRealize $ realizeInstructions instrs
+               | nd <- [0..] ]
+    nodeMp = Map.fromList [ ((blockInfoBlk info,blockInfoSubBlk info),nd) | (nd,info) <- nodeList ]
+    funInfo = Map.mapMaybe (\(args,_,blks,_,_) -> case blks of
+                               (blk,_,_):_ -> Just $ FunInfo { funInfoStartBlk = nodeMp!(blk,0)
+                                                             , funInfoArguments = args }
+                               [] -> Nothing) funs
+    edgeList = [(ndFrom,ndTo,edge)
+               | (ndFrom,info) <- nodeList
+               , (ndTo,edge) <- case last (blockInfoInstrs info) of
+                 ITerminator (IBr to) -> [(nodeMp!(to,0),EdgeJmp)]
+                 ITerminator (IBrCond _ ifT ifF)
+                   -> [(nodeMp!(ifT,0),EdgeJmp),(nodeMp!(ifF,0),EdgeJmp)]
+                 ITerminator (ISwitch _ def cases)
+                   -> (nodeMp!(def,0),EdgeJmp):[ (nodeMp!(blk,0),EdgeJmp) | (_,blk) <- cases ]
+                 ITerminator (ICall _ (Operand { operandDesc = ODFunction _ f _ }) _)
+                   -> [(funInfoStartBlk (funInfo!f),EdgeCall)]
+                 ITerminator (IRet _)
+                   -> [ (nodeMp!(blockInfoBlk info',blockInfoSubBlk info'+1),EdgeRet)
+                      | (_,info') <- nodeList
+                      , f <- case last (blockInfoInstrs info') of
+                        ITerminator (ICall _ (Operand { operandDesc = ODFunction _ f _ }) _) -> [f]
+                        _ -> []
+                      , f==blockInfoFun info]
+                 ITerminator IRetVoid
+                   -> [ (nodeMp!(blockInfoBlk info',blockInfoSubBlk info'+1),EdgeRet)
+                      | (_,info') <- nodeList
+                      , f <- case last (blockInfoInstrs info') of
+                        ITerminator (ICall _ (Operand { operandDesc = ODFunction _ f _ }) _) -> [f]
+                        _ -> []
+                      , f==blockInfoFun info]
+                 _ -> [] ]
+
 nodeIdCallStackList :: NodeId -> [(String,Ptr BasicBlock,Integer)]
 nodeIdCallStackList nd = (nodeIdFunction nd,nodeIdBlock nd,nodeIdSubblock nd):
                          (case nodeIdCallStack nd of
                              Nothing -> []
                              Just (nd',_) -> nodeIdCallStackList nd')
 
-defaultConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> UnrollConfig mloc ptr
-defaultConfig entr desc = mergePointConfig entr desc safeMergePoints
+defaultConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
+defaultConfig entr desc selectErr = mergePointConfig entr desc safeMergePoints selectErr
 
-randomMergePointConfig :: (Ord ptr,Enum ptr,Enum mloc,RandomGen g) => String -> ProgDesc -> g -> UnrollConfig mloc ptr
-randomMergePointConfig entr desc gen = mergePointConfig entr desc (randomMergePoints gen)
+randomMergePointConfig :: (Ord ptr,Enum ptr,Enum mloc,RandomGen g) => String -> ProgDesc -> g -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
+randomMergePointConfig entr desc gen selectErr = mergePointConfig entr desc (randomMergePoints gen) selectErr
 
-noMergePointConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> UnrollConfig mloc ptr
-noMergePointConfig entr desc = mergePointConfig entr desc (const [])
+noMergePointConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
+noMergePointConfig entr desc selectErr = mergePointConfig entr desc (const []) selectErr
 
-explicitMergePointConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> [(String,String,Integer)] -> UnrollConfig mloc ptr
-explicitMergePointConfig entry prog merges
+explicitMergePointConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> [(String,String,Integer)] -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
+explicitMergePointConfig entry prog merges selectErr
   = mergePointConfig' entry prog
     (\funs _ -> Set.fromList [ case Map.lookup fun funs of
                                   Just info -> case List.find (\(_,(name,_,_,_)) -> case name of
@@ -144,17 +245,18 @@ explicitMergePointConfig entry prog merges
                                                                   Nothing -> False) (Map.toList $ unrollFunInfoBlocks info) of
                                     Just ((blk',_),_) -> (fun,blk',sblk)
                                     Nothing -> error $ "Merge-point "++show (fun,blk,sblk)++" not found."
-                             | (fun,blk,sblk) <- merges ])
+                             | (fun,blk,sblk) <- merges ]) selectErr
 
-mergePointConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> ([[Gr.Node]] -> [Gr.Node]) -> UnrollConfig mloc ptr
-mergePointConfig entry prog select = mergePointConfig' entry prog $
-                                     \_ prog_gr -> Set.fromList $ fmap (\nd -> let Just inf = Gr.lab prog_gr nd in inf) $
-                                                   select (possibleMergePoints prog_gr)
+mergePointConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> ([[Gr.Node]] -> [Gr.Node]) -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
+mergePointConfig entry prog select selectErr
+  = mergePointConfig' entry prog
+    (\_ prog_gr -> Set.fromList $ fmap (\nd -> let Just inf = Gr.lab (blockGraph prog_gr) nd in (blockInfoFun inf,blockInfoBlk inf,blockInfoSubBlk inf)) $
+                   select (possibleMergePoints (blockGraph prog_gr))) selectErr
 
-mergePointConfig' :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> (Map String (UnrollFunInfo mloc ptr) -> Gr.Gr (String,Ptr BasicBlock,Integer) () -> Set (String,Ptr BasicBlock,Integer)) -> UnrollConfig mloc ptr
-mergePointConfig' entry (funs,globs,ptrWidth,alltps,structs) select
+mergePointConfig' :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> (Map String (UnrollFunInfo mloc ptr) -> BlockGraph mloc ptr -> Set (String,Ptr BasicBlock,Integer)) -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
+mergePointConfig' entry prog@(funs,globs,ptrWidth,alltps,structs) select selectErr
   = trace ("Program: "++show prog_gr) $
-    trace ("Possible merges: "++show (possibleMergePoints prog_gr)) $
+    trace ("Possible merges: "++show (possibleMergePoints $ blockGraph prog_gr)) $
     trace ("Order: "++show order) $
     trace ("Selected merges: "++show (fmap (\(fun,blk,sblk) -> case Map.lookup fun ext_funs of
                                                Just info -> case Map.lookup (blk,sblk) (unrollFunInfoBlocks info) of
@@ -165,74 +267,87 @@ mergePointConfig' entry (funs,globs,ptrWidth,alltps,structs) select
     UnrollCfg { unrollPointerWidth = ptrWidth
               , unrollStructs = structs
               , unrollTypes = alltps
-              , unrollFunctions = ext_funs
+              , unrollGraph = prog_gr
               , unrollDoMerge = \fname blk sblk -> Set.member (fname,blk,sblk) selectedMergePoints
               , unrollCfgGlobals = globs
               , unrollBlockOrder = order
-              , unrollDistances = distInfo
+              , unrollDynamicOrder = \b1 b2 -> case compare
+                                                    ((unrollUnwindDepth b1) + (sum $ unrollUnrollDepth b1))
+                                                    ((unrollUnwindDepth b2) + (sum $ unrollUnrollDepth b2)) of
+                                                 EQ -> compare (unrollErrorDistance b1) (unrollErrorDistance b2)
+                                                 r -> r
+              , unrollPerformCheck = \last cur
+                                     -> (unrollContextDepth last) < (unrollContextDepth cur)
+              , unrollDoRealize = \b -> True
+              , unrollCheckedErrors = selectErr
+              , unrollLoopHeaders = loopHdrs
               }
   where
-    ext_funs = fmap (\(args,_,blks,_,_) -> let (start_blk,_,_) = head blks
-                                               blk_mp = Map.fromList [ (key,(realize,nd))
-                                                                     | ((key,realize),nd) <- zip [ ((blk,sblk),(name,info,real))
-                                                                                                 | (blk,name,subs) <- blks, (sblk,instrs) <- zip [0..] subs
-                                                                                                 , let (info,real) = preRealize $ realizeInstructions instrs ]
-                                                                                             [0..] ]
-                                               rblk_mp = fmap fst blk_mp
-                                               reach_info = reachabilityInfo rblk_mp
-                                               defs = definitionMap rblk_mp
-                                               trans_mp = Map.foldlWithKey (\cmp blk (_,info,_)
-                                                                            -> let Just reach = Map.lookup blk reach_info
-                                                                               in foldl (\cmp instr -> let Just def_blk = Map.lookup instr defs
-                                                                                                           trans = case Map.lookup def_blk reach of
-                                                                                                             Just t -> t
-                                                                                                             Nothing -> Set.empty
-                                                                                                       in foldl (\cmp trans_blk -> Map.insertWith Set.union trans_blk (Set.singleton instr) cmp
-                                                                                                                ) cmp trans
-                                                                                        ) cmp (Map.keys $ rePossibleInputs info)
-                                                                           ) (fmap (const Set.empty) rblk_mp) rblk_mp
-                                           in UnrollFunInfo { unrollFunInfoBlocks = Map.intersectionWith (\(name,info,realize) trans -> (name,info,realize,trans)) rblk_mp trans_mp
-                                                            , unrollFunInfoStartBlock = (start_blk,0)
-                                                            , unrollFunInfoArguments = args
-                                                            }
-                    ) funs
+    ext_funs = Map.mapMaybeWithKey
+               (\fun (args,_,blks,_,_)
+                -> case blks of
+                  [] -> Nothing
+                  (start_blk,_,_):_
+                    -> let blk_mp' = Map.fromList [ (key,(realize,nd))
+                                                  | ((key,realize),nd) <- zip [ ((blk,sblk),(name,info,real))
+                                                                              | (blk,name,subs) <- blks, (sblk,instrs) <- zip [0..] subs
+                                                                              , let (info,real) = preRealize $ realizeInstructions instrs ]
+                                                                          [0..] ]
+                           rblk_mp = fmap fst blk_mp'
+                           reach_info = reachabilityInfo rblk_mp
+                           defs = definitionMap rblk_mp
+                           trans_mp = Map.foldlWithKey (\cmp blk (_,info,_)
+                                                        -> let Just reach = Map.lookup blk reach_info
+                                                           in foldl (\cmp instr -> let Just def_blk = Map.lookup instr defs
+                                                                                       trans = case Map.lookup def_blk reach of
+                                                                                         Just t -> t
+                                                                                         Nothing -> Set.empty
+                                                                                   in foldl (\cmp trans_blk -> Map.insertWith Set.union trans_blk (Set.singleton instr) cmp
+                                                                                            ) cmp trans
+                                                                    ) cmp (Map.keys $ rePossibleInputs info)
+                                                       ) (fmap (const Set.empty) rblk_mp) rblk_mp
+                       in Just $ UnrollFunInfo { unrollFunInfoBlocks = Map.intersectionWith (\(name,info,realize) trans -> (name,info,realize,trans)) rblk_mp trans_mp
+                                               , unrollFunInfoStartBlock = (start_blk,0)
+                                               , unrollFunInfoArguments = args
+                                               }
+               ) funs
     blk_mp = Map.fromList [ ((fn,blk,sblk),(nd,instrs))
                           | (fn,(args,_,blks,_,_)) <- Map.toList funs
                           , (blk,name,subs) <- blks
                           , (sblk,instrs) <- zip [0..] subs
                           | nd <- [0..] ]
-    prog_gr = Gr.mkGraph [ (nd,key) | (key,(nd,_)) <- Map.toList blk_mp ]
-              (concat [ [ (nd,nd_nxt,())
-                        | nxt_blk <- case last instrs of
-                             ITerminator (IBr to) -> [to]
-                             ITerminator (IBrCond _ ifT ifF) -> [ifT,ifF]
-                             ITerminator (ISwitch _ def cases) -> def:[ blk | (_,blk) <- cases ]
-                             _ -> []
-                        , let Just (nd_nxt,_) = Map.lookup (fun,nxt_blk,0) blk_mp ] ++
-                        [ (nd,nd_nxt,())
-                        | nxt_fun <- case last instrs of
-                             ITerminator (ICall _ (Operand { operandDesc = ODFunction _ f _ }) _) -> [f]
-                             _ -> []
-                        , let Just (_,_,(start_blk,_,_):_,_,_) = Map.lookup nxt_fun funs
-                        , let Just (nd_nxt,_) = Map.lookup (nxt_fun,start_blk,0) blk_mp ] ++
-                        [ (nd_from,nd_to,())
-                        | nxt_fun <- case last instrs of
-                             ITerminator (ICall _ (Operand { operandDesc = ODFunction _ f _ }) _) -> [f]
-                             _ -> []
-                        , let Just (nd_to,_) = Map.lookup (fun,blk,sblk+1) blk_mp
-                        , nd_from <- [ nd | ((fun',_,_),(nd,instrs)) <- Map.toList blk_mp, fun'==nxt_fun, case last instrs of
-                                          ITerminator (IRet _) -> True
-                                          ITerminator IRetVoid -> True
-                                          _ -> False ] ]
-                      | ((fun,blk,sblk),(nd,instrs)) <- Map.toList blk_mp ]) :: Gr.Gr (String,Ptr BasicBlock,Integer) ()
+    prog_gr = calculateDistanceInfo selectErr (mkBlockGraph prog)
     Just (_,_,(start_blk,_,_):_,_,_) = Map.lookup entry funs
     start_nd = case Map.lookup (entry,start_blk,0) blk_mp of
       Nothing -> error $ "Failed to find entry point "++entry
       Just (x,_) -> x
-    [dffTree] = Gr.dff [start_nd] prog_gr
-    order = reverse $ fmap (\nd -> let Just inf = Gr.lab prog_gr nd in inf) $ Gr.postorder dffTree
+    order = calculateOrder prog_gr start_nd
     selectedMergePoints = select ext_funs prog_gr
-    distInfo = calculateDistanceInfo (const True) ext_funs entry
+    getLoops mp loop = foldl getLoops (Map.insert (loopDescHeader loop) loop mp) (loopDescSubs loop)
+    loopHdrs = foldl (\mp (_,_,_,loops,_)
+                      -> foldl getLoops mp loops
+                     ) Map.empty funs
+
+calculateOrder :: BlockGraph mloc ptr -> Gr.Node -> [(String,Ptr BasicBlock,Integer)]
+calculateOrder gr startNd = reverse $ Gr.postorder dfsTree
+  where
+    ([dfsTree],_) = dfs (error "First node must have distance to error.") (blockGraph gr) [startNd]
+    dfs dist gr ns = let (gr',ns') = mapAccumL (\cgr n -> case Gr.match n cgr of
+                                                   (Nothing,ngr) -> (ngr,Nothing)
+                                                   (Just (_,cur,info,suc),ngr)
+                                                     -> let suc' = mapMaybe (\(kind,s) -> case kind of
+                                                                                EdgeSucc _ -> Nothing
+                                                                                _ -> Just s) suc
+                                                        in case distanceToError (blockInfoDistance info) of
+                                                            Nothing -> (ngr,Just (dist+1,(blockInfoFun info,blockInfoBlk info,blockInfoSubBlk info),suc'))
+                                                            Just d' -> (ngr,Just (d',(blockInfoFun info,blockInfoBlk info,blockInfoSubBlk info),suc'))
+                                               ) gr ns
+                         ns'' = List.sortBy (comparing (\(d,_,_) -> Down d)) $ catMaybes ns'
+                     in dfs' gr' ns''
+    dfs' gr [] = ([],gr)
+    dfs' gr ((d,info,suc):ns) = let (subs,gr') = dfs d gr suc
+                                    (rest,gr'') = dfs' gr' ns
+                                in ((Node info subs):rest,gr'')
 
 reachabilityInfo :: Map (Ptr BasicBlock,Integer) (Maybe String,RealizationInfo,RealizationMonad mloc ptr (BlockFinalization ptr))
                     -> Map (Ptr BasicBlock,Integer) (Map (Ptr BasicBlock,Integer) (Set (Ptr BasicBlock,Integer)))
@@ -415,6 +530,12 @@ enqueueEdge = insertWithOrder (\x y -> if nodeIdFunction (edgeTarget x) == nodeI
                                        else Nothing)
               (\e1 e2 -> e1 { edgeConds = (edgeConds e1)++(edgeConds e2)
                             , edgeCreatedMergeNodes = Set.union (edgeCreatedMergeNodes e1) (edgeCreatedMergeNodes e2)
+                            , edgeBudget = UnrollBudget { unrollDepth = min (unrollDepth $ edgeBudget e1) (unrollDepth $ edgeBudget e2)
+                                                        , unrollUnwindDepth = min (unrollUnwindDepth $ edgeBudget e1) (unrollUnwindDepth $ edgeBudget e2)
+                                                        , unrollUnrollDepth = min (unrollUnrollDepth $ edgeBudget e1) (unrollUnrollDepth $ edgeBudget e2)
+                                                        , unrollErrorDistance = min (unrollErrorDistance $ edgeBudget e1) (unrollErrorDistance $ edgeBudget e2)
+                                                        , unrollErrorDistanceOffset = min (unrollErrorDistanceOffset $ edgeBudget e1) (unrollErrorDistanceOffset $ edgeBudget e2)
+                                                        , unrollContextDepth = min (unrollContextDepth $ edgeBudget e1) (unrollContextDepth $ edgeBudget e2) }
                             }) (\x -> (nodeIdFunction $ edgeTarget x,nodeIdBlock $ edgeTarget x,nodeIdSubblock $ edgeTarget x))
 
 insertWithOrder :: Eq b => (a -> a -> Maybe Ordering) -> (a -> a -> a) -> (a -> b) -> [b] -> a -> [a] -> [a]
@@ -431,16 +552,17 @@ insertWithOrder cmp comb f order el (x:xs) = case cmp el x of
       | y==f x     = x:insertWithOrder cmp comb f (y:ys) el xs
       | otherwise = updateOrder' ys
 
-compareWithOrder :: Eq a => [a] -> a -> a -> Ordering
+compareWithOrder :: Eq a => [a] -> a -> a -> Maybe Ordering
 compareWithOrder order x y = if x==y
-                             then EQ
+                             then Just EQ
                              else getOrder' order
   where
-    getOrder' [] = error "Elements not in order"
+    --getOrder' [] = error "Elements not in order"
+    getOrder' [] = Nothing
     getOrder' (c:cs) = if c==x
-                       then LT
+                       then Just LT
                        else (if c==y
-                             then GT
+                             then Just GT
                              else getOrder' cs)
 
 shiftOrder :: (a -> Bool) -> [a] -> [a]
@@ -496,10 +618,13 @@ initOrder pgr = trace ("ORDER: "++show order) order
 startingContext :: (MemoryModel mem Integer Integer,UnrollInfo a)
                    => UnrollConfig Integer Integer -> String
                    -> SMT (UnrollContext a Integer Integer,UnrollEnv a mem Integer Integer)
-startingContext cfg fname = case Map.lookup fname (unrollFunctions cfg) of
+startingContext cfg fname = case Map.lookup fname (blockFunctions $ unrollGraph cfg) of
   Just info -> do
     let order = unrollBlockOrder cfg
-        (blk,sblk) = unrollFunInfoStartBlock info
+        Just blkInfo = Gr.lab (blockGraph $ unrollGraph cfg) (funInfoStartBlk info)
+        --(blk,sblk) = unrollFunInfoStartBlock info
+        blk = blockInfoBlk blkInfo
+        sblk = blockInfoSubBlk blkInfo
         ((cptr,prog),globs') = mapAccumL (\(ptr',prog') (tp,cont) 
                                           -> ((succ ptr',(ptr',tp,cont):prog'),ptr')
                                          ) (0,[]) (unrollCfgGlobals cfg)
@@ -510,7 +635,7 @@ startingContext cfg fname = case Map.lookup fname (unrollFunctions cfg) of
                             res <- varNamedAnn "arg" (typeWidth (unrollPointerWidth cfg) (unrollStructs cfg) tp*8)
                             ref <- liftIO $ newIORef (MergedValue False (Left $ DirectValue res))
                             return (Left arg,ref)
-                      ) (unrollFunInfoArguments info)
+                      ) (funInfoArguments info)
     return (UnrollContext { unrollOrder = order
                           , currentMergeNodes = Map.empty
                           , nextMergeNodes = Map.empty
@@ -521,6 +646,7 @@ startingContext cfg fname = case Map.lookup fname (unrollFunctions cfg) of
                                                                            , nodeIdCallStack = Nothing }
                                                      , edgeConds = [(fname,nullPtr,0,constant True,[Map.fromList startArgs],0,Nothing)]
                                                      , edgeCreatedMergeNodes = Set.empty
+                                                     , edgeBudget = UnrollBudget 0 0 Map.empty 0 0 0
                                                      }]
                           , outgoingEdges = []
                           },UnrollEnv { unrollNextMem = 1
@@ -542,7 +668,9 @@ spawnContexts cfg ctx
                                           (Map.union (nextMergeNodes ctx) (currentMergeNodes ctx))
                     , nextMergeNodes = Map.empty
                     , usedMergeNodes = Map.empty
-                    , realizationQueue = [edge { edgeCreatedMergeNodes = Set.empty }]
+                    , realizationQueue = [edge { edgeCreatedMergeNodes = Set.empty
+                                               , edgeBudget = (edgeBudget edge) { unrollContextDepth = (unrollContextDepth $ edgeBudget edge)+1
+                                                                                }}]
                     , outgoingEdges = []
                     }
     | edge <- outgoingEdges ctx
@@ -559,7 +687,13 @@ spawnContexts cfg ctx
                 then suitableMergePoints (Set.delete x refs) xs
                 else suitableMergePoints refs xs
 
-performUnrollmentCtx :: (MemoryModel mem mloc ptr,UnrollInfo a,Eq ptr,Enum ptr,Eq mloc,Enum mloc,Show ptr,Show mloc)
+--contextWeight :: UnrollConfig mloc ptr -> UnrollContext a mloc ptr -> Integer
+--contextWeight cfg ctx = unrollDynamicOrder cfg (edgeBudget $ head $ realizationQueue ctx)
+
+--compareContext :: UnrollConfig mloc ptr -> UnrollContext a mloc ptr -> UnrollContext a mloc ptr -> Ordering
+--compareContext cfg = comparing (contextWeight cfg)
+
+performUnrollmentCtx :: (MemoryModel mem mloc ptr,UnrollInfo a,Eq ptr,Enum ptr,Eq mloc,Enum mloc)
                         => Bool
                         -> UnrollConfig mloc ptr
                         -> UnrollContext a mloc ptr
@@ -580,7 +714,7 @@ stepUnrollCtx :: (MemoryModel mem mloc ptr,UnrollInfo a,Eq ptr,Enum ptr,Eq mloc,
                  -> UnrollContext a mloc ptr
                  -> UnrollMonad a mem mloc ptr (UnrollContext a mloc ptr)
 stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
-  (Edge trg inc createdMerges):rest -> do
+  (Edge trg inc createdMerges lvl):rest -> do
     let mergeNode = Map.lookup trg (currentMergeNodes cur)
         mergeNodeCreate = unrollDoMerge cfg (nodeIdFunction trg) (nodeIdBlock trg) (nodeIdSubblock trg)
         extensible = case mergeNode of
@@ -612,13 +746,17 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
         return (cur { realizationQueue = rest
                     , usedMergeNodes = Map.insert trg () (usedMergeNodes cur) })
       Nothing -> do
-        let pgr = (unrollFunctions cfg)!(nodeIdFunction trg)
-            (name,info,realize,trans) = (unrollFunInfoBlocks pgr)!(nodeIdBlock trg,nodeIdSubblock trg)
-            blk_name = (case name of
+        let blockNode = (blockMap $ unrollGraph cfg)!(nodeIdBlock trg,nodeIdSubblock trg)
+            Just blockInfo = Gr.lab (blockGraph $ unrollGraph cfg) blockNode
+            info = blockInfoRealizationInfo blockInfo
+            realize = blockInfoRealization blockInfo
+            --pgr = (unrollFunctions cfg)!(nodeIdFunction trg)
+            --(name,info,realize,trans) = (unrollFunInfoBlocks pgr)!(nodeIdBlock trg,nodeIdSubblock trg)
+            blk_name = (case blockInfoBlkName blockInfo of
                            Nothing -> show (nodeIdBlock trg)
                            Just rname -> rname)++"_"++show (nodeIdSubblock trg)
         env <- get
-        let (newNodeInfo,newInfo) = unrollInfoNewNode (unrollInfo env) trg name mergeNodeCreate
+        let (newNodeInfo,newInfo) = unrollInfoNewNode (unrollInfo env) trg (blockInfoBlkName blockInfo) mergeNodeCreate
             newInfo' = foldl (\info srcNd -> unrollInfoConnect info srcNd newNodeInfo) newInfo [ srcNd | (_,_,_,_,_,_,Just srcNd) <- inc ]
         put $ env { unrollInfo = newInfo' }
         (act,inp,inp',phis,start_loc,prev_locs,merge_node,mem_instr,mem_eqs)
@@ -733,24 +871,41 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                              then Set.insert trg createdMerges
                              else createdMerges
         outEdges <- case fin of
-          Jump trgs -> return [ Edge { edgeTarget = NodeId { nodeIdFunction = nodeIdFunction trg
-                                                           , nodeIdBlock = trg_blk
-                                                           , nodeIdSubblock = 0
-                                                           , nodeIdCallStack = nodeIdCallStack trg }
+          Jump trgs -> return [ Edge { edgeTarget = nodeId
                                      , edgeConds = [(nodeIdFunction trg,nodeIdBlock trg,nodeIdSubblock trg,act .&&. cond,new_vars:(tail inp'),reCurMemLoc nst,Just newNodeInfo)]
                                      , edgeCreatedMergeNodes = nCreatedMerges
-                                     } | (cond,trg_blk) <- trgs ]
+                                     , edgeBudget = lvl { unrollDepth = unrollDepth lvl + 1
+                                                        , unrollUnrollDepth = case Map.lookup trg_blk (unrollLoopHeaders cfg) of
+                                                          Nothing -> unrollUnrollDepth lvl
+                                                          Just loop -> Map.insertWith (+) (loopDescPtr loop) 1 (unrollUnrollDepth lvl)
+                                                        , unrollErrorDistance = case errorDistanceForNodeId (unrollGraph cfg) nodeId of
+                                                          Nothing -> error $ "Unable to calculate error distance for "++show nodeId
+                                                          Just d -> d
+                                                        }
+                                     } | (cond,trg_blk) <- trgs
+                                       , let nodeId = NodeId { nodeIdFunction = nodeIdFunction trg
+                                                             , nodeIdBlock = trg_blk
+                                                             , nodeIdSubblock = 0
+                                                             , nodeIdCallStack = nodeIdCallStack trg } ]
           Call fname args ret -> do
-            let fun_info = (unrollFunctions cfg)!fname
-                (start_blk,start_sblk) = unrollFunInfoStartBlock fun_info
-            arg_vars <- createMergeValues False $ Map.fromList [ (Left arg_ptr,arg) | ((arg_ptr,tp),arg) <- zip (unrollFunInfoArguments fun_info) args ]
-            return [ Edge { edgeTarget = NodeId { nodeIdFunction = fname
-                                                , nodeIdBlock = start_blk
-                                                , nodeIdSubblock = start_sblk
-                                                , nodeIdCallStack = Just (trg { nodeIdSubblock = succ $ nodeIdSubblock trg },ret)
-                                                }
+            let fun_info = (blockFunctions $ unrollGraph cfg)!fname
+                Just startBlkInfo = Gr.lab (blockGraph $ unrollGraph cfg) (funInfoStartBlk fun_info)
+                start_blk = blockInfoBlk startBlkInfo
+                start_sblk = blockInfoSubBlk startBlkInfo
+            arg_vars <- createMergeValues False $ Map.fromList [ (Left arg_ptr,arg) | ((arg_ptr,tp),arg) <- zip (funInfoArguments fun_info) args ]
+            let nodeId = NodeId { nodeIdFunction = fname
+                                , nodeIdBlock = start_blk
+                                , nodeIdSubblock = start_sblk
+                                , nodeIdCallStack = Just (trg { nodeIdSubblock = succ $ nodeIdSubblock trg },ret)
+                                }
+            return [ Edge { edgeTarget = nodeId
                           , edgeConds = [(nodeIdFunction trg,nodeIdBlock trg,nodeIdSubblock trg,act,arg_vars:new_vars:(tail inp'),reCurMemLoc nst,Just newNodeInfo)]
                           , edgeCreatedMergeNodes = nCreatedMerges
+                          , edgeBudget = lvl { unrollDepth = unrollDepth lvl + 1
+                                             , unrollUnwindDepth = unrollUnwindDepth lvl + 1
+                                             , unrollErrorDistance = case errorDistanceForNodeId (unrollGraph cfg) nodeId of
+                                               Nothing -> error $ "Unable to calculate error distance for "++show nodeId
+                                               Just d -> d }
                           } ]
           Return rval -> case nodeIdCallStack trg of
             Just (prev,trg_instr) -> do
@@ -763,18 +918,26 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
               return [ Edge { edgeTarget = prev
                             , edgeConds = [(nodeIdFunction trg,nodeIdBlock trg,nodeIdSubblock trg,act,nvars,reCurMemLoc nst,Just newNodeInfo)]
                             , edgeCreatedMergeNodes = nCreatedMerges
+                            , edgeBudget = lvl { unrollDepth = unrollDepth lvl + 1
+                                               , unrollUnwindDepth = unrollUnwindDepth lvl - 1
+                                               , unrollErrorDistance = case errorDistanceForNodeId (unrollGraph cfg) prev of
+                                                 Nothing -> error $ "Unable to calculate error distance for "++show prev
+                                                 Just d -> d }
                             } ]
             Nothing -> return []
-        let (nqueue,nout) = foldl (\(cqueue,cout) edge -> case compareWithOrder (unrollOrder cur)
-                                                               (nodeIdFunction trg,
-                                                                nodeIdBlock trg,
-                                                                nodeIdSubblock trg)
-                                                               (nodeIdFunction $ edgeTarget edge,
-                                                                nodeIdBlock $ edgeTarget edge,
-                                                                nodeIdSubblock $ edgeTarget edge) of
-                                      LT -> (enqueueEdge (unrollOrder cur) edge cqueue,cout)
-                                      _ -> (cqueue,enqueueEdge (unrollOrder cur) edge cout)
-                                  ) (rest,outgoingEdges cur) outEdges
+        let (nqueue,nout) = foldl (\(cqueue,cout) edge
+                                   -> case compareWithOrder (unrollOrder cur)
+                                           (nodeIdFunction trg,
+                                            nodeIdBlock trg,
+                                            nodeIdSubblock trg)
+                                           (nodeIdFunction $ edgeTarget edge,
+                                            nodeIdBlock $ edgeTarget edge,
+                                            nodeIdSubblock $ edgeTarget edge) of
+                                        Nothing -> (cqueue,cout)
+                                        Just LT -> (enqueueEdge (unrollOrder cur) edge cqueue,cout)
+                                        _ -> (cqueue,enqueueEdge (unrollOrder cur) edge cout)
+                                  ) (rest,outgoingEdges cur)
+                            (filter (\e -> unrollDoRealize cfg (edgeBudget e)) outEdges)
         if isFirst
           then (do
                    env <- get
@@ -803,117 +966,189 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                        Nothing -> nextMergeNodes cur
                        Just mn -> Map.insert trg mn (nextMergeNodes cur) }
 
+errorDistanceForNodeId :: BlockGraph mloc ptr -> NodeId -> Maybe Integer
+errorDistanceForNodeId gr nd = case Map.lookup (nodeIdBlock nd,nodeIdSubblock nd) (blockMap gr) of
+  Nothing -> Nothing
+  Just nd -> case Gr.lab (blockGraph gr) nd of
+    Just (BlockInfo { blockInfoDistance = dist }) -> case distanceToError dist of
+      Just errDist -> case distanceToReturn dist of
+        Just retDist -> case prevDist of
+          Just pDist -> Just $ min errDist (pDist+retDist)
+          Nothing -> Just errDist
+        Nothing -> Just errDist
+      Nothing -> case distanceToReturn dist of
+        Nothing -> Nothing
+        Just retDist -> case prevDist of
+          Just pDist -> Just (retDist+pDist)
+          Nothing -> Nothing
+    Nothing -> Nothing
+  where
+    prevDist = case nodeIdCallStack nd of
+      Nothing -> Nothing
+      Just (prev,_) -> errorDistanceForNodeId gr prev
+
 allProxies :: UnrollEnv a mem mloc ptr -> [SMTExpr Bool]
 allProxies env = [ mergeActivationProxy nd | nd <- Map.elems (unrollMergeNodes env) ]
 
-data DistanceState
-  = DistanceState { calculatedDistances :: Map (Ptr BasicBlock,Integer) DistanceInfo
-                  , delayedDistances :: Map (Ptr BasicBlock,Integer)
-                                        [((Ptr BasicBlock,Integer),DistanceInfo -> DistanceInfo)]
-                  , delayedDistanceTargets :: Set (Ptr BasicBlock,Integer)
-                  }
-
-instance Show DistanceState where
-  show dist = "{ calulated: "++show (Map.keys $ calculatedDistances dist)++", delayed: "++show (Set.toList $ delayedDistanceTargets dist)++" }"
-
-addDistanceInfo :: (Ptr BasicBlock,Integer) -> DistanceInfo -> DistanceState -> DistanceState
-addDistanceInfo blk info st
-  = let st1 = st { calculatedDistances = Map.insert blk info (calculatedDistances st) }
-        st2 = case Map.updateLookupWithKey (\_ _ -> Nothing) blk (delayedDistances st1) of
-          (Nothing,_) -> st1
-          (Just delays,ndel) -> foldl (\cst (delBlk,f)
-                                        -> addDistanceInfo delBlk (f info)
-                                           (cst { delayedDistanceTargets = Set.delete delBlk
-                                                                           (delayedDistanceTargets cst)
-                                                })
-                                      ) (st1 { delayedDistances = ndel }) delays
-    in st2
-
-delayDistanceInfo :: (Ptr BasicBlock,Integer) -> (Ptr BasicBlock,Integer) -> (DistanceInfo -> DistanceInfo)
-                     -> DistanceState -> DistanceState
-delayDistanceInfo blk dep f st
-  = st { delayedDistances = Map.insertWith (++) dep [(blk,f)]
-                            (delayedDistances st)
-       , delayedDistanceTargets = Set.insert blk (delayedDistanceTargets st)
-       }
-
-isDistanceDelayed :: (Ptr BasicBlock,Integer) -> DistanceState -> Bool
-isDistanceDelayed blk st = Set.member blk (delayedDistanceTargets st)
-
-getCalculatedDistance :: (Ptr BasicBlock,Integer) -> DistanceState -> Maybe DistanceInfo
-getCalculatedDistance blk st = Map.lookup blk (calculatedDistances st)
-
-addDistanceDependingOn :: (Ptr BasicBlock,Integer) -> Maybe DistanceInfo -> (Ptr BasicBlock,Integer) -> (DistanceInfo -> DistanceInfo) -> DistanceState -> (Maybe DistanceInfo,DistanceState)
-addDistanceDependingOn dep Nothing trg f state
-  = (Nothing,delayDistanceInfo trg dep f state)
-addDistanceDependingOn dep (Just depRes) trg f state
-  = let res = f depRes
-    in (Just res,addDistanceInfo trg res state)
-
-calculateDistanceInfo :: (ErrorDesc -> Bool) -> Map String (UnrollFunInfo mloc ptr) -> String -> Map (Ptr BasicBlock,Integer) DistanceInfo
-calculateDistanceInfo isInteresting mp fun
-  = let Just finfo = Map.lookup fun mp
-        (_,distState) = calculateBlk finfo (unrollFunInfoStartBlock finfo) (DistanceState { calculatedDistances = Map.empty
-                                                                                          , delayedDistances = Map.empty
-                                                                                          , delayedDistanceTargets = Set.empty }) Set.empty
-    in if Set.null (delayedDistanceTargets distState)
-       then calculatedDistances distState
-       else error $ "The following blocks are delayed indefinitely: "++show (Set.toList (delayedDistanceTargets distState))
+calculateDistanceInfo :: (ErrorDesc -> Bool) -> BlockGraph mloc ptr -> BlockGraph mloc ptr
+calculateDistanceInfo isInteresting (gr::BlockGraph mloc ptr)
+  = trace ("distanceInfo: "++show (Gr.nmap (\info -> (blockInfoFun info,blockInfoBlk info,blockInfoSubBlk info,blockInfoDistance info)) $ blockGraph ngr3)) $ ngr3
   where
-    calculateBlk finfo blk state stack = case getCalculatedDistance blk state of -- Is the result already available?
-      Just dist -> (Just dist,state)
-      Nothing
-        -> if Set.member blk stack -- Is the node in the search stack?
-           then (Nothing,state)
-           else (if isDistanceDelayed blk state -- Is the node already delayed?
-                 then (Nothing,state)
-                 else case Map.lookup blk (unrollFunInfoBlocks finfo) of
-                   Just (_,info,_,_)
-                     -> let hasErr = any isInteresting (rePotentialErrors info)
-                            isRet = reReturns info
-                        in if isRet
-                           then (let dist = DistInfo (Just 0) (if hasErr
-                                                               then Just 0
-                                                               else Nothing)
-                                 in (Just dist,addDistanceInfo blk dist state))
-                           else case Set.toList (reCalls info) of
-                             [(fn,_)]
-                               -> let Just finfo' = Map.lookup fn mp
-                                      sblk = unrollFunInfoStartBlock finfo'
-                                      (distF,state1)
-                                        = calculateBlk finfo' sblk state
-                                          (Set.insert blk stack)
-                                      nxtBlk = (fst blk,snd blk+1)
-                                      (distN,state2)
-                                        = calculateBlk finfo nxtBlk state1
-                                          (Set.insert blk stack)
-                                  in case distF of
-                                    Nothing -> (Nothing,state1)
-                                    Just distF' -> case distanceToReturn distF' of
-                                      Nothing -> let dist = DistInfo Nothing (if hasErr
-                                                                              then Just 0
-                                                                              else fmap (+1) $ distanceToError distF')
-                                                 in (Just dist,addDistanceInfo blk dist state)
-                                      Just lenF -> addDistanceDependingOn nxtBlk distN blk (\distN' -> DistInfo { distanceToReturn = fmap (\x -> x+lenF+1) (distanceToReturn distN')
-                                                                                                                , distanceToError = if hasErr
-                                                                                                                                    then Just 0
-                                                                                                                                    else case distanceToReturn distF' of
-                                                                                                                                      Just distErrF -> Just (distErrF+1)
-                                                                                                                                      Nothing -> fmap (\x -> x+lenF+1) (distanceToError distN') }
-                                                                                           ) state2
-                             _ -> let (nstate,dists) = mapAccumL (\cstate sucBlk -> let (res,cstate') = calculateBlk finfo sucBlk cstate (Set.insert blk stack)
-                                                                                    in (cstate',res)
-                                                                 ) state (fmap (\blk -> (blk,0)) $ Set.toList (reSuccessors info))
-                                      dists' = catMaybes dists
-                                      distToRet = case catMaybes (fmap distanceToReturn dists') of
-                                        [] -> Nothing
-                                        xs -> Just $ (minimum xs)+1
-                                      distToErr = if hasErr
-                                                  then Just 0
-                                                  else case catMaybes (fmap distanceToError dists') of
-                                                    [] -> Nothing
-                                                    xs -> Just $ (minimum xs)+1
-                                      dist = DistInfo { distanceToReturn = distToRet
-                                                      , distanceToError = distToErr }
-                                  in (Just dist,addDistanceInfo blk dist nstate)
-                             )
+    errorNodes = mapMaybe (\(nd,info)
+                           -> if any isInteresting (rePotentialErrors $ blockInfoRealizationInfo info)
+                              then Just (nd,0)
+                              else Nothing) $ Gr.labNodes (blockGraph ngr2)
+    retNodes = mapMaybe (\(nd,info)
+                         -> if reReturns (blockInfoRealizationInfo info)
+                            then Just (nd,0)
+                            else Nothing) $ Gr.labNodes (blockGraph gr)
+
+    ngr1 :: BlockGraph mloc ptr
+    ngr1 = gr { blockGraph = Gr.mkGraph (updateGraph (\lvl edge -> case edge of
+                                                         EdgeJmp -> Just (lvl+1)
+                                                         EdgeCall -> Just (lvl+1)
+                                                         _ -> Nothing)
+                                         (\dist v -> dist { distanceToReturn = Just v }) (blockGraph gr) Map.empty retNodes) (Gr.labEdges $ blockGraph gr)
+              }
+
+    ngr2 = addSuccEdges ngr1
+    
+    ngr3 = ngr2 { blockGraph = Gr.mkGraph (updateGraph (\lvl edge -> case edge of
+                                                           EdgeJmp -> Just (lvl+1)
+                                                           EdgeSucc dist -> case dist of
+                                                             Just d -> Just (lvl+d+1)
+                                                             Nothing -> Nothing
+                                                           EdgeCall -> Just (lvl+1)
+                                                           _ -> Nothing)
+                                           (\dist v -> dist { distanceToError = Just v }) (blockGraph ngr2) Map.empty errorNodes) (Gr.labEdges $ blockGraph ngr2)
+                }
+
+    addSuccEdges gr = gr { blockGraph = Gr.insEdges [ (ndFrom,ndTo,EdgeSucc $ distanceToReturn $ blockInfoDistance callInfo)
+                                                    | (ndFrom,ndCall,EdgeCall) <- Gr.labEdges $ blockGraph gr
+                                                    , let Just fromInfo = Gr.lab (blockGraph gr) ndFrom
+                                                          Just callInfo = Gr.lab (blockGraph gr) ndCall
+                                                          Just ndTo = Map.lookup (blockInfoBlk fromInfo,blockInfoSubBlk fromInfo+1) (blockMap gr) ]
+                                        (blockGraph gr) }
+    
+    updateGraph f g cgr nxt [] = if Map.null nxt
+                                 then Gr.labNodes cgr
+                                 else updateGraph f g cgr Map.empty (Map.toList nxt)
+    updateGraph f g cgr nxt ((nd,lvl):cur)
+      = let (ctx,cgr') = Gr.match nd cgr
+        in case ctx of
+          Just (prev,_,info,_) -> let new = Map.unionWith min
+                                            nxt
+                                            (Map.fromList $ catMaybes
+                                             [ case f lvl edge of
+                                                  Nothing -> Nothing
+                                                  Just l -> Just (ndFrom,l)
+                                             | (edge,ndFrom) <- prev ])
+                                  in (nd,info { blockInfoDistance = g (blockInfoDistance info) lvl }):updateGraph f g cgr' new cur
+          Nothing -> updateGraph f g cgr' nxt cur
+
+contextQueueInsert :: UnrollConfig mloc ptr -> UnrollContext a mloc ptr
+                      -> UnrollQueue a mloc ptr
+                      -> UnrollQueue a mloc ptr
+contextQueueInsert cfg ctx
+  = List.insertBy (\x y -> unrollDynamicOrder cfg (snd x) (snd y)
+                    {-case (realizationQueue x,realizationQueue y) of
+                      ([],[]) -> EQ
+                      (_:_,[]) -> GT
+                      ([],_:_) -> LT
+                      (x:xs,y:ys) -> unrollDynamicOrder cfg (edgeBudget x) (edgeBudget y)-}
+                  ) (ctx,budget)
+  where
+    budget = getMinBudget cfg ctx
+
+contextQueueStep :: (UnrollInfo a,MemoryModel mem mloc ptr,Eq mloc,Eq ptr,Enum mloc,Enum ptr)
+                    => Bool -> UnrollConfig mloc ptr -> UnrollBudget
+                    -> UnrollQueue a mloc ptr
+                    -> UnrollMonad a mem mloc ptr (Maybe (UnrollBudget,UnrollQueue a mloc ptr))
+contextQueueStep isFirst cfg lvl queue = case queue of
+  (ctx,minB):qs -> case realizationQueue ctx of
+    [] -> contextQueueStep isFirst cfg lvl
+          (foldl (\queue' ctx'
+                  -> contextQueueInsert cfg ctx' queue'
+                 ) qs (spawnContexts cfg ctx))
+    _:_ -> case unrollDynamicOrder cfg minB lvl of
+      GT -> return $ Just (minB,queue)
+      _ -> do
+        ctx' <- performUnrollmentCtx isFirst cfg ctx --stepUnrollCtx isFirst cfg ctx
+        case realizationQueue ctx' of
+          [] -> return $ Just (lvl,(ctx',getMinBudget cfg ctx'):qs)
+          e:_ -> case unrollDynamicOrder cfg lvl (edgeBudget e) of
+            LT -> return $ Just (lvl,contextQueueInsert cfg ctx' qs)
+            _ -> return $ Just (lvl,(ctx',getMinBudget cfg ctx'):qs)
+  [] -> return Nothing
+
+checkForErrors :: (MemoryModel mem mloc ptr)
+                  => UnrollConfig mloc ptr
+                  -> UnrollMonad a mem mloc ptr (Maybe ([(String,[BitVector BVUntyped])],[ErrorDesc]))
+checkForErrors cfg = do
+  env <- get
+  let (p1,p2) = unrollProxies env
+      bugs = filter (\(desc,_) -> unrollCheckedErrors cfg desc) $
+             unrollGuards env ++ (memoryErrors (unrollMemory env) p1 p2)
+  lift $ stack $ do
+    mapM_ (\mn -> assert $ not' $ mergeActivationProxy mn) (unrollMergeNodes env)
+    assert $ app or' [ cond | (desc,cond) <- bugs ]
+    res <- checkSat
+    if res
+      then (do
+               outp <- mapM (\(name,cond,args) -> do
+                                v <- getValue cond
+                                if v
+                                  then (do
+                                           vals <- mapM (\(tp,val) -> getValue val) args
+                                           return (Just (name,vals)))
+                                  else return Nothing
+                            ) (unrollWatchpoints env)
+               rerrs <- mapM (\(desc,cond) -> do
+                                 cond' <- getValue cond
+                                 if cond'
+                                   then return $ Just desc
+                                   else return Nothing
+                             ) bugs
+               return $ Just (catMaybes outp,catMaybes rerrs))
+      else return Nothing
+
+contextQueueRun :: (UnrollInfo a,MemoryModel mem Integer Integer)
+                   => Proxy mem
+                   -> Proxy a
+                   -> UnrollConfig Integer Integer
+                   -> String
+                   -> SMT (Maybe ([(String,[BitVector BVUntyped])],[ErrorDesc]),a)
+contextQueueRun (_::Proxy mem) (_::Proxy a) cfg entry = do
+  (start,env :: UnrollEnv a mem Integer Integer) <- startingContext cfg entry
+  let lvl = edgeBudget $ head $ realizationQueue start
+  (res,nenv) <- runStateT (contextQueueCheck 0 True False cfg lvl lvl [(start,getMinBudget cfg start)]) env
+  return (res,unrollInfo nenv)
+
+contextQueueCheck :: (UnrollInfo a,MemoryModel mem mloc ptr,Eq mloc,Eq ptr,Enum mloc,Enum ptr)
+                     => Integer -> Bool -> Bool -> UnrollConfig mloc ptr -> UnrollBudget -> UnrollBudget
+                     -> UnrollQueue a mloc ptr
+                     -> UnrollMonad a mem mloc ptr (Maybe ([(String,[BitVector BVUntyped])],[ErrorDesc]))
+contextQueueCheck n isFirst mustCheck cfg lastLvl lvl queue = do
+  --liftIO $ putStrLn $ "Depth: "++show n++" "++show (length queue,length $ realizationQueue $ head queue)
+  res <- contextQueueStep isFirst cfg lvl queue
+  case res of
+    Nothing -> if mustCheck
+               then checkForErrors cfg
+               else return Nothing
+    Just (nlvl,nqueue) -> if unrollPerformCheck cfg lastLvl nlvl
+                          then (do
+                                   err <- checkForErrors cfg
+                                   case err of
+                                     Just err' -> return $ Just err'
+                                     Nothing -> contextQueueCheck (n+1) False False cfg nlvl nlvl nqueue)
+                          else contextQueueCheck (n+1) False True cfg lastLvl nlvl nqueue
+
+getMinBudget :: UnrollConfig mloc ptr -> UnrollContext a mloc ptr -> UnrollBudget
+getMinBudget cfg ctx = minimumBy (unrollDynamicOrder cfg)
+                       [ edgeBudget edge | edge <- realizationQueue ctx ]
+
+instance Show (BlockInfo mloc ptr) where
+  show info = show (blockInfoFun info,
+                    blockInfoBlk info,
+                    blockInfoBlkName info,
+                    blockInfoSubBlk info)

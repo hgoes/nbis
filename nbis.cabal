@@ -18,4 +18,5 @@ Executable nbis
     MemoryModel.Plain
     MemoryModel.Snow
     MemoryModel.Rivers
-  Build-Depends:	base,bindings-llvm,containers,mtl,smtlib2,fgl,tagged,random
+  Build-Depends:	base,bindings-llvm,containers,mtl,smtlib2,fgl,tagged,random,smtlib2-boolector,smtlib2-stp
+  GHC-Options: -fwarn-unused-imports

@@ -10,15 +10,6 @@ import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 
-data MemLocDesc mloc ptr
-  = EAlloc TypeDesc DynNum ptr mloc
-  | ELoad ptr (SMTExpr (BitVector BVUntyped))
-  | ELoadPtr ptr ptr
-  | EStore (SMTExpr (BitVector BVUntyped)) ptr mloc
-  | EStorePtr ptr ptr mloc
-  | EPhi (SMTExpr Bool) mloc
-  deriving (Eq)
-
 data MemoryGraph mloc ptr
   = MemGraph { nullsByPtr :: Map ptr TypeDesc
              , comparesByLHS :: Map ptr (ptr,SMTExpr Bool)
@@ -46,6 +37,13 @@ data MemoryGraph mloc ptr
              , ptrStoresBySrcPtr :: Map ptr (Map (mloc,mloc) (ptr,SMTExpr Bool))
              , locPhisBySrc :: Map mloc (Map mloc (SMTExpr Bool))
              , locPhisByTrg :: Map mloc (Map mloc (SMTExpr Bool))
+             , memSetsBySrc :: Map mloc (Map mloc (ptr,DynNum,DynNum,SMTExpr Bool))
+             , memSetsByPtr :: Map ptr (Map (mloc,mloc) (DynNum,DynNum,SMTExpr Bool))
+             , memCopyBySrc :: Map mloc (Map mloc (ptr,ptr,CopyOptions))
+             , memCopyBySrcPtr :: Map ptr (Map (mloc,mloc) (ptr,CopyOptions))
+             , memCopyByTrgPtr :: Map ptr (Map (mloc,mloc) (ptr,CopyOptions))
+             , freesBySrc :: Map mloc (Map mloc ptr)
+             , freesByPtr :: Map ptr (Set (mloc,mloc))
              }
 
 memGraphEmpty :: MemoryGraph mloc ptr
@@ -75,6 +73,13 @@ memGraphEmpty = MemGraph { nullsByPtr = Map.empty
                          , ptrStoresBySrcPtr = Map.empty
                          , locPhisBySrc = Map.empty
                          , locPhisByTrg = Map.empty
+                         , memSetsBySrc = Map.empty
+                         , memSetsByPtr = Map.empty
+                         , memCopyBySrc = Map.empty
+                         , memCopyBySrcPtr = Map.empty
+                         , memCopyByTrgPtr = Map.empty
+                         , freesBySrc = Map.empty
+                         , freesByPtr = Map.empty
                          }
 
 instance (Ord mloc,Ord ptr) => MemoryModel (MemoryGraph mloc ptr) mloc ptr where
@@ -132,3 +137,16 @@ addInstruction act (MIPhi cases mto) gr
   = gr { locPhisBySrc = foldl (\mp (cond,mfrom) -> Map.insertWith Map.union mfrom (Map.singleton mto cond) mp
                               ) (locPhisBySrc gr) cases
        , locPhisByTrg = Map.insertWith Map.union mto (Map.fromList [ (mfrom,cond) | (cond,mfrom) <- cases ]) (locPhisByTrg gr) }
+addInstruction act (MISet mfrom ptr val len mto) gr
+  = gr { memSetsBySrc = Map.insertWith Map.union mfrom (Map.singleton mto (ptr,val,len,act))
+                        (memSetsBySrc gr)
+       , memSetsByPtr = Map.insertWith Map.union ptr (Map.singleton (mfrom,mto) (val,len,act))
+                        (memSetsByPtr gr) }
+addInstruction act (MICopy mfrom ptrFrom ptrTo opts mto) gr
+  = gr { memCopyBySrc = Map.insertWith Map.union mfrom (Map.singleton mto (ptrFrom,ptrTo,opts))
+                        (memCopyBySrc gr)
+       , memCopyBySrcPtr = Map.insertWith Map.union ptrFrom (Map.singleton (mfrom,mto) (ptrTo,opts))
+                           (memCopyBySrcPtr gr) }
+addInstruction act (MIFree mfrom ptr mto) gr
+  = gr { freesBySrc = Map.insertWith Map.union mfrom (Map.singleton mto ptr) (freesBySrc gr)
+       , freesByPtr = Map.insertWith Set.union ptr (Set.singleton (mfrom,mto)) (freesByPtr gr) }
