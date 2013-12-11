@@ -130,8 +130,8 @@ data UnrollBudget = UnrollBudget { unrollDepth :: Integer
                                  } deriving (Show,Eq,Ord)
 
 data BlockEdge = EdgeJmp
-               | EdgeSucc (Maybe Integer)
-               | EdgeCall
+               | EdgeSucc Gr.Node -- The callled node
+               | EdgeCall Gr.Node -- The successor node
                | EdgeRet
                deriving (Eq,Ord,Show)
 
@@ -204,7 +204,11 @@ mkBlockGraph (funs,_,_,_,_)
                  ITerminator (ISwitch _ def cases)
                    -> (nodeMp!(def,0),EdgeJmp):[ (nodeMp!(blk,0),EdgeJmp) | (_,blk) <- cases ]
                  ITerminator (ICall _ (Operand { operandDesc = ODFunction _ f _ }) _)
-                   -> [(funInfoStartBlk (funInfo!f),EdgeCall)]
+                   -> let callNode = funInfoStartBlk (funInfo!f)
+                          succNode = nodeMp!(blockInfoBlk info,blockInfoSubBlk info+1)
+                      in [(callNode,EdgeCall succNode)
+                         ,(succNode,EdgeSucc callNode)
+                         ]
                  ITerminator (IRet _)
                    -> [ (nodeMp!(blockInfoBlk info',blockInfoSubBlk info'+1),EdgeRet)
                       | (_,info') <- nodeList
@@ -316,12 +320,12 @@ mergePointConfig' entry prog@(funs,globs,ptrWidth,alltps,structs) select selectE
                           , (blk,name,subs) <- blks
                           , (sblk,instrs) <- zip [0..] subs
                           | nd <- [0..] ]
-    prog_gr = calculateDistanceInfo selectErr (mkBlockGraph prog)
+    prog_gr = generateDistanceInfo selectErr (mkBlockGraph prog) --calculateDistanceInfo selectErr (mkBlockGraph prog)
     Just (_,_,(start_blk,_,_):_,_,_) = Map.lookup entry funs
     start_nd = case Map.lookup (entry,start_blk,0) blk_mp of
       Nothing -> error $ "Failed to find entry point "++entry
       Just (x,_) -> x
-    order = calculateOrder prog_gr start_nd
+    order = calculateSimpleOrder prog_gr start_nd
     selectedMergePoints = select ext_funs prog_gr
     getLoops mp loop = foldl getLoops (Map.insert (loopDescHeader loop) loop mp) (loopDescSubs loop)
     loopHdrs = foldl (\mp (_,_,_,loops,_)
@@ -348,6 +352,15 @@ calculateOrder gr startNd = reverse $ Gr.postorder dfsTree
     dfs' gr ((d,info,suc):ns) = let (subs,gr') = dfs d gr suc
                                     (rest,gr'') = dfs' gr' ns
                                 in ((Node info subs):rest,gr'')
+
+calculateSimpleOrder :: BlockGraph mloc ptr -> Gr.Node -> [(String,Ptr BasicBlock,Integer)]
+calculateSimpleOrder gr startNd = reverse $ Gr.postorder dfsTree
+  where
+    [dfsTree] = Gr.xdffWith (\(_,_,_,succ) -> mapMaybe (\(edge,nd) -> case edge of
+                                                           EdgeSucc _ -> Nothing
+                                                           _ -> Just nd
+                                                       ) succ)
+                (\(_,_,info,_) -> (blockInfoFun info,blockInfoBlk info,blockInfoSubBlk info)) [startNd] (blockGraph gr)
 
 reachabilityInfo :: Map (Ptr BasicBlock,Integer) (Maybe String,RealizationInfo,RealizationMonad mloc ptr (BlockFinalization ptr))
                     -> Map (Ptr BasicBlock,Integer) (Map (Ptr BasicBlock,Integer) (Set (Ptr BasicBlock,Integer)))
@@ -990,62 +1003,6 @@ errorDistanceForNodeId gr nd = case Map.lookup (nodeIdBlock nd,nodeIdSubblock nd
 allProxies :: UnrollEnv a mem mloc ptr -> [SMTExpr Bool]
 allProxies env = [ mergeActivationProxy nd | nd <- Map.elems (unrollMergeNodes env) ]
 
-calculateDistanceInfo :: (ErrorDesc -> Bool) -> BlockGraph mloc ptr -> BlockGraph mloc ptr
-calculateDistanceInfo isInteresting (gr::BlockGraph mloc ptr)
-  = trace ("distanceInfo: "++show (Gr.nmap (\info -> (blockInfoFun info,blockInfoBlk info,blockInfoSubBlk info,blockInfoDistance info)) $ blockGraph ngr3)) $ ngr3
-  where
-    errorNodes = mapMaybe (\(nd,info)
-                           -> if any isInteresting (rePotentialErrors $ blockInfoRealizationInfo info)
-                              then Just (nd,0)
-                              else Nothing) $ Gr.labNodes (blockGraph ngr2)
-    retNodes = mapMaybe (\(nd,info)
-                         -> if reReturns (blockInfoRealizationInfo info)
-                            then Just (nd,0)
-                            else Nothing) $ Gr.labNodes (blockGraph gr)
-
-    ngr1 :: BlockGraph mloc ptr
-    ngr1 = gr { blockGraph = Gr.mkGraph (updateGraph (\lvl edge -> case edge of
-                                                         EdgeJmp -> Just (lvl+1)
-                                                         EdgeCall -> Just (lvl+1)
-                                                         _ -> Nothing)
-                                         (\dist v -> dist { distanceToReturn = Just v }) (blockGraph gr) Map.empty retNodes) (Gr.labEdges $ blockGraph gr)
-              }
-
-    ngr2 = addSuccEdges ngr1
-    
-    ngr3 = ngr2 { blockGraph = Gr.mkGraph (updateGraph (\lvl edge -> case edge of
-                                                           EdgeJmp -> Just (lvl+1)
-                                                           EdgeSucc dist -> case dist of
-                                                             Just d -> Just (lvl+d+1)
-                                                             Nothing -> Nothing
-                                                           EdgeCall -> Just (lvl+1)
-                                                           _ -> Nothing)
-                                           (\dist v -> dist { distanceToError = Just v }) (blockGraph ngr2) Map.empty errorNodes) (Gr.labEdges $ blockGraph ngr2)
-                }
-
-    addSuccEdges gr = gr { blockGraph = Gr.insEdges [ (ndFrom,ndTo,EdgeSucc $ distanceToReturn $ blockInfoDistance callInfo)
-                                                    | (ndFrom,ndCall,EdgeCall) <- Gr.labEdges $ blockGraph gr
-                                                    , let Just fromInfo = Gr.lab (blockGraph gr) ndFrom
-                                                          Just callInfo = Gr.lab (blockGraph gr) ndCall
-                                                          Just ndTo = Map.lookup (blockInfoBlk fromInfo,blockInfoSubBlk fromInfo+1) (blockMap gr) ]
-                                        (blockGraph gr) }
-    
-    updateGraph f g cgr nxt [] = if Map.null nxt
-                                 then Gr.labNodes cgr
-                                 else updateGraph f g cgr Map.empty (Map.toList nxt)
-    updateGraph f g cgr nxt ((nd,lvl):cur)
-      = let (ctx,cgr') = Gr.match nd cgr
-        in case ctx of
-          Just (prev,_,info,_) -> let new = Map.unionWith min
-                                            nxt
-                                            (Map.fromList $ catMaybes
-                                             [ case f lvl edge of
-                                                  Nothing -> Nothing
-                                                  Just l -> Just (ndFrom,l)
-                                             | (edge,ndFrom) <- prev ])
-                                  in (nd,info { blockInfoDistance = g (blockInfoDistance info) lvl }):updateGraph f g cgr' new cur
-          Nothing -> updateGraph f g cgr' nxt cur
-
 contextQueueInsert :: UnrollConfig mloc ptr -> UnrollContext a mloc ptr
                       -> UnrollQueue a mloc ptr
                       -> UnrollQueue a mloc ptr
@@ -1073,7 +1030,8 @@ contextQueueStep isFirst cfg lvl queue = case queue of
     _:_ -> case unrollDynamicOrder cfg minB lvl of
       GT -> return $ Just (minB,queue)
       _ -> do
-        ctx' <- performUnrollmentCtx isFirst cfg ctx --stepUnrollCtx isFirst cfg ctx
+        ctx' <- performUnrollmentCtx isFirst cfg ctx
+        --ctx' <- stepUnrollCtx isFirst cfg ctx
         case realizationQueue ctx' of
           [] -> return $ Just (lvl,(ctx',getMinBudget cfg ctx'):qs)
           e:_ -> case unrollDynamicOrder cfg lvl (edgeBudget e) of
@@ -1152,3 +1110,96 @@ instance Show (BlockInfo mloc ptr) where
                     blockInfoBlk info,
                     blockInfoBlkName info,
                     blockInfoSubBlk info)
+
+generateDistanceInfo :: (ErrorDesc -> Bool) -> BlockGraph mloc ptr -> BlockGraph mloc ptr
+generateDistanceInfo isError gr = updateDistanceInfo gr upds
+  where
+    upds = catMaybes [ if hasErrs || isRet
+                       then Just (nd,DistInfo { distanceToError = if hasErrs
+                                                                  then Just 0
+                                                                  else Nothing
+                                              , distanceToReturn = if isRet
+                                                                   then Just 0
+                                                                   else Nothing
+                                              })
+                       else Nothing
+                     | (nd,blk) <- Gr.labNodes (blockGraph gr)
+                     , let info = blockInfoRealizationInfo blk
+                           hasErrs = any isError (rePotentialErrors info)
+                           isRet = reReturns info ]
+
+updateDistanceInfo :: BlockGraph mloc ptr -> [(Gr.Node,DistanceInfo)] -> BlockGraph mloc ptr
+updateDistanceInfo gr [] = trace ("distanceInfo: "++show (Gr.nmap (\info -> (blockInfoFun info,blockInfoBlk info,blockInfoSubBlk info,blockInfoDistance info)) $ blockGraph gr)) $ gr
+updateDistanceInfo gr xs = let (ngr,upds) = updateDistanceInfo' gr xs
+                           in updateDistanceInfo ngr upds
+
+updateDistanceInfo' :: BlockGraph mloc ptr -> [(Gr.Node,DistanceInfo)] -> (BlockGraph mloc ptr,[(Gr.Node,DistanceInfo)])
+updateDistanceInfo' gr [] = (gr,[])
+updateDistanceInfo' gr (x:xs) = let (gr1,upd1) = updateDistanceInfo'' gr x
+                                    (gr2,upd2) = updateDistanceInfo' gr1 xs
+                                in (gr2,upd1++upd2)
+
+updateDistanceInfo'' :: BlockGraph mloc ptr -> (Gr.Node,DistanceInfo) -> (BlockGraph mloc ptr,[(Gr.Node,DistanceInfo)])
+updateDistanceInfo'' gr (nd,newDist) = (gr { blockGraph = ngr },upds)
+  where
+    (Just (prev,_,blk,succ),gr') = Gr.match nd (blockGraph gr)
+    oldDist = blockInfoDistance blk
+    newRetDist = case (distanceToReturn oldDist,distanceToReturn newDist) of
+      (Nothing,Nothing) -> Nothing
+      (Just _,Nothing) -> Nothing
+      (Nothing,Just n) -> Just n
+      (Just odist,Just ndist) -> if odist <= ndist
+                                 then Nothing
+                                 else Just ndist
+    newErrDist = case (distanceToError oldDist,distanceToError newDist) of
+      (Nothing,Nothing) -> Nothing
+      (Just _,Nothing) -> Nothing
+      (Nothing,Just n) -> Just n
+      (Just odist,Just ndist) -> if odist <= ndist
+                                 then Nothing
+                                 else Just ndist
+    ngr = (prev,nd,blk { blockInfoDistance = DistInfo { distanceToError = case distanceToError newDist of
+                                                           Nothing -> distanceToError oldDist
+                                                           Just n -> case distanceToError oldDist of
+                                                             Nothing -> Just n
+                                                             Just o -> Just $ min n o
+                                                      , distanceToReturn = case distanceToReturn newDist of
+                                                           Nothing -> distanceToReturn oldDist
+                                                           Just n -> case distanceToReturn oldDist of
+                                                             Nothing -> Just n
+                                                             Just o -> Just $ min n o }
+                       },succ) Gr.& gr'
+    upds = catMaybes [ case edge of
+                          EdgeJmp -> case (newRetDist,newErrDist) of
+                            (Nothing,Nothing) -> Nothing
+                            _ -> Just (prevNode,DistInfo { distanceToError = fmap (+1) newErrDist
+                                                         , distanceToReturn = fmap (+1) newRetDist })
+                          EdgeCall succNode -> let Just succBlk = Gr.lab gr' succNode
+                                                   succErrDist = distanceToError $ blockInfoDistance succBlk
+                                                   succRetDist = distanceToReturn $ blockInfoDistance succBlk
+                                                   newErrDist' = case newRetDist of
+                                                     Nothing -> fmap (+1) newErrDist
+                                                     Just d -> case succErrDist of
+                                                       Nothing -> fmap (+1) newErrDist
+                                                       Just e -> case newErrDist of
+                                                         Nothing -> Just (d+e+1)
+                                                         Just derr -> Just (min (derr+1) (d+e+1))
+                                                   newRetDist' = case newRetDist of
+                                                     Nothing -> Nothing
+                                                     Just r -> case succRetDist of
+                                                       Nothing -> Nothing
+                                                       Just r' -> Just (r+r'+1)
+                                               in case (newRetDist,newErrDist) of
+                                                 (Nothing,Nothing) -> Nothing
+                                                 _ -> Just (prevNode,DistInfo { distanceToError = newErrDist'
+                                                                              , distanceToReturn = newRetDist' })
+                          EdgeSucc callNode -> case (newRetDist,newErrDist) of
+                            (Nothing,Nothing) -> Nothing
+                            _ -> let Just callBlk = Gr.lab gr' callNode
+                                     minDist = distanceToReturn $ blockInfoDistance callBlk
+                                 in case minDist of
+                                   Nothing -> Nothing
+                                   Just minDist' -> Just (prevNode,DistInfo { distanceToError = fmap (+minDist') newErrDist
+                                                                            , distanceToReturn = fmap (+minDist') newRetDist })
+                          _ -> Nothing
+                     | (edge,prevNode) <- prev ]
