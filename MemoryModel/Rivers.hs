@@ -160,7 +160,8 @@ addInstructions :: (Ord ptr,Ord mloc,Show ptr,Show mloc)
 addInstructions ptrs mem is
   = foldlM (\cmem (cond,i) -> do
                (cmem',upd) <- initUpdate ptrs cmem cond i
-               return $ applyUpdate cmem' upd
+               upd' <- unifyUpdate upd
+               return $ applyUpdate cmem' upd'
            ) mem is
 
 data Update mloc ptr
@@ -678,7 +679,8 @@ initUpdate _ mem act instr@(MIAlloc mfrom tp sz ptr mto) = do
                  }
       upd = updateFromLoc mem1 mfrom
   (upd',errs) <- updateInstruction upd (mem1 { riverProgram = addInstruction act instr memGraphEmpty })
-  return (mem1 { riverErrors = errs++(riverErrors mem1) },
+  mem2 <- addErrors errs mem1
+  return (mem2,
           upd' { newObjects = Map.insertWith Map.union mto (Map.singleton (riverNextObject mem)
                                                             (ObjectInfo { objectRepresentation = newObj
                                                                         , objectReachability = Map.empty })) (newObjects upd')
@@ -691,7 +693,8 @@ initUpdate ptrs mem act instr@(MILoad mfrom ptr _) = do
                   }
       upd = updateFromPtr mem2 ptr
   (upd',errs) <- updateInstruction upd (mem2 { riverProgram = addInstruction act instr memGraphEmpty })
-  return (mem2 { riverErrors = errs++(riverErrors mem2) },upd')
+  mem3 <- addErrors errs mem2
+  return (mem3,upd')
 initUpdate ptrs mem act instr@(MILoadPtr mfrom ptrFrom ptrTo) = do
   (_,mem1) <- getPointer mem ptrs ptrFrom
   (_,mem2) <- getPointer mem1 ptrs ptrTo
@@ -700,7 +703,8 @@ initUpdate ptrs mem act instr@(MILoadPtr mfrom ptrFrom ptrTo) = do
       upd1 = updateFromPtr mem3 ptrFrom
       upd2 = updateFromPtr mem3 ptrTo
   (upd3,errs) <- updateInstruction (mappend upd1 upd2) (mem3 { riverProgram = addInstruction act instr memGraphEmpty })
-  return (mem3 { riverErrors = errs++(riverErrors mem3) },upd3)
+  mem4 <- addErrors errs mem3
+  return (mem4,upd3)
 initUpdate ptrs mem act instr@(MIStore mfrom _ ptr mto) = do
   (_,mem1) <- getPointer mem ptrs ptr
   let mem2 = mem1 { riverLocations = insertIfNotPresent mfrom (RiverLocation Map.empty) $
@@ -710,7 +714,8 @@ initUpdate ptrs mem act instr@(MIStore mfrom _ ptr mto) = do
       upd1 = updateFromLoc mem2 mfrom
       upd2 = updateFromPtr mem2 ptr
   (upd3,errs) <- updateInstruction (mappend upd1 upd2) (mem2 { riverProgram = addInstruction act instr memGraphEmpty })
-  return (mem2 { riverErrors = errs++(riverErrors mem2) },upd3)
+  mem3 <- addErrors errs mem2
+  return (mem3,upd3)
 initUpdate ptrs mem act instr@(MIStorePtr mfrom ptrFrom ptrTo mto) = do
   (_,mem1) <- getPointer mem ptrs ptrFrom
   (_,mem2) <- getPointer mem1 ptrs ptrTo
@@ -723,7 +728,8 @@ initUpdate ptrs mem act instr@(MIStorePtr mfrom ptrFrom ptrTo mto) = do
       upd3 = updateFromLoc mem3 mfrom
       upd4 = mconcat [upd1,upd2,upd3]
   (upd5,errs) <- updateInstruction upd4 (mem3 { riverProgram = addInstruction act instr memGraphEmpty })
-  return (mem3 { riverErrors = errs++(riverErrors mem3) },upd5)
+  mem4 <- addErrors errs mem3
+  return (mem4,upd5)
 initUpdate ptrs mem _ (MICompare ptr1 ptr2 res) = do
   (info1,mem1) <- getPointer mem ptrs ptr1
   (info2,mem2) <- getPointer mem1 ptrs ptr2
@@ -747,7 +753,8 @@ initUpdate ptrs mem act instr@(MISelect cases ptr) = do
                                                                 }) (riverPointers mem1)
                   }
   (upd2,errs) <- updateInstruction upd (mem2 { riverProgram = addInstruction act instr memGraphEmpty })
-  return (mem2 { riverErrors = errs++(riverErrors mem2) },upd2)
+  mem3 <- addErrors errs mem2
+  return (mem3,upd2)
   where
     buildCases cmem [(_,p)] = do
       (info,nmem) <- getPointer cmem ptrs p
@@ -765,7 +772,8 @@ initUpdate ptrs mem act instr@(MICast _ _ ptrFrom ptrTo) = do
   let mem2 = mem1 { riverPointers = Map.insert ptrTo (infoFrom { pointerReachability = Map.empty }) (riverPointers mem1) }
       upd = updateFromPtr mem2 ptrFrom
   (upd',errs) <- updateInstruction upd (mem2 { riverProgram = addInstruction act instr memGraphEmpty })
-  return (mem2 { riverErrors = errs++(riverErrors mem2) },upd')
+  mem3 <- addErrors errs mem2
+  return (mem3,upd')
 initUpdate ptrs mem act instr@(MIIndex tpFrom _ idx ptrFrom ptrTo) = do
   (infoFrom,mem1) <- getPointer mem ptrs ptrFrom
   let tp_to = ptrs!ptrTo
@@ -779,13 +787,15 @@ initUpdate ptrs mem act instr@(MIIndex tpFrom _ idx ptrFrom ptrTo) = do
                   }
       upd = updateFromPtr mem2 ptrFrom
   (upd',errs) <- updateInstruction upd (mem2 { riverProgram = addInstruction act instr memGraphEmpty })
-  return (mem2 { riverErrors = errs++(riverErrors mem2) },upd')
+  mem3 <- addErrors errs mem2
+  return (mem3,upd')
 initUpdate _ mem act instr@(MIPhi cases mto) = do
   let (mem1,upd) = buildCases (mem { riverLocations = insertIfNotPresent mto (RiverLocation Map.empty)
                                                       (riverLocations mem)
                                    }) cases
   (upd',errs) <- updateInstruction upd (mem1 { riverProgram = addInstruction act instr memGraphEmpty })
-  return (mem1 { riverErrors = errs++(riverErrors mem1) },upd')
+  mem2 <- addErrors errs mem1
+  return (mem2,upd')
   where
     buildCases cmem [(_,loc)]
       = let cmem1 = cmem { riverLocations = insertIfNotPresent loc (RiverLocation Map.empty)
@@ -808,7 +818,8 @@ initUpdate ptrs mem act instr@(MISet mfrom ptr _ _ mto) = do
       upd2 = updateFromLoc mem2 mfrom
       upd = upd1 `mappend` upd2
   (upd',errs) <- updateInstruction upd (mem2 { riverProgram = addInstruction act instr memGraphEmpty })
-  return (mem2 { riverErrors = errs++(riverErrors mem1) },upd')
+  mem3 <- addErrors errs mem2
+  return (mem3,upd')
 initUpdate ptrs mem act instr@(MICopy mfrom ptrFrom ptrTo _ mto) = do
   (_,mem1) <- getPointer mem ptrs ptrFrom
   (_,mem2) <- getPointer mem1 ptrs ptrTo
@@ -820,7 +831,8 @@ initUpdate ptrs mem act instr@(MICopy mfrom ptrFrom ptrTo _ mto) = do
       upd3 = updateFromLoc mem3 mfrom
       upd = mconcat [upd1,upd2,upd3]
   (upd',errs) <- updateInstruction upd (mem3 { riverProgram = addInstruction act instr memGraphEmpty })
-  return (mem3 { riverErrors = errs++(riverErrors mem3) },upd')
+  mem4 <- addErrors errs mem3
+  return (mem4,upd')
 initUpdate ptrs mem act instr@(MIFree mfrom ptr mto) = do
   (_,mem1) <- getPointer mem ptrs ptr
   let mem2 = mem1 { riverLocations = insertIfNotPresent mfrom (RiverLocation Map.empty) $
@@ -830,7 +842,8 @@ initUpdate ptrs mem act instr@(MIFree mfrom ptr mto) = do
       upd2 = updateFromLoc mem2 mfrom
       upd = upd1 `mappend` upd2
   (upd',errs) <- updateInstruction upd (mem2 { riverProgram = addInstruction act instr memGraphEmpty })
-  return (mem2 { riverErrors = errs++(riverErrors mem2) },upd')
+  mem3 <- addErrors errs mem2
+  return (mem3,upd')
 
 applyUpdateRec :: (Ord mloc,Ord ptr,Show mloc,Show ptr) => RiverMemory mloc ptr -> Update mloc ptr -> SMT (RiverMemory mloc ptr)
 applyUpdateRec mem upd
@@ -1276,3 +1289,13 @@ unifyObject (DynamicObject tp arr limit) = do
           then defConst arr
           else return arr
   return (DynamicObject tp narr limit)
+
+addErrors :: [(ErrorDesc,SMTExpr Bool)] -> RiverMemory mloc ptr -> SMT (RiverMemory mloc ptr)
+addErrors errs mem = do
+  nerrs <- mapM (\(desc,cond) -> do
+                    ncond <- if isComplexExpr cond
+                             then defConstNamed "err" cond
+                             else return cond
+                    return (desc,ncond)
+                ) errs
+  return $ mem { riverErrors = nerrs++(riverErrors mem) }
