@@ -124,8 +124,7 @@ type UnrollMonad a mem mloc ptr = StateT (UnrollEnv a mem mloc ptr) SMT
 data UnrollBudget = UnrollBudget { unrollDepth :: Integer
                                  , unrollUnwindDepth :: Integer
                                  , unrollUnrollDepth :: Map (Ptr Loop) Integer
-                                 , unrollErrorDistance :: Integer
-                                 , unrollErrorDistanceOffset :: Integer
+                                 , unrollErrorDistance :: Maybe Integer
                                  , unrollContextDepth :: Integer
                                  } deriving (Show,Eq,Ord)
 
@@ -546,8 +545,10 @@ enqueueEdge = insertWithOrder (\x y -> if nodeIdFunction (edgeTarget x) == nodeI
                             , edgeBudget = UnrollBudget { unrollDepth = min (unrollDepth $ edgeBudget e1) (unrollDepth $ edgeBudget e2)
                                                         , unrollUnwindDepth = min (unrollUnwindDepth $ edgeBudget e1) (unrollUnwindDepth $ edgeBudget e2)
                                                         , unrollUnrollDepth = min (unrollUnrollDepth $ edgeBudget e1) (unrollUnrollDepth $ edgeBudget e2)
-                                                        , unrollErrorDistance = min (unrollErrorDistance $ edgeBudget e1) (unrollErrorDistance $ edgeBudget e2)
-                                                        , unrollErrorDistanceOffset = min (unrollErrorDistanceOffset $ edgeBudget e1) (unrollErrorDistanceOffset $ edgeBudget e2)
+                                                        , unrollErrorDistance = case (unrollErrorDistance $ edgeBudget e1,unrollErrorDistance $ edgeBudget e2) of
+                                                             (Nothing,d2) -> d2
+                                                             (d1,Nothing) -> d1
+                                                             (Just d1,Just d2) -> Just $ min d1 d2
                                                         , unrollContextDepth = min (unrollContextDepth $ edgeBudget e1) (unrollContextDepth $ edgeBudget e2) }
                             }) (\x -> (nodeIdFunction $ edgeTarget x,nodeIdBlock $ edgeTarget x,nodeIdSubblock $ edgeTarget x))
 
@@ -649,17 +650,18 @@ startingContext cfg fname = case Map.lookup fname (blockFunctions $ unrollGraph 
                             ref <- liftIO $ newIORef (MergedValue False (Left $ DirectValue res))
                             return (Left arg,ref)
                       ) (funInfoArguments info)
+    let nId = NodeId { nodeIdFunction = fname
+                     , nodeIdBlock = blk
+                     , nodeIdSubblock = sblk
+                     , nodeIdCallStack = Nothing }
     return (UnrollContext { unrollOrder = order
                           , currentMergeNodes = Map.empty
                           , nextMergeNodes = Map.empty
                           , usedMergeNodes = Map.empty
-                          , realizationQueue = [Edge { edgeTarget = NodeId { nodeIdFunction = fname
-                                                                           , nodeIdBlock = blk
-                                                                           , nodeIdSubblock = sblk
-                                                                           , nodeIdCallStack = Nothing }
+                          , realizationQueue = [Edge { edgeTarget = nId
                                                      , edgeConds = [(fname,nullPtr,0,constant True,[Map.fromList startArgs],0,Nothing)]
                                                      , edgeCreatedMergeNodes = Set.empty
-                                                     , edgeBudget = UnrollBudget 0 0 Map.empty 0 0 0
+                                                     , edgeBudget = UnrollBudget 0 0 Map.empty (errorDistanceForNodeId (unrollGraph cfg) nId) 0
                                                      }]
                           , outgoingEdges = []
                           },UnrollEnv { unrollNextMem = 1
@@ -891,9 +893,7 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                                                         , unrollUnrollDepth = case Map.lookup trg_blk (unrollLoopHeaders cfg) of
                                                           Nothing -> unrollUnrollDepth lvl
                                                           Just loop -> Map.insertWith (+) (loopDescPtr loop) 1 (unrollUnrollDepth lvl)
-                                                        , unrollErrorDistance = case errorDistanceForNodeId (unrollGraph cfg) nodeId of
-                                                          Nothing -> error $ "Unable to calculate error distance for "++show nodeId
-                                                          Just d -> d
+                                                        , unrollErrorDistance = errorDistanceForNodeId (unrollGraph cfg) nodeId
                                                         }
                                      } | (cond,trg_blk) <- trgs
                                        , let nodeId = NodeId { nodeIdFunction = nodeIdFunction trg
@@ -916,9 +916,8 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                           , edgeCreatedMergeNodes = nCreatedMerges
                           , edgeBudget = lvl { unrollDepth = unrollDepth lvl + 1
                                              , unrollUnwindDepth = unrollUnwindDepth lvl + 1
-                                             , unrollErrorDistance = case errorDistanceForNodeId (unrollGraph cfg) nodeId of
-                                               Nothing -> error $ "Unable to calculate error distance for "++show nodeId
-                                               Just d -> d }
+                                             , unrollErrorDistance = errorDistanceForNodeId (unrollGraph cfg) nodeId
+                                             }
                           } ]
           Return rval -> case nodeIdCallStack trg of
             Just (prev,trg_instr) -> do
@@ -933,9 +932,8 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                             , edgeCreatedMergeNodes = nCreatedMerges
                             , edgeBudget = lvl { unrollDepth = unrollDepth lvl + 1
                                                , unrollUnwindDepth = unrollUnwindDepth lvl - 1
-                                               , unrollErrorDistance = case errorDistanceForNodeId (unrollGraph cfg) prev of
-                                                 Nothing -> error $ "Unable to calculate error distance for "++show prev
-                                                 Just d -> d }
+                                               , unrollErrorDistance = errorDistanceForNodeId (unrollGraph cfg) prev
+                                               }
                             } ]
             Nothing -> return []
         let (nqueue,nout) = foldl (\(cqueue,cout) edge
