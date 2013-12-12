@@ -49,6 +49,7 @@ data TerminatorDesc a
   | IBrCond a (Ptr BasicBlock) (Ptr BasicBlock)
   | ISwitch a (Ptr BasicBlock) [(a,Ptr BasicBlock)]
   | ICall (Ptr Instruction) a [a]
+  | IUnreachable
   deriving (Show,Eq,Ord)
 
 data Operand = Operand { operandType :: TypeDesc
@@ -221,6 +222,7 @@ reifyInstr tl dl ptr
                 cases <- unravelCases begin end
                 return $ ITerminator (ISwitch cond def_blk cases)
             ) (castDown ptr)
+      ,fmap (\(_::Ptr UnreachableInst) -> return $ ITerminator IUnreachable) (castDown ptr)
       ]
   where
     mkSwitch ((Just act):_) = act
