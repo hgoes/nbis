@@ -836,8 +836,9 @@ applyUpdateRec :: (Ord mloc,Ord ptr,Show mloc,Show ptr) => RiverMemory mloc ptr 
 applyUpdateRec mem upd
   | isNoUpdate upd' = return mem
   | otherwise = do
-    let mem1 = applyUpdate mem upd'
-    (upd1,errs) <- updateInstruction upd' mem1
+    upd'' <- unifyUpdate upd'
+    let mem1 = applyUpdate mem upd''
+    (upd1,errs) <- updateInstruction upd'' mem1
     let mem2 = mem1 { riverErrors = errs++(riverErrors mem1) }
     applyUpdateRec mem2 upd1
   where
@@ -973,7 +974,7 @@ mkGlobal pw structs tp (MemArray els) = do
                                                                                                                                               , dynamicOffset = Nothing }),
                                                       idx+(w `div` 8))
                        ) (obj,0) els
-  return obj'
+  unifyObject obj'
 
 offsetToExpr :: Integer -> Offset -> SMTExpr (BitVector BVUntyped)
 offsetToExpr width off
@@ -1252,3 +1253,23 @@ simplifyRiver mem = do
                 ) (riverPointers mem)
   return $ mem { riverLocations = nlocs
                , riverPointers = nptrs }
+
+unifyUpdate :: Update mloc ptr -> SMT (Update mloc ptr)
+unifyUpdate upd = do
+  nobjs <- mapM (mapM (\objInfo -> do
+                          nrepr <- unifyObject (objectRepresentation objInfo)
+                          return (objInfo { objectRepresentation = nrepr })
+                      )) (newObjects upd)
+  return (upd { newObjects = nobjs })
+
+unifyObject :: RiverObject -> SMT RiverObject
+unifyObject (StaticObject tp bvs) = do
+  bvs' <- mapM (\bv -> if isComplexExpr bv
+                       then defConst bv
+                       else return bv) bvs
+  return (StaticObject tp bvs)
+unifyObject (DynamicObject tp arr limit) = do
+  narr <- if isComplexExpr arr
+          then defConst arr
+          else return arr
+  return (DynamicObject tp narr limit)
