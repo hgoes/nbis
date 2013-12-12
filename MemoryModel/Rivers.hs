@@ -962,6 +962,9 @@ mkGlobal :: Integer -> Map String [TypeDesc] -> TypeDesc -> MemContent -> SMT Ri
 mkGlobal _ _ tp (MemCell w v) = do
   obj <- defConstNamed "global" (constantAnn (BitVector v) w)
   return $ StaticObject tp [obj]
+mkGlobal pw _ tp MemNull = do
+  obj <- defConstNamed "globalPtr" (constantAnn (BitVector 0) (pw*8))
+  return $ StaticObject tp [obj]
 mkGlobal pw structs tp (MemArray els) = do
   let w = case els of
         (MemCell w _):_ -> w
