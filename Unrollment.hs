@@ -543,22 +543,48 @@ createMergeValues extensible
   = mapM (\val -> liftIO $ newIORef (MergedValue extensible val))
 
 enqueueEdge :: [(String,Ptr BasicBlock,Integer)] -> Edge a mloc ptr -> [Edge a mloc ptr] -> [Edge a mloc ptr]
-enqueueEdge = insertWithOrder (\x y -> if nodeIdFunction (edgeTarget x) == nodeIdFunction (edgeTarget y) &&
-                                          nodeIdBlock (edgeTarget x) == nodeIdBlock (edgeTarget y) &&
-                                          nodeIdSubblock (edgeTarget x) == nodeIdSubblock (edgeTarget y)
-                                       then Just $ comparing (nodeIdCallStack . edgeTarget) x y
-                                       else Nothing)
-              (\e1 e2 -> e1 { edgeConds = (edgeConds e1)++(edgeConds e2)
-                            , edgeCreatedMergeNodes = Set.union (edgeCreatedMergeNodes e1) (edgeCreatedMergeNodes e2)
-                            , edgeBudget = UnrollBudget { unrollDepth = min (unrollDepth $ edgeBudget e1) (unrollDepth $ edgeBudget e2)
-                                                        , unrollUnwindDepth = min (unrollUnwindDepth $ edgeBudget e1) (unrollUnwindDepth $ edgeBudget e2)
-                                                        , unrollUnrollDepth = min (unrollUnrollDepth $ edgeBudget e1) (unrollUnrollDepth $ edgeBudget e2)
-                                                        , unrollErrorDistance = case (unrollErrorDistance $ edgeBudget e1,unrollErrorDistance $ edgeBudget e2) of
-                                                             (Nothing,d2) -> d2
-                                                             (d1,Nothing) -> d1
-                                                             (Just d1,Just d2) -> Just $ min d1 d2
-                                                        , unrollContextDepth = min (unrollContextDepth $ edgeBudget e1) (unrollContextDepth $ edgeBudget e2) }
-                            }) (\x -> (nodeIdFunction $ edgeTarget x,nodeIdBlock $ edgeTarget x,nodeIdSubblock $ edgeTarget x))
+enqueueEdge
+  = insertWithOrder
+    (\x y -> if nodeIdFunction (edgeTarget x) == nodeIdFunction (edgeTarget y) &&
+                nodeIdBlock (edgeTarget x) == nodeIdBlock (edgeTarget y) &&
+                nodeIdSubblock (edgeTarget x) == nodeIdSubblock (edgeTarget y)
+             then Just $ comparing (nodeIdCallStack . edgeTarget) x y
+             else Nothing)
+    (\e1 e2 -> e1 { edgeConds = (edgeConds e1)++(edgeConds e2)
+                  , edgeCreatedMergeNodes = Set.union (edgeCreatedMergeNodes e1)
+                                            (edgeCreatedMergeNodes e2)
+                  , edgeBudget = UnrollBudget { unrollDepth = min (unrollDepth $ edgeBudget e1)
+                                                              (unrollDepth $ edgeBudget e2)
+                                              , unrollUnwindDepth = min (unrollUnwindDepth $ edgeBudget e1) (unrollUnwindDepth $ edgeBudget e2)
+                                              , unrollUnrollDepth = min (unrollUnrollDepth $ edgeBudget e1) (unrollUnrollDepth $ edgeBudget e2)
+                                              , unrollErrorDistance = case (unrollErrorDistance $ edgeBudget e1,unrollErrorDistance $ edgeBudget e2) of
+                                                   (Nothing,d2) -> d2
+                                                   (d1,Nothing) -> d1
+                                                   (Just d1,Just d2) -> Just $ min d1 d2
+                                              , unrollContextDepth = min (unrollContextDepth $ edgeBudget e1) (unrollContextDepth $ edgeBudget e2) }
+                  }) (\x -> (nodeIdFunction $ edgeTarget x,
+                             nodeIdBlock $ edgeTarget x,
+                             nodeIdSubblock $ edgeTarget x))
+
+enqueueEdges :: (Edge a mloc ptr -> Maybe Bool)
+             -> UnrollConfig mloc ptr -> [Edge a mloc ptr]
+             -> UnrollContext a mloc ptr
+             -> UnrollContext a mloc ptr
+enqueueEdges nxtCtx cfg edges ctx
+  = ctx { realizationQueue = nqueue
+        , outgoingEdges = nout }
+  where
+    edges' = filter (\e -> unrollDoRealize cfg (edgeTarget e,edgeBudget e)) edges
+    (nqueue,nout) = foldl (\(cqueue,cout) edge
+                            -> case nxtCtx edge of
+                             Nothing -> (cqueue,cout)
+                             Just True -> (cqueue,
+                                           enqueueEdge (unrollOrder ctx) edge cout)
+                             Just False -> (enqueueEdge (unrollOrder ctx) edge cqueue,
+                                            cout)
+                          ) (realizationQueue ctx,
+                             outgoingEdges ctx) edges'
+
 
 insertWithOrder :: Eq b => (a -> a -> Maybe Ordering) -> (a -> a -> a) -> (a -> b) -> [b] -> a -> [a] -> [a]
 insertWithOrder cmp comb f order el [] = [el]
@@ -944,19 +970,22 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                                                }
                             } ]
             Nothing -> return []
-        let (nqueue,nout) = foldl (\(cqueue,cout) edge
-                                   -> case compareWithOrder (unrollOrder cur)
-                                           (nodeIdFunction trg,
-                                            nodeIdBlock trg,
-                                            nodeIdSubblock trg)
-                                           (nodeIdFunction $ edgeTarget edge,
-                                            nodeIdBlock $ edgeTarget edge,
-                                            nodeIdSubblock $ edgeTarget edge) of
-                                        Nothing -> (cqueue,cout)
-                                        Just LT -> (enqueueEdge (unrollOrder cur) edge cqueue,cout)
-                                        _ -> (cqueue,enqueueEdge (unrollOrder cur) edge cout)
-                                  ) (rest,outgoingEdges cur)
-                            (filter (\e -> unrollDoRealize cfg (edgeTarget e,edgeBudget e)) outEdges)
+        let ncur = enqueueEdges
+                   (\e -> case compareWithOrder (unrollOrder cur)
+                               (nodeIdFunction trg,
+                                nodeIdBlock trg,
+                                nodeIdSubblock trg)
+                               (nodeIdFunction $ edgeTarget e,
+                                nodeIdBlock $ edgeTarget e,
+                                nodeIdSubblock $ edgeTarget e) of
+                            Nothing -> Nothing
+                            Just LT -> Just False
+                            _ -> Just True)
+                   cfg outEdges
+                   (cur { realizationQueue = rest
+                        , nextMergeNodes = case merge_node of
+                          Nothing -> nextMergeNodes cur
+                          Just mn -> Map.insert trg mn (nextMergeNodes cur) })
         if isFirst
           then (do
                    env <- get
@@ -979,11 +1008,7 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
         modify (\env -> env { unrollGuards = (reGuards outp)++(unrollGuards env)
                             , unrollWatchpoints = (reWatchpoints outp)++(unrollWatchpoints env)
                             })
-        return $ cur { realizationQueue = nqueue
-                     , outgoingEdges = nout
-                     , nextMergeNodes = case merge_node of
-                       Nothing -> nextMergeNodes cur
-                       Just mn -> Map.insert trg mn (nextMergeNodes cur) }
+        return ncur
 
 errorDistanceForNodeId :: BlockGraph mloc ptr -> NodeId -> Maybe Integer
 errorDistanceForNodeId gr nd = case Map.lookup (nodeIdBlock nd,nodeIdSubblock nd) (blockMap gr) of
