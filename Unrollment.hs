@@ -788,8 +788,6 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                        ) (mergeInputs rmn) inc
         modify $ \env -> env { unrollInfo = foldl (\info ndSrc -> unrollInfoConnect info ndSrc (mergeUnrollInfo rmn)
                                                   ) (unrollInfo env) [ ndSrc | (_,_,_,_,_,_,Just ndSrc) <- inc ] }
-        --mapM dumpMergeValue ninp >>= liftIO . print
-        --checkLoops' ninp
         updateMergeNode mn (rmn { mergeActivationProxy = nprx
                                 , mergeInputs = ninp })
         return (cur { realizationQueue = rest
@@ -799,8 +797,6 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
             Just blockInfo = Gr.lab (blockGraph $ unrollGraph cfg) blockNode
             info = blockInfoRealizationInfo blockInfo
             realize = blockInfoRealization blockInfo
-            --pgr = (unrollFunctions cfg)!(nodeIdFunction trg)
-            --(name,info,realize,trans) = (unrollFunInfoBlocks pgr)!(nodeIdBlock trg,nodeIdSubblock trg)
             blk_name = (case blockInfoBlkName blockInfo of
                            Nothing -> show (nodeIdBlock trg)
                            Just rname -> rname)++"_"++show (nodeIdSubblock trg)
@@ -818,27 +814,6 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                                                  Map.union
                                                  (fmap (const ()) $ Map.mapKeys Right (rePossibleInputs info))
                                                  (fmap (const ()) $ Map.mapKeys Left (rePossibleArgs info)))
-                      {-
-                      inp <- sequence $ Map.mapWithKey (\vname (tp,name) -> case tp of
-                                                           PointerType _ -> do
-                                                             env <- get
-                                                             put $ env { unrollNextPtr = succ $ unrollNextPtr env }
-                                                             return $ Right $ unrollNextPtr env
-                                                           _ -> do
-                                                             let rname = case name of
-                                                                   Nothing -> "inp_"++(case vname of
-                                                                                          Left arg -> show arg
-                                                                                          Right arg -> show arg)
-                                                                   Just n -> n
-                                                             v <- lift $ valNew rname tp
-                                                             return (Left v)
-                                                       ) (Map.union (Map.mapKeys Right $ rePossibleInputs info)
-                                                          (Map.mapKeys Left (rePossibleArgs info))
-                                                         )-}
-                      --inp' <- createMergeValues True inp
-                      --inp'' <- foldlM (\cinp (_,_,_,act,mp,_,_)
-                      --                 -> sequence $ zipWith (\mp' cinp' -> addMerge True act mp' cinp') mp cinp
-                      --                ) (inp':(fmap (const Map.empty) (tail $ nodeIdCallStackList trg))) inc
                       phis <- fmap Map.fromList $
                               mapM (\blk' -> do
                                        phi <- lift $ varNamed "phi"
