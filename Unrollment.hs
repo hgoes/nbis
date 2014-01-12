@@ -757,233 +757,236 @@ performUnrollmentCtx isFirst cfg ctx
 unrollmentDone :: UnrollContext a mloc ptr -> Bool
 unrollmentDone ctx = List.null (realizationQueue ctx)
 
+nextEdge :: Monad m => UnrollContext a mloc ptr -> m (Edge a mloc ptr,UnrollContext a mloc ptr)
+nextEdge ctx = case realizationQueue ctx of
+  e:es -> return (e,ctx { realizationQueue = es })
+
 stepUnrollCtx :: (MemoryModel mem mloc ptr,UnrollInfo a,Eq ptr,Enum ptr,Eq mloc,Enum mloc)
                  => Bool
                  -> UnrollConfig mloc ptr
                  -> UnrollContext a mloc ptr
                  -> UnrollMonad a mem mloc ptr (UnrollContext a mloc ptr)
-stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
-  (Edge trg inc createdMerges lvl):rest -> do
-    let mergeNode = Map.lookup trg (currentMergeNodes cur)
-        mergeNodeCreate = unrollDoMerge cfg (nodeIdFunction trg) (nodeIdBlock trg) (nodeIdSubblock trg)
-        extensible = case mergeNode of
-          Nothing -> mergeNodeCreate
-          Just _ -> True
-    case mergeNode of
-      Just mn -> do
-        rmn <- getMergeNode mn
-        nprx <- lift $ varNamed "proxy"
-        lift $ assert $ (mergeActivationProxy rmn) .==. (app or' ([ act | (_,_,_,act,_,_,_) <- inc ]++[nprx]))
-        mapM_ (\(fun,blk,sblk,act,_,loc,_) -> do
-                  env <- get
-                  let (_,prx_ptr) = unrollProxies env
-                  nmem <- lift $ connectLocation (unrollMemory env) prx_ptr act loc (mergeLoc rmn)
-                  put $ env { unrollMemory = nmem }
-                  case Map.lookup blk (mergePhis rmn) of
-                    Nothing -> return ()
-                    Just phi -> lift $ assert $ act .=>. (app and' $ phi:[ not' phi' | (blk',phi') <- Map.toList (mergePhis rmn), blk'/=blk ])
-              ) inc
-        ninp <- foldlM (\cinp (_,_,_,act,mp,_,_) -> do
-                           sequence $ zipWith (\mp' cinp' -> addMerge True act mp' cinp') mp cinp
-                       ) (mergeInputs rmn) inc
-        modify $ \env -> env { unrollInfo = foldl (\info ndSrc -> unrollInfoConnect info ndSrc (mergeUnrollInfo rmn)
-                                                  ) (unrollInfo env) [ ndSrc | (_,_,_,_,_,_,Just ndSrc) <- inc ] }
-        updateMergeNode mn (rmn { mergeActivationProxy = nprx
-                                , mergeInputs = ninp })
-        return (cur { realizationQueue = rest
-                    , usedMergeNodes = Map.insert trg () (usedMergeNodes cur) })
-      Nothing -> do
-        let blockNode = (blockMap $ unrollGraph cfg)!(nodeIdBlock trg,nodeIdSubblock trg)
-            Just blockInfo = Gr.lab (blockGraph $ unrollGraph cfg) blockNode
-            info = blockInfoRealizationInfo blockInfo
-            realize = blockInfoRealization blockInfo
-            blk_name = (case blockInfoBlkName blockInfo of
-                           Nothing -> show (nodeIdBlock trg)
-                           Just rname -> rname)++"_"++show (nodeIdSubblock trg)
-        env <- get
-        let (newNodeInfo,newInfo) = unrollInfoNewNode (unrollInfo env) trg (blockInfoBlkName blockInfo) mergeNodeCreate
-            newInfo' = foldl (\info srcNd -> unrollInfoConnect info srcNd newNodeInfo) newInfo [ srcNd | (_,_,_,_,_,_,Just srcNd) <- inc ]
-        put $ env { unrollInfo = newInfo' }
-        (act,inp,inp',phis,start_loc,prev_locs,merge_node,mem_instr,mem_eqs)
-          <- if mergeNodeCreate
-             then (do
-                      act_proxy <- lift $ varNamed $ "proxy_"++blk_name
-                      act_static <- lift $ defConstNamed ("act_"++blk_name) (app or' ([ act | (_,_,_,act,_,_,_) <- inc ]++[act_proxy]))
-                      mergedInps <- mergeValueStacks True [ (cond,mp) | (_,_,_,cond,mp,_,_) <- inc ]
-                      inp <- mapM getMergeValue (Map.intersection (head mergedInps) $
-                                                 Map.union
-                                                 (fmap (const ()) $ Map.mapKeys Right (rePossibleInputs info))
-                                                 (fmap (const ()) $ Map.mapKeys Left (rePossibleArgs info)))
-                      phis <- fmap Map.fromList $
-                              mapM (\blk' -> do
-                                       phi <- lift $ varNamed "phi"
-                                       return (blk',phi)
-                                   ) (Set.toList $ rePossiblePhis info)
-                      mapM_ (\(_,blk,_,cond,_,_,_) -> case Map.lookup blk phis of
-                                Nothing -> return ()
-                                Just phi -> lift $ assert $ cond .=>. (app and' $ phi:[ not' phi' | (blk',phi') <- Map.toList phis, blk'/=blk ])
-                            ) inc
-                      loc <- do
-                        env <- get
-                        put $ env { unrollNextMem = succ $ unrollNextMem env }
-                        return (unrollNextMem env)
+stepUnrollCtx isFirst cfg cur = do
+  (Edge trg inc createdMerges lvl,cur1) <- nextEdge cur
+  --trace ("Realizing "++show trg) (return ())
+  let mergeNode = Map.lookup trg (currentMergeNodes cur1)
+      mergeNodeCreate = unrollDoMerge cfg (nodeIdFunction trg) (nodeIdBlock trg) (nodeIdSubblock trg)
+      extensible = case mergeNode of
+        Nothing -> mergeNodeCreate
+        Just _ -> True
+  case mergeNode of
+    Just mn -> do
+      rmn <- getMergeNode mn
+      nprx <- lift $ varNamed "proxy"
+      lift $ assert $ (mergeActivationProxy rmn) .==. (app or' ([ act | (_,_,_,act,_,_,_) <- inc ]++[nprx]))
+      mapM_ (\(fun,blk,sblk,act,_,loc,_) -> do
+                env <- get
+                let (_,prx_ptr) = unrollProxies env
+                nmem <- lift $ connectLocation (unrollMemory env) prx_ptr act loc (mergeLoc rmn)
+                put $ env { unrollMemory = nmem }
+                case Map.lookup blk (mergePhis rmn) of
+                  Nothing -> return ()
+                  Just phi -> lift $ assert $ act .=>. (app and' $ phi:[ not' phi' | (blk',phi') <- Map.toList (mergePhis rmn), blk'/=blk ])
+            ) inc
+      ninp <- foldlM (\cinp (_,_,_,act,mp,_,_) -> do
+                         sequence $ zipWith (\mp' cinp' -> addMerge True act mp' cinp') mp cinp
+                     ) (mergeInputs rmn) inc
+      modify $ \env -> env { unrollInfo = foldl (\info ndSrc -> unrollInfoConnect info ndSrc (mergeUnrollInfo rmn)
+                                                ) (unrollInfo env) [ ndSrc | (_,_,_,_,_,_,Just ndSrc) <- inc ] }
+      updateMergeNode mn (rmn { mergeActivationProxy = nprx
+                              , mergeInputs = ninp })
+      return (cur1 { usedMergeNodes = Map.insert trg () (usedMergeNodes cur1) })
+    Nothing -> do
+      let blockNode = (blockMap $ unrollGraph cfg)!(nodeIdBlock trg,nodeIdSubblock trg)
+          Just blockInfo = Gr.lab (blockGraph $ unrollGraph cfg) blockNode
+          info = blockInfoRealizationInfo blockInfo
+          realize = blockInfoRealization blockInfo
+          blk_name = (case blockInfoBlkName blockInfo of
+                         Nothing -> show (nodeIdBlock trg)
+                         Just rname -> rname)++"_"++show (nodeIdSubblock trg)
+      env <- get
+      let (newNodeInfo,newInfo) = unrollInfoNewNode (unrollInfo env) trg (blockInfoBlkName blockInfo) mergeNodeCreate
+          newInfo' = foldl (\info srcNd -> unrollInfoConnect info srcNd newNodeInfo) newInfo [ srcNd | (_,_,_,_,_,_,Just srcNd) <- inc ]
+      put $ env { unrollInfo = newInfo' }
+      (act,inp,inp',phis,start_loc,prev_locs,merge_node,mem_instr,mem_eqs)
+        <- if mergeNodeCreate
+           then (do
+                    act_proxy <- lift $ varNamed $ "proxy_"++blk_name
+                    act_static <- lift $ defConstNamed ("act_"++blk_name) (app or' ([ act | (_,_,_,act,_,_,_) <- inc ]++[act_proxy]))
+                    mergedInps <- mergeValueStacks True [ (cond,mp) | (_,_,_,cond,mp,_,_) <- inc ]
+                    inp <- mapM getMergeValue (Map.intersection (head mergedInps) $
+                                               Map.union
+                                               (fmap (const ()) $ Map.mapKeys Right (rePossibleInputs info))
+                                               (fmap (const ()) $ Map.mapKeys Left (rePossibleArgs info)))
+                    phis <- fmap Map.fromList $
+                            mapM (\blk' -> do
+                                     phi <- lift $ varNamed "phi"
+                                     return (blk',phi)
+                                 ) (Set.toList $ rePossiblePhis info)
+                    mapM_ (\(_,blk,_,cond,_,_,_) -> case Map.lookup blk phis of
+                              Nothing -> return ()
+                              Just phi -> lift $ assert $ cond .=>. (app and' $ phi:[ not' phi' | (blk',phi') <- Map.toList phis, blk'/=blk ])
+                          ) inc
+                    loc <- do
                       env <- get
-                      put $ env { unrollMergeNodes = Map.insert (unrollNextMergeNode env)
-                                                     (MergeNode { mergeActivationProxy = act_proxy
-                                                                , mergeInputs = mergedInps --inp''
-                                                                , mergePhis = phis
-                                                                , mergeLoc = loc
-                                                                , mergeUnrollInfo = newNodeInfo }) (unrollMergeNodes env)
-                                , unrollNextMergeNode = succ $ unrollNextMergeNode env }
-                      return (act_static,inp,mergedInps {-inp''-},phis,loc,[loc],
-                              Just $ unrollNextMergeNode env,[],[ (act',loc',loc) | (_,_,_,act',_,loc',_) <- inc ]))
-             else (do
-                      mergedInps <- mergeValueStacks extensible [ (cond,mp) | (_,_,_,cond,mp,_,_) <- inc ]
-                      act <- case inc of
-                        [(_,_,_,act',_,_,_)] -> do
-                          let optAct = optimizeExpr' act'
-                          if isComplexExpr optAct
-                            then lift $ defConstNamed ("act_"++(nodeIdFunction trg)++"_"++blk_name) optAct
-                            else return optAct
-                        _ -> lift $ defConstNamed ("act_"++(nodeIdFunction trg)++"_"++blk_name) (app or' [ act | (_,_,_,act,_,_,_) <- inc ])
-                      inp <- mapM getMergeValue (Map.intersection (head mergedInps) $
-                                                 Map.union
-                                                 (fmap (const ()) $ Map.mapKeys Right (rePossibleInputs info))
-                                                 (fmap (const ()) $ Map.mapKeys Left (rePossibleArgs info)))
-                      (start_loc,prev_locs,mphis) <- case inc of
-                        (_,_,_,_,_,loc',_):inc' -> if all (\(_,_,_,_,_,loc'',_) -> loc'==loc'') inc'
-                                                   then return (loc',[loc'],[])
-                                                   else (do
-                                                            env <- get
-                                                            let loc'' = unrollNextMem env
-                                                            put $ env { unrollNextMem = succ loc'' }
-                                                            return (loc'',[ loc''' | (_,_,_,_,_,loc''',_) <- inc ],[MIPhi [ (act'',loc''') | (_,_,_,act'',_,loc''',_) <- inc ] loc'']))
-                      phis <- mapM (\blk' -> case [ cond | (_,blk'',_,cond,_,_,_) <- inc, blk''==blk' ] of
-                                       [] -> return Nothing
-                                       xs -> do
-                                         let phiExpr = optimizeExpr' $ app or' xs
-                                         phi <- if isComplexExpr phiExpr
-                                                then lift $ defConstNamed "phi" phiExpr
-                                                else return phiExpr
-                                         return $ Just (blk',phi)
-                                   ) (Set.toList $ rePossiblePhis info)
-                      return (act,inp,mergedInps,
-                              Map.fromList $ catMaybes phis,start_loc,prev_locs,Nothing,
-                              mphis,[]))
-        env <- get
-        (fin,nst,outp) <- lift $ postRealize (RealizationEnv { reFunction = nodeIdFunction trg
-                                                             , reBlock = nodeIdBlock trg
-                                                             , reSubblock = nodeIdSubblock trg
-                                                             , reActivation = act
-                                                             , reGlobals = unrollGlobals env
-                                                             , reInputs = inp
-                                                             , rePhis = phis
-                                                             , reStructs = unrollStructs cfg })
-                          start_loc
-                          (unrollNextMem env)
-                          (unrollNextPtr env)
-                          realize
-        put $ env { unrollNextPtr = reNextPtr nst
-                  , unrollNextMem = reNextMemLoc nst }
-        outp' <- createMergeValues False (Map.mapKeys Right $ reLocals nst)
-        let arg_vars = Map.filterWithKey (\k _ -> case k of
-                                             Left _ -> True
-                                             _ -> False
-                                         ) (head inp')
-            new_vars = Map.union (Map.union outp' (head inp')) arg_vars
-            nCreatedMerges = if mergeNodeCreate
-                             then Set.insert trg createdMerges
-                             else createdMerges
-        outEdges <- case fin of
-          Jump trgs -> return [ Edge { edgeTarget = nodeId
-                                     , edgeConds = [(nodeIdFunction trg,nodeIdBlock trg,nodeIdSubblock trg,act .&&. cond,new_vars:(tail inp'),reCurMemLoc nst,Just newNodeInfo)]
-                                     , edgeCreatedMergeNodes = nCreatedMerges
-                                     , edgeBudget = lvl { unrollDepth = unrollDepth lvl + 1
-                                                        , unrollUnrollDepth = case Map.lookup trg_blk (unrollLoopHeaders cfg) of
-                                                          Nothing -> unrollUnrollDepth lvl
-                                                          Just loop -> Map.insertWith (+) (loopDescPtr loop) 1 (unrollUnrollDepth lvl)
-                                                        , unrollErrorDistance = errorDistanceForNodeId (unrollGraph cfg) nodeId
-                                                        }
-                                     } | (cond,trg_blk) <- trgs
-                                       , let nodeId = NodeId { nodeIdFunction = nodeIdFunction trg
-                                                             , nodeIdBlock = trg_blk
-                                                             , nodeIdSubblock = 0
-                                                             , nodeIdCallStack = nodeIdCallStack trg } ]
-          Call fname args ret -> do
-            let fun_info = (blockFunctions $ unrollGraph cfg)!fname
-                Just startBlkInfo = Gr.lab (blockGraph $ unrollGraph cfg) (funInfoStartBlk fun_info)
-                start_blk = blockInfoBlk startBlkInfo
-                start_sblk = blockInfoSubBlk startBlkInfo
-            arg_vars <- createMergeValues False $ Map.fromList [ (Left arg_ptr,arg) | ((arg_ptr,tp),arg) <- zip (funInfoArguments fun_info) args ]
-            let nodeId = NodeId { nodeIdFunction = fname
-                                , nodeIdBlock = start_blk
-                                , nodeIdSubblock = start_sblk
-                                , nodeIdCallStack = Just (trg { nodeIdSubblock = succ $ nodeIdSubblock trg },ret)
-                                }
-            return [ Edge { edgeTarget = nodeId
-                          , edgeConds = [(nodeIdFunction trg,nodeIdBlock trg,nodeIdSubblock trg,act,arg_vars:new_vars:(tail inp'),reCurMemLoc nst,Just newNodeInfo)]
+                      put $ env { unrollNextMem = succ $ unrollNextMem env }
+                      return (unrollNextMem env)
+                    env <- get
+                    put $ env { unrollMergeNodes = Map.insert (unrollNextMergeNode env)
+                                                   (MergeNode { mergeActivationProxy = act_proxy
+                                                              , mergeInputs = mergedInps --inp''
+                                                              , mergePhis = phis
+                                                              , mergeLoc = loc
+                                                              , mergeUnrollInfo = newNodeInfo }) (unrollMergeNodes env)
+                              , unrollNextMergeNode = succ $ unrollNextMergeNode env }
+                    return (act_static,inp,mergedInps {-inp''-},phis,loc,[loc],
+                            Just $ unrollNextMergeNode env,[],[ (act',loc',loc) | (_,_,_,act',_,loc',_) <- inc ]))
+           else (do
+                    mergedInps <- mergeValueStacks extensible [ (cond,mp) | (_,_,_,cond,mp,_,_) <- inc ]
+                    act <- case inc of
+                      [(_,_,_,act',_,_,_)] -> do
+                        let optAct = optimizeExpr' act'
+                        if isComplexExpr optAct
+                          then lift $ defConstNamed ("act_"++(nodeIdFunction trg)++"_"++blk_name) optAct
+                          else return optAct
+                      _ -> lift $ defConstNamed ("act_"++(nodeIdFunction trg)++"_"++blk_name) (app or' [ act | (_,_,_,act,_,_,_) <- inc ])
+                    inp <- mapM getMergeValue (Map.intersection (head mergedInps) $
+                                               Map.union
+                                               (fmap (const ()) $ Map.mapKeys Right (rePossibleInputs info))
+                                               (fmap (const ()) $ Map.mapKeys Left (rePossibleArgs info)))
+                    (start_loc,prev_locs,mphis) <- case inc of
+                      (_,_,_,_,_,loc',_):inc' -> if all (\(_,_,_,_,_,loc'',_) -> loc'==loc'') inc'
+                                                 then return (loc',[loc'],[])
+                                                 else (do
+                                                          env <- get
+                                                          let loc'' = unrollNextMem env
+                                                          put $ env { unrollNextMem = succ loc'' }
+                                                          return (loc'',[ loc''' | (_,_,_,_,_,loc''',_) <- inc ],[MIPhi [ (act'',loc''') | (_,_,_,act'',_,loc''',_) <- inc ] loc'']))
+                    phis <- mapM (\blk' -> case [ cond | (_,blk'',_,cond,_,_,_) <- inc, blk''==blk' ] of
+                                     [] -> return Nothing
+                                     xs -> do
+                                       let phiExpr = optimizeExpr' $ app or' xs
+                                       phi <- if isComplexExpr phiExpr
+                                              then lift $ defConstNamed "phi" phiExpr
+                                              else return phiExpr
+                                       return $ Just (blk',phi)
+                                 ) (Set.toList $ rePossiblePhis info)
+                    return (act,inp,mergedInps,
+                            Map.fromList $ catMaybes phis,start_loc,prev_locs,Nothing,
+                            mphis,[]))
+      env <- get
+      (fin,nst,outp) <- lift $ postRealize (RealizationEnv { reFunction = nodeIdFunction trg
+                                                           , reBlock = nodeIdBlock trg
+                                                           , reSubblock = nodeIdSubblock trg
+                                                           , reActivation = act
+                                                           , reGlobals = unrollGlobals env
+                                                           , reInputs = inp
+                                                           , rePhis = phis
+                                                           , reStructs = unrollStructs cfg })
+                        start_loc
+                        (unrollNextMem env)
+                        (unrollNextPtr env)
+                        realize
+      put $ env { unrollNextPtr = reNextPtr nst
+                , unrollNextMem = reNextMemLoc nst }
+      outp' <- createMergeValues False (Map.mapKeys Right $ reLocals nst)
+      let arg_vars = Map.filterWithKey (\k _ -> case k of
+                                           Left _ -> True
+                                           _ -> False
+                                       ) (head inp')
+          new_vars = Map.union (Map.union outp' (head inp')) arg_vars
+          nCreatedMerges = if mergeNodeCreate
+                           then Set.insert trg createdMerges
+                           else createdMerges
+      outEdges <- case fin of
+        Jump trgs -> return [ Edge { edgeTarget = nodeId
+                                   , edgeConds = [(nodeIdFunction trg,nodeIdBlock trg,nodeIdSubblock trg,act .&&. cond,new_vars:(tail inp'),reCurMemLoc nst,Just newNodeInfo)]
+                                   , edgeCreatedMergeNodes = nCreatedMerges
+                                   , edgeBudget = lvl { unrollDepth = unrollDepth lvl + 1
+                                                      , unrollUnrollDepth = case Map.lookup trg_blk (unrollLoopHeaders cfg) of
+                                                        Nothing -> unrollUnrollDepth lvl
+                                                        Just loop -> Map.insertWith (+) (loopDescPtr loop) 1 (unrollUnrollDepth lvl)
+                                                      , unrollErrorDistance = errorDistanceForNodeId (unrollGraph cfg) nodeId
+                                                      }
+                                   } | (cond,trg_blk) <- trgs
+                                     , let nodeId = NodeId { nodeIdFunction = nodeIdFunction trg
+                                                           , nodeIdBlock = trg_blk
+                                                           , nodeIdSubblock = 0
+                                                           , nodeIdCallStack = nodeIdCallStack trg } ]
+        Call fname args ret -> do
+          let fun_info = (blockFunctions $ unrollGraph cfg)!fname
+              Just startBlkInfo = Gr.lab (blockGraph $ unrollGraph cfg) (funInfoStartBlk fun_info)
+              start_blk = blockInfoBlk startBlkInfo
+              start_sblk = blockInfoSubBlk startBlkInfo
+          arg_vars <- createMergeValues False $ Map.fromList [ (Left arg_ptr,arg) | ((arg_ptr,tp),arg) <- zip (funInfoArguments fun_info) args ]
+          let nodeId = NodeId { nodeIdFunction = fname
+                              , nodeIdBlock = start_blk
+                              , nodeIdSubblock = start_sblk
+                              , nodeIdCallStack = Just (trg { nodeIdSubblock = succ $ nodeIdSubblock trg },ret)
+                              }
+          return [ Edge { edgeTarget = nodeId
+                        , edgeConds = [(nodeIdFunction trg,nodeIdBlock trg,nodeIdSubblock trg,act,arg_vars:new_vars:(tail inp'),reCurMemLoc nst,Just newNodeInfo)]
+                        , edgeCreatedMergeNodes = nCreatedMerges
+                        , edgeBudget = lvl { unrollDepth = unrollDepth lvl + 1
+                                           , unrollUnwindDepth = unrollUnwindDepth lvl + 1
+                                           , unrollErrorDistance = errorDistanceForNodeId (unrollGraph cfg) nodeId
+                                           }
+                        } ]
+        Return rval -> case nodeIdCallStack trg of
+          Just (prev,trg_instr) -> do
+            nvars <- case rval of
+              Nothing -> return (tail inp')
+              Just val -> case tail inp' of
+                x:xs -> do
+                  val' <- liftIO $ newIORef (MergedValue False val)
+                  return $ (Map.insert (Right trg_instr) val' x):xs
+            return [ Edge { edgeTarget = prev
+                          , edgeConds = [(nodeIdFunction trg,nodeIdBlock trg,nodeIdSubblock trg,act,nvars,reCurMemLoc nst,Just newNodeInfo)]
                           , edgeCreatedMergeNodes = nCreatedMerges
                           , edgeBudget = lvl { unrollDepth = unrollDepth lvl + 1
-                                             , unrollUnwindDepth = unrollUnwindDepth lvl + 1
-                                             , unrollErrorDistance = errorDistanceForNodeId (unrollGraph cfg) nodeId
+                                             , unrollUnwindDepth = unrollUnwindDepth lvl - 1
+                                             , unrollErrorDistance = errorDistanceForNodeId (unrollGraph cfg) prev
                                              }
                           } ]
-          Return rval -> case nodeIdCallStack trg of
-            Just (prev,trg_instr) -> do
-              nvars <- case rval of
-                Nothing -> return (tail inp')
-                Just val -> case tail inp' of
-                  x:xs -> do
-                    val' <- liftIO $ newIORef (MergedValue False val)
-                    return $ (Map.insert (Right trg_instr) val' x):xs
-              return [ Edge { edgeTarget = prev
-                            , edgeConds = [(nodeIdFunction trg,nodeIdBlock trg,nodeIdSubblock trg,act,nvars,reCurMemLoc nst,Just newNodeInfo)]
-                            , edgeCreatedMergeNodes = nCreatedMerges
-                            , edgeBudget = lvl { unrollDepth = unrollDepth lvl + 1
-                                               , unrollUnwindDepth = unrollUnwindDepth lvl - 1
-                                               , unrollErrorDistance = errorDistanceForNodeId (unrollGraph cfg) prev
-                                               }
-                            } ]
-            Nothing -> return []
-        let ncur = enqueueEdges
-                   (\e -> case compareWithOrder (unrollOrder cur)
-                               (nodeIdFunction trg,
-                                nodeIdBlock trg,
-                                nodeIdSubblock trg)
-                               (nodeIdFunction $ edgeTarget e,
-                                nodeIdBlock $ edgeTarget e,
-                                nodeIdSubblock $ edgeTarget e) of
-                            Nothing -> Nothing
-                            Just LT -> Just False
-                            _ -> Just True)
-                   cfg outEdges
-                   (cur { realizationQueue = rest
-                        , nextMergeNodes = case merge_node of
-                          Nothing -> nextMergeNodes cur
-                          Just mn -> Map.insert trg mn (nextMergeNodes cur) })
-        if isFirst
-          then (do
-                   env <- get
-                   let (_,prx) = unrollProxies env
-                   nmem <- lift $ makeEntry prx (unrollMemory env) start_loc
-                   put $ env { unrollMemory = nmem })
-          else return ()
-        mapM_ (\(cond,src,trg) -> do
-                  env <- get
-                  let (_,prx) = unrollProxies env
-                  nmem <- lift $ connectLocation (unrollMemory env) prx cond src trg
-                  put $ env { unrollMemory = nmem }
-              ) mem_eqs
-        case mem_instr++(reMemInstrs outp) of
-          [] -> return ()
-          xs -> do
-            env <- get
-            nmem <- lift $ addProgram (unrollMemory env) act prev_locs xs (rePtrTypes nst)
-            put $ env { unrollMemory = nmem }
-        modify (\env -> env { unrollGuards = (reGuards outp)++(unrollGuards env)
-                            , unrollWatchpoints = (reWatchpoints outp)++(unrollWatchpoints env)
-                            })
-        return ncur
+          Nothing -> return []
+      let cur2 = enqueueEdges
+                 (\e -> case compareWithOrder (unrollOrder cur)
+                             (nodeIdFunction trg,
+                              nodeIdBlock trg,
+                              nodeIdSubblock trg)
+                             (nodeIdFunction $ edgeTarget e,
+                              nodeIdBlock $ edgeTarget e,
+                              nodeIdSubblock $ edgeTarget e) of
+                          Nothing -> Nothing
+                          Just LT -> Just False
+                          _ -> Just True)
+                 cfg outEdges
+                 (cur1 { nextMergeNodes = case merge_node of
+                         Nothing -> nextMergeNodes cur
+                         Just mn -> Map.insert trg mn (nextMergeNodes cur) })
+      if isFirst
+        then (do
+                 env <- get
+                 let (_,prx) = unrollProxies env
+                 nmem <- lift $ makeEntry prx (unrollMemory env) start_loc
+                 put $ env { unrollMemory = nmem })
+        else return ()
+      mapM_ (\(cond,src,trg) -> do
+                env <- get
+                let (_,prx) = unrollProxies env
+                nmem <- lift $ connectLocation (unrollMemory env) prx cond src trg
+                put $ env { unrollMemory = nmem }
+            ) mem_eqs
+      case mem_instr++(reMemInstrs outp) of
+        [] -> return ()
+        xs -> do
+          env <- get
+          nmem <- lift $ addProgram (unrollMemory env) act prev_locs xs (rePtrTypes nst)
+          put $ env { unrollMemory = nmem }
+      modify (\env -> env { unrollGuards = (reGuards outp)++(unrollGuards env)
+                          , unrollWatchpoints = (reWatchpoints outp)++(unrollWatchpoints env)
+                          })
+      return cur2
 
 errorDistanceForNodeId :: BlockGraph mloc ptr -> NodeId -> Maybe Integer
 errorDistanceForNodeId gr nd = case Map.lookup (nodeIdBlock nd,nodeIdSubblock nd) (blockMap gr) of
