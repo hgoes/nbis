@@ -86,7 +86,7 @@ data UnrollContext a mloc ptr = UnrollContext { unrollOrder :: [(String,Ptr Basi
                                               , outgoingEdges :: [Edge a mloc ptr]
                                               }
 
-type UnrollQueue a mloc ptr = [(UnrollContext a mloc ptr,UnrollBudget)]
+type UnrollQueue a mloc ptr = [(UnrollContext a mloc ptr,NodeId,UnrollBudget)]
 
 data Edge a mloc ptr = Edge { edgeTarget :: NodeId
                             , edgeConds :: [(String,Ptr BasicBlock,Integer,SMTExpr Bool,[ValueMap ptr],mloc,Maybe (UnrollNodeInfo a))]
@@ -103,9 +103,9 @@ data UnrollConfig mloc ptr = UnrollCfg { unrollDoMerge :: String -> Ptr BasicBlo
                                        , unrollCfgGlobals :: Map (Ptr GlobalVariable) (TypeDesc, Maybe MemContent)
                                        , unrollBlockOrder :: [(String,Ptr BasicBlock,Integer)]
                                        --, unrollDistances :: Map (Ptr BasicBlock,Integer) DistanceInfo
-                                       , unrollDynamicOrder :: UnrollBudget -> UnrollBudget -> Ordering
-                                       , unrollPerformCheck :: UnrollBudget -> UnrollBudget -> Bool
-                                       , unrollDoRealize :: UnrollBudget -> Bool
+                                       , unrollDynamicOrder :: (NodeId,UnrollBudget) -> (NodeId,UnrollBudget) -> Ordering
+                                       , unrollPerformCheck :: (NodeId,UnrollBudget) -> (NodeId,UnrollBudget) -> Bool
+                                       , unrollDoRealize :: (NodeId,UnrollBudget) -> Bool
                                        , unrollCheckedErrors :: ErrorDesc -> Bool
                                        , unrollLoopHeaders :: Map (Ptr BasicBlock) LoopDesc
                                        }
@@ -258,7 +258,7 @@ mergePointConfig entry prog select selectErr
 
 mergePointConfig' :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> (Map String (UnrollFunInfo mloc ptr) -> BlockGraph mloc ptr -> Set (String,Ptr BasicBlock,Integer)) -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
 mergePointConfig' entry prog@(funs,globs,ptrWidth,alltps,structs) select selectErr
-  = trace ("Program: "++show prog_gr) $
+  = trace ("Program: "++show prog_gr') $
     trace ("Possible merges: "++show (possibleMergePoints $ blockGraph prog_gr)) $
     trace ("Order: "++show order) $
     trace ("Selected merges: "++show (fmap (\(fun,blk,sblk) -> case Map.lookup fun ext_funs of
@@ -274,13 +274,18 @@ mergePointConfig' entry prog@(funs,globs,ptrWidth,alltps,structs) select selectE
               , unrollDoMerge = \fname blk sblk -> Set.member (fname,blk,sblk) selectedMergePoints
               , unrollCfgGlobals = globs
               , unrollBlockOrder = order
-              , unrollDynamicOrder = \b1 b2 -> case compare
-                                                    ((unrollUnwindDepth b1) + (sum $ unrollUnrollDepth b1))
-                                                    ((unrollUnwindDepth b2) + (sum $ unrollUnrollDepth b2)) of
-                                                 EQ -> compare (unrollErrorDistance b1) (unrollErrorDistance b2)
-                                                 r -> r
-              , unrollPerformCheck = \last cur
-                                     -> (unrollContextDepth last) < (unrollContextDepth cur)
+              , unrollDynamicOrder = \(_,b1) (_,b2)
+                                     -> case compare
+                                             ((unrollUnwindDepth b1) + (sum $ unrollUnrollDepth b1))
+                                             ((unrollUnwindDepth b2) + (sum $ unrollUnrollDepth b2)) of
+                                          EQ -> compare (unrollErrorDistance b1) (unrollErrorDistance b2)
+                                          r -> r
+              , unrollPerformCheck = \(_,last) (nd,cur)
+                                     -> {-unrollErrorDistance cur == 0
+                                        || Set.member (nodeIdFunction nd,
+                                                       nodeIdBlock nd,
+                                                       nodeIdSubblock nd) selectedMergePoints-}
+                                      (unrollContextDepth last) < (unrollContextDepth cur)
               , unrollDoRealize = \b -> True
               , unrollCheckedErrors = selectErr
               , unrollLoopHeaders = loopHdrs
@@ -319,12 +324,13 @@ mergePointConfig' entry prog@(funs,globs,ptrWidth,alltps,structs) select selectE
                           , (blk,name,subs) <- blks
                           , (sblk,instrs) <- zip [0..] subs
                           | nd <- [0..] ]
-    prog_gr = generateDistanceInfo selectErr (mkBlockGraph prog) --calculateDistanceInfo selectErr (mkBlockGraph prog)
+    prog_gr' = mkBlockGraph prog
+    prog_gr = generateDistanceInfo selectErr prog_gr'
     Just (_,_,(start_blk,_,_):_,_,_) = Map.lookup entry funs
     start_nd = case Map.lookup (entry,start_blk,0) blk_mp of
       Nothing -> error $ "Failed to find entry point "++entry
       Just (x,_) -> x
-    order = calculateSimpleOrder prog_gr start_nd
+    order = calculateOrder prog_gr start_nd
     selectedMergePoints = select ext_funs prog_gr
     getLoops mp loop = foldl getLoops (Map.insert (loopDescHeader loop) loop mp) (loopDescSubs loop)
     loopHdrs = foldl (\mp (_,_,_,loops,_)
@@ -342,10 +348,12 @@ calculateOrder gr startNd = reverse $ Gr.postorder dfsTree
                                                                                 EdgeSucc _ -> Nothing
                                                                                 _ -> Just s) suc
                                                         in case distanceToError (blockInfoDistance info) of
-                                                            Nothing -> (ngr,Just (dist+1,(blockInfoFun info,blockInfoBlk info,blockInfoSubBlk info),suc'))
-                                                            Just d' -> (ngr,Just (d',(blockInfoFun info,blockInfoBlk info,blockInfoSubBlk info),suc'))
+                                                            Nothing -> case distanceToReturn (blockInfoDistance info) of
+                                                              Nothing -> (ngr,Nothing)
+                                                              Just rdist -> (ngr,Just (Right rdist,(blockInfoFun info,blockInfoBlk info,blockInfoSubBlk info),suc'))
+                                                            Just d' -> (ngr,Just (Left d',(blockInfoFun info,blockInfoBlk info,blockInfoSubBlk info),suc'))
                                                ) gr ns
-                         ns'' = List.sortBy (comparing (\(d,_,_) -> Down d)) $ catMaybes ns'
+                         ns'' = List.sortBy (comparing (\(d,_,_) -> d)) $ catMaybes ns'
                      in dfs' gr' ns''
     dfs' gr [] = ([],gr)
     dfs' gr ((d,info,suc):ns) = let (subs,gr') = dfs d gr suc
@@ -948,7 +956,7 @@ stepUnrollCtx isFirst cfg cur = case realizationQueue cur of
                                         Just LT -> (enqueueEdge (unrollOrder cur) edge cqueue,cout)
                                         _ -> (cqueue,enqueueEdge (unrollOrder cur) edge cout)
                                   ) (rest,outgoingEdges cur)
-                            (filter (\e -> unrollDoRealize cfg (edgeBudget e)) outEdges)
+                            (filter (\e -> unrollDoRealize cfg (edgeTarget e,edgeBudget e)) outEdges)
         if isFirst
           then (do
                    env <- get
@@ -1005,36 +1013,38 @@ contextQueueInsert :: UnrollConfig mloc ptr -> UnrollContext a mloc ptr
                       -> UnrollQueue a mloc ptr
                       -> UnrollQueue a mloc ptr
 contextQueueInsert cfg ctx
-  = List.insertBy (\x y -> unrollDynamicOrder cfg (snd x) (snd y)
+  = List.insertBy (\(_,ndx,bx) (_,ndy,by) -> unrollDynamicOrder cfg (ndx,bx) (ndy,by)
                     {-case (realizationQueue x,realizationQueue y) of
                       ([],[]) -> EQ
                       (_:_,[]) -> GT
                       ([],_:_) -> LT
                       (x:xs,y:ys) -> unrollDynamicOrder cfg (edgeBudget x) (edgeBudget y)-}
-                  ) (ctx,budget)
+                  ) (ctx,minNd,budget)
   where
-    budget = getMinBudget cfg ctx
+    (minNd,budget) = getMinBudget cfg ctx
 
 contextQueueStep :: (UnrollInfo a,MemoryModel mem mloc ptr,Eq mloc,Eq ptr,Enum mloc,Enum ptr)
-                    => Bool -> UnrollConfig mloc ptr -> UnrollBudget
+                    => Bool -> UnrollConfig mloc ptr -> (NodeId,UnrollBudget)
                     -> UnrollQueue a mloc ptr
-                    -> UnrollMonad a mem mloc ptr (Maybe (UnrollBudget,UnrollQueue a mloc ptr))
+                    -> UnrollMonad a mem mloc ptr (Maybe ((NodeId,UnrollBudget),UnrollQueue a mloc ptr))
 contextQueueStep isFirst cfg lvl queue = case queue of
-  (ctx,minB):qs -> case realizationQueue ctx of
+  (ctx,minN,minB):qs -> case realizationQueue ctx of
     [] -> contextQueueStep isFirst cfg lvl
           (foldl (\queue' ctx'
                   -> contextQueueInsert cfg ctx' queue'
                  ) qs (spawnContexts cfg ctx))
-    _:_ -> case unrollDynamicOrder cfg minB lvl of
-      GT -> return $ Just (minB,queue)
+    _:_ -> case unrollDynamicOrder cfg (minN,minB) lvl of
+      GT -> return $ Just ((minN,minB),queue)
       _ -> do
         ctx' <- performUnrollmentCtx isFirst cfg ctx
         --ctx' <- stepUnrollCtx isFirst cfg ctx
         case realizationQueue ctx' of
-          [] -> return $ Just (lvl,(ctx',getMinBudget cfg ctx'):qs)
-          e:_ -> case unrollDynamicOrder cfg lvl (edgeBudget e) of
+          [] -> let (minN',minB') = getMinBudget cfg ctx'
+                in return $ Just (lvl,(ctx',minN',minB'):qs)
+          e:_ -> case unrollDynamicOrder cfg lvl (edgeTarget e,edgeBudget e) of
             LT -> return $ Just (lvl,contextQueueInsert cfg ctx' qs)
-            _ -> return $ Just (lvl,(ctx',getMinBudget cfg ctx'):qs)
+            _ -> let (minN',minB') = getMinBudget cfg ctx'
+                 in return $ Just (lvl,(ctx',minN',minB'):qs)
   [] -> return Nothing
 
 checkForErrors :: (MemoryModel mem mloc ptr)
@@ -1076,12 +1086,12 @@ contextQueueRun :: (UnrollInfo a,MemoryModel mem Integer Integer)
                    -> SMT (Maybe ([(String,[BitVector BVUntyped])],[ErrorDesc]),a)
 contextQueueRun (_::Proxy mem) (_::Proxy a) cfg entry = do
   (start,env :: UnrollEnv a mem Integer Integer) <- startingContext cfg entry
-  let lvl = edgeBudget $ head $ realizationQueue start
-  (res,nenv) <- runStateT (contextQueueCheck 0 True False cfg lvl lvl [(start,getMinBudget cfg start)]) env
+  let lvl@(minN,minB) = getMinBudget cfg start
+  (res,nenv) <- runStateT (contextQueueCheck 0 True False cfg lvl lvl [(start,minN,minB)]) env
   return (res,unrollInfo nenv)
 
 contextQueueCheck :: (UnrollInfo a,MemoryModel mem mloc ptr,Eq mloc,Eq ptr,Enum mloc,Enum ptr)
-                     => Integer -> Bool -> Bool -> UnrollConfig mloc ptr -> UnrollBudget -> UnrollBudget
+                     => Integer -> Bool -> Bool -> UnrollConfig mloc ptr -> (NodeId,UnrollBudget) -> (NodeId,UnrollBudget)
                      -> UnrollQueue a mloc ptr
                      -> UnrollMonad a mem mloc ptr (Maybe ([(String,[BitVector BVUntyped])],[ErrorDesc]))
 contextQueueCheck n isFirst mustCheck cfg lastLvl lvl queue = do
@@ -1099,9 +1109,9 @@ contextQueueCheck n isFirst mustCheck cfg lastLvl lvl queue = do
                                      Nothing -> contextQueueCheck (n+1) False False cfg nlvl nlvl nqueue)
                           else contextQueueCheck (n+1) False True cfg lastLvl nlvl nqueue
 
-getMinBudget :: UnrollConfig mloc ptr -> UnrollContext a mloc ptr -> UnrollBudget
+getMinBudget :: UnrollConfig mloc ptr -> UnrollContext a mloc ptr -> (NodeId,UnrollBudget)
 getMinBudget cfg ctx = minimumBy (unrollDynamicOrder cfg)
-                       [ edgeBudget edge | edge <- realizationQueue ctx ]
+                       [ (edgeTarget edge,edgeBudget edge) | edge <- realizationQueue ctx ]
 
 instance Show (BlockInfo mloc ptr) where
   show info = show (blockInfoFun info,
