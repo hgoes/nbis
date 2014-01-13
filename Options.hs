@@ -18,6 +18,8 @@ data Options = Options
                , checkErrors :: [ErrorDesc]
                , showHelp :: Bool
                , manualMergeNodes :: Maybe [(String,String,Integer)]
+               , unwindLimit :: Maybe Integer
+               , incremental :: Bool
                } deriving (Eq,Ord,Show)
 
 nbisInfo :: String
@@ -31,7 +33,9 @@ defaultOptions = Options { entryPoint = "main"
                          , solver = Nothing
                          , checkErrors = [Custom]
                          , showHelp = False
-                         , manualMergeNodes = Nothing }
+                         , manualMergeNodes = Nothing
+                         , unwindLimit = Nothing
+                         , incremental = True }
 
 optionDescr :: [OptDescr (Options -> Options)]
 optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoint = str }) "function") "Specify the main function to test"
@@ -49,7 +53,14 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
                                                                                             "free-access" -> FreeAccess
                                                                                             "double-free" -> DoubleFree
                                                                                         ) (splitOptions str) }) "opts") "A comma seperated list of bug types which should be checked:\n  user - User defined assertions\n  null - Null pointer dereferentiations\n  invalid - Invalid memory accesses\n  free-access - Access to freed memory locations\n  double-free - Double frees of memory locations"
-              ,Option [] ["merge-nodes"] (ReqArg (\str opt -> opt { manualMergeNodes = Just (read str) }) "list") "A list of merge nodes to use"
+              ,Option [] ["merge-nodes"]
+               (ReqArg (\str opt -> opt { manualMergeNodes = Just (read str) }) "list")
+               "A list of merge nodes to use"
+              ,Option [] ["non-incremental"]
+               (NoArg (\opt -> opt { incremental = False })) "Use non-incremental solving"
+              ,Option [] ["unwind-limit"]
+               (ReqArg (\str opt -> opt { unwindLimit = Just (read str) }) "n")
+               "Limit the number of times a loop can be unwound"
               ,Option ['h'] ["help"] (NoArg (\opt -> opt { showHelp = True })) "Show this help"
               ]
 
@@ -64,5 +75,8 @@ getOptions = do
   args <- getArgs
   let (res,args',errs) = getOpt Permute optionDescr args
   case errs of
-    [] -> return $ foldl (.) id res (defaultOptions { files = args' })
+    [] -> let opts = foldl (.) id res (defaultOptions { files = args' })
+          in return $ if incremental opts
+                      then opts
+                      else opts { manualMergeNodes = Just [] }
     _ -> error $ show errs

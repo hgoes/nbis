@@ -80,6 +80,11 @@ main = do
         Just nodes -> explicitMergePointConfig (entryPoint opts) program nodes selectErr
       --cfg = randomMergePointConfig (entryPoint opts) program gen
       --cfg = noMergePointConfig (entryPoint opts) program
+      cfg1 = case unwindLimit opts of
+        Nothing -> cfg
+        Just limit -> cfg { unrollDoRealize = \budget -> (unrollDoRealize cfg budget) &&
+                                                         (all (<limit) (unrollUnrollDepth $ snd budget))
+                          }
   backend <- createSMTPipe (case solver opts of
                                Nothing -> "~/debug-smt.sh output-" ++ (entryPoint opts) ++ ".smt"
                                Just bin -> bin)
@@ -91,7 +96,7 @@ main = do
     setOption (ProduceModels True)
     case memoryModelOption opts of
       Rivers -> do
-        (result,info) <- contextQueueRun (Proxy::Proxy (RiverMemory Integer Integer)) (Proxy::Proxy (Gr.Gr BlkInfo ())) cfg (entryPoint opts)
+        (result,info) <- contextQueueRun (incremental opts) (Proxy::Proxy (RiverMemory Integer Integer)) (Proxy::Proxy (Gr.Gr BlkInfo ())) cfg1 (entryPoint opts)
         liftIO $ writeFile "state-space.dot" (Gr.graphviz' info)
         return result
       {-Snow -> do

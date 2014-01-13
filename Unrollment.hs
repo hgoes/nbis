@@ -743,15 +743,18 @@ spawnContexts cfg ctx
 
 performUnrollmentCtx :: (MemoryModel mem mloc ptr,UnrollInfo a,Eq ptr,Enum ptr,Eq mloc,Enum mloc)
                         => Bool
+                        -> Bool
                         -> UnrollConfig mloc ptr
                         -> UnrollContext a mloc ptr
                         -> UnrollMonad a mem mloc ptr (UnrollContext a mloc ptr)
-performUnrollmentCtx isFirst cfg ctx
+performUnrollmentCtx incremental isFirst cfg ctx
   | unrollmentDone ctx = return ctx
   | otherwise = do
     --trace ("Step: "++show ctx) (return ())
-    ctx' <- stepUnrollCtx isFirst (incrementalEnqueue cfg) cfg ctx
-    performUnrollmentCtx False cfg ctx'
+    ctx' <- stepUnrollCtx isFirst (if incremental
+                                   then incrementalEnqueue cfg
+                                   else staticEnqueue cfg) cfg ctx
+    performUnrollmentCtx incremental False cfg ctx'
 
 unrollmentDone :: UnrollContext a mloc ptr -> Bool
 unrollmentDone ctx = List.null (realizationQueue ctx)
@@ -777,6 +780,13 @@ incrementalEnqueue cfg trg edges ctx
              Just LT -> Just False
              _ -> Just True)
     cfg edges ctx
+
+staticEnqueue :: UnrollConfig mloc ptr
+                 -> NodeId -> [Edge a mloc ptr]
+                 -> UnrollContext a mloc ptr
+                 -> UnrollContext a mloc ptr
+staticEnqueue cfg trg edges ctx
+  = enqueueEdges (const $ Just False) cfg edges ctx
 
 stepUnrollCtx :: (MemoryModel mem mloc ptr,UnrollInfo a,Eq ptr,Enum ptr,Eq mloc,Enum mloc)
                  => Bool
@@ -1069,19 +1079,19 @@ contextQueueInsert cfg ctx
     (minNd,budget) = getMinBudget cfg ctx
 
 contextQueueStep :: (UnrollInfo a,MemoryModel mem mloc ptr,Eq mloc,Eq ptr,Enum mloc,Enum ptr)
-                    => Bool -> UnrollConfig mloc ptr -> (NodeId,UnrollBudget)
+                    => Bool -> Bool -> UnrollConfig mloc ptr -> (NodeId,UnrollBudget)
                     -> UnrollQueue a mloc ptr
                     -> UnrollMonad a mem mloc ptr (Maybe ((NodeId,UnrollBudget),UnrollQueue a mloc ptr))
-contextQueueStep isFirst cfg lvl queue = case queue of
+contextQueueStep incremental isFirst cfg lvl queue = case queue of
   (ctx,minN,minB):qs -> case realizationQueue ctx of
-    [] -> contextQueueStep isFirst cfg lvl
+    [] -> contextQueueStep incremental isFirst cfg lvl
           (foldl (\queue' ctx'
                   -> contextQueueInsert cfg ctx' queue'
                  ) qs (spawnContexts cfg ctx))
     _:_ -> case unrollDynamicOrder cfg (minN,minB) lvl of
       GT -> return $ Just ((minN,minB),queue)
       _ -> do
-        ctx' <- performUnrollmentCtx isFirst cfg ctx
+        ctx' <- performUnrollmentCtx incremental isFirst cfg ctx
         --ctx' <- stepUnrollCtx isFirst cfg ctx
         case realizationQueue ctx' of
           [] -> let (minN',minB') = getMinBudget cfg ctx'
@@ -1124,24 +1134,25 @@ checkForErrors cfg = do
       else return Nothing
 
 contextQueueRun :: (UnrollInfo a,MemoryModel mem Integer Integer)
-                   => Proxy mem
+                   => Bool
+                   -> Proxy mem
                    -> Proxy a
                    -> UnrollConfig Integer Integer
                    -> String
                    -> SMT (Maybe ([(String,[BitVector BVUntyped])],[ErrorDesc]),a)
-contextQueueRun (_::Proxy mem) (_::Proxy a) cfg entry = do
+contextQueueRun incremental (_::Proxy mem) (_::Proxy a) cfg entry = do
   (start,env :: UnrollEnv a mem Integer Integer) <- startingContext cfg entry
   let lvl@(minN,minB) = getMinBudget cfg start
-  (res,nenv) <- runStateT (contextQueueCheck 0 True False cfg lvl lvl [(start,minN,minB)]) env
+  (res,nenv) <- runStateT (contextQueueCheck incremental 0 True False cfg lvl lvl [(start,minN,minB)]) env
   return (res,unrollInfo nenv)
 
 contextQueueCheck :: (UnrollInfo a,MemoryModel mem mloc ptr,Eq mloc,Eq ptr,Enum mloc,Enum ptr)
-                     => Integer -> Bool -> Bool -> UnrollConfig mloc ptr -> (NodeId,UnrollBudget) -> (NodeId,UnrollBudget)
+                     => Bool -> Integer -> Bool -> Bool -> UnrollConfig mloc ptr -> (NodeId,UnrollBudget) -> (NodeId,UnrollBudget)
                      -> UnrollQueue a mloc ptr
                      -> UnrollMonad a mem mloc ptr (Maybe ([(String,[BitVector BVUntyped])],[ErrorDesc]))
-contextQueueCheck n isFirst mustCheck cfg lastLvl lvl queue = do
+contextQueueCheck incremental n isFirst mustCheck cfg lastLvl lvl queue = do
   --liftIO $ putStrLn $ "Depth: "++show n++" "++show (length queue,length $ realizationQueue $ head queue)
-  res <- contextQueueStep isFirst cfg lvl queue
+  res <- contextQueueStep incremental isFirst cfg lvl queue
   case res of
     Nothing -> if mustCheck
                then checkForErrors cfg
@@ -1151,8 +1162,8 @@ contextQueueCheck n isFirst mustCheck cfg lastLvl lvl queue = do
                                    err <- checkForErrors cfg
                                    case err of
                                      Just err' -> return $ Just err'
-                                     Nothing -> contextQueueCheck (n+1) False False cfg nlvl nlvl nqueue)
-                          else contextQueueCheck (n+1) False True cfg lastLvl nlvl nqueue
+                                     Nothing -> contextQueueCheck incremental (n+1) False False cfg nlvl nlvl nqueue)
+                          else contextQueueCheck incremental (n+1) False True cfg lastLvl nlvl nqueue
 
 getMinBudget :: UnrollConfig mloc ptr -> UnrollContext a mloc ptr -> (NodeId,UnrollBudget)
 getMinBudget cfg ctx = minimumBy (unrollDynamicOrder cfg)
