@@ -188,7 +188,11 @@ getProgram is_intr entry file = do
   loop_mp <- applyOptimizations mod entry
   tli <- getTargetLibraryInfo mod
   dl <- getDataLayout mod
+#if HS_LLVM_VERSION >= 302
   ptrWidth <- dataLayoutPointerSize dl 0
+#else
+  ptrWidth <- targetDataPointerSize dl
+#endif
   funs <- moduleGetFunctionList mod >>= 
           ipListToList >>=
           mapM (\fun -> do
