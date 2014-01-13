@@ -1159,10 +1159,16 @@ getMinBudget cfg ctx = minimumBy (unrollDynamicOrder cfg)
                        [ (edgeTarget edge,edgeBudget edge) | edge <- realizationQueue ctx ]
 
 instance Show (BlockInfo mloc ptr) where
-  show info = show (blockInfoFun info,
-                    blockInfoBlk info,
-                    blockInfoBlkName info,
-                    blockInfoSubBlk info)
+  show info = (case blockInfoFun info of
+                  "main" -> ""
+                  "__llbmc_main" -> ""
+                  f -> f++".")++
+              (case blockInfoBlkName info of
+                  Nothing -> show $ blockInfoBlk info
+                  Just blk -> blk)++
+              (if blockInfoSubBlk info==0
+               then ""
+               else "."++show (blockInfoSubBlk info))
 
 generateDistanceInfo :: (ErrorDesc -> Bool) -> BlockGraph mloc ptr -> BlockGraph mloc ptr
 generateDistanceInfo isError gr = updateDistanceInfo gr upds
@@ -1256,3 +1262,7 @@ updateDistanceInfo'' gr (nd,newDist) = (gr { blockGraph = ngr },upds)
                                                                             , distanceToReturn = fmap (+minDist') newRetDist })
                           _ -> Nothing
                      | (edge,prevNode) <- prev ]
+
+dumpBlockGraph :: UnrollConfig mloc ptr -> String -> IO ()
+dumpBlockGraph cfg fname = do
+  writeFile fname $ Gr.graphviz' $ blockGraph $ unrollGraph cfg
