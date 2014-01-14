@@ -17,6 +17,12 @@ extern uint8_t  nbis_nondet_u8(void) __attribute__((pure));
 
 extern int nbis_nondet_int(void) __attribute__((pure));
 extern unsigned int nbis_nondet_uint(void) __attribute__((pure));
+extern char nbis_nondet_char(void) __attribute__((pure));
+extern unsigned char nbis_nondet_uchar(void) __attribute__((pure));
+extern long nbis_nondet_long(void) __attribute__((pure));
+extern unsigned long nbis_nondet_ulong(void) __attribute__((pure));
+extern short nbis_nondet_short(void) __attribute__((pure));
+extern unsigned short nbis_nondet_ushort(void) __attribute__((pure));
 
 extern void nbis_watch(int num,...);
 
