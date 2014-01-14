@@ -15,6 +15,8 @@ extern uint16_t nbis_nondet_u16(void) __attribute__((pure));
 extern int8_t   nbis_nondet_i8(void) __attribute__((pure));
 extern uint8_t  nbis_nondet_u8(void) __attribute__((pure));
 
+extern int nbis_nondet_int(void) __attribute__((pure));
+
 extern void nbis_watch(int num,...);
 
 #endif
