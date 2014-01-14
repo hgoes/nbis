@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 module TypeDesc where
 
 import Foreign
@@ -9,7 +10,9 @@ import Data.Map as Map
 
 data TypeDesc
      = VoidType
+#if HS_LLVM_VERSION >= 301
      | HalfType
+#endif
      | FloatType
      | DoubleType
      | X86_FP80Type
@@ -30,7 +33,9 @@ reifyType :: Ptr Type -> IO TypeDesc
 reifyType tp
   = mkCheck
     [(isVoidType,return VoidType)
+#if HS_LLVM_VERSION >= 301
     ,(isHalfType,return HalfType)
+#endif
     ,(isFloatType,return FloatType)
     ,(isDoubleType,return DoubleType)
     ,(isX86_FP80Type,return X86_FP80Type)

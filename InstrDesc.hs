@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ScopedTypeVariables,CPP #-}
 module InstrDesc where
 
 import TypeDesc
