@@ -43,7 +43,7 @@ import Debug.Trace
 class UnrollInfo a where
   type UnrollNodeInfo a
   unrollInfoInit :: a
-  unrollInfoNewNode :: a -> NodeId -> Maybe String -> Bool -> (UnrollNodeInfo a,a)
+  unrollInfoNewNode :: a -> NodeId -> Either String Integer -> Bool -> (UnrollNodeInfo a,a)
   unrollInfoConnect :: a -> UnrollNodeInfo a -> UnrollNodeInfo a -> a
 
 data MergeNode a mloc ptr = MergeNode { mergeActivationProxy :: SMTExpr Bool
@@ -135,9 +135,9 @@ data BlockEdge = EdgeJmp
 
 data BlockInfo mloc ptr = BlockInfo { blockInfoFun :: String
                                     , blockInfoBlk :: Ptr BasicBlock
-                                    , blockInfoBlkName :: Maybe String
+                                    , blockInfoBlkName :: Either String Integer
                                     , blockInfoSubBlk :: Integer
-                                    , blockInfoInstrs :: [InstrDesc Operand]
+                                    , blockInfoInstrs :: [(InstrDesc Operand,Maybe Integer)]
                                     , blockInfoRealizationInfo :: RealizationInfo
                                     , blockInfoRealization :: RealizationMonad mloc ptr (BlockFinalization ptr)
                                     , blockInfoDistance :: DistanceInfo
@@ -174,20 +174,42 @@ mkBlockGraph (funs,_,_,_,_)
                , blockMap = nodeMp
                }
   where
-    nodeList = [ (nd,BlockInfo { blockInfoFun = fn
-                               , blockInfoBlk = blk
-                               , blockInfoBlkName = name
-                               , blockInfoSubBlk = sblk
-                               , blockInfoInstrs = instrs
-                               , blockInfoDistance = DistInfo Nothing Nothing
-                               , blockInfoRealizationInfo = rinfo
-                               , blockInfoRealization = real
-                               })
-               | (fn,(_,_,blks,_,_)) <- Map.toList funs
-               , (blk,name,subs) <- blks
-               , (sblk,instrs) <- zip [0..] subs
-               , let (rinfo,real) = preRealize $ realizeInstructions instrs
-               | nd <- [0..] ]
+    nodeList = numberFunctions 0 (Map.toList funs)
+
+    numberFunctions _ [] = []
+    numberFunctions nd ((fn,(_,_,blks,_,_)):funs)
+      = numberBlocks fn nd 0 blks funs
+    
+    numberBlocks _ nd _ [] funs = numberFunctions nd funs
+    numberBlocks fname nd c ((blk,name,subs):blks) funs
+      = numberSubblocks fname nd
+        (case name of
+            Nothing -> c+1
+            Just _ -> c)
+        blk
+        (case name of
+            Nothing -> Right c
+            Just name' -> Left name')
+        0 subs blks funs
+    numberSubblocks fname nd c _ _ _ [] blks funs = numberBlocks fname nd c blks funs
+    numberSubblocks fname nd c blk blkName sblkNr (instrs:subs) blks funs
+      = let (nc,instrs') = mapAccumL (\cc instr -> case instr of
+                                         IAssign _ Nothing _ -> (cc+1,(instr,Just cc))
+                                         ITerminator (ICall _ Nothing _ _) -> (cc+1,(instr,Just cc))
+                                         _ -> (cc,(instr,Nothing))
+                                     ) c instrs
+            (rinfo,real) = preRealize $ realizeInstructions instrs'
+            info = (nd,BlockInfo { blockInfoFun = fname
+                                 , blockInfoBlk = blk
+                                 , blockInfoBlkName = blkName
+                                 , blockInfoSubBlk = sblkNr
+                                 , blockInfoInstrs = instrs'
+                                 , blockInfoRealizationInfo = rinfo
+                                 , blockInfoRealization = real
+                                 , blockInfoDistance = DistInfo Nothing Nothing })
+            infos = numberSubblocks fname (nd+1) nc blk blkName (sblkNr+1) subs blks funs
+        in info:infos
+                                         
     nodeMp = Map.fromList [ ((blockInfoBlk info,blockInfoSubBlk info),nd) | (nd,info) <- nodeList ]
     funInfo = Map.mapMaybe (\(args,_,blks,_,_) -> case blks of
                                (blk,_,_):_ -> Just $ FunInfo { funInfoStartBlk = nodeMp!(blk,0)
@@ -195,13 +217,13 @@ mkBlockGraph (funs,_,_,_,_)
                                [] -> Nothing) funs
     edgeList = [(ndFrom,ndTo,edge)
                | (ndFrom,info) <- nodeList
-               , (ndTo,edge) <- case last (blockInfoInstrs info) of
+               , (ndTo,edge) <- case fst $ last (blockInfoInstrs info) of
                  ITerminator (IBr to) -> [(nodeMp!(to,0),EdgeJmp)]
                  ITerminator (IBrCond _ ifT ifF)
                    -> [(nodeMp!(ifT,0),EdgeJmp),(nodeMp!(ifF,0),EdgeJmp)]
                  ITerminator (ISwitch _ def cases)
                    -> (nodeMp!(def,0),EdgeJmp):[ (nodeMp!(blk,0),EdgeJmp) | (_,blk) <- cases ]
-                 ITerminator (ICall _ (Operand { operandDesc = ODFunction _ f _ }) _)
+                 ITerminator (ICall _ _ (Operand { operandDesc = ODFunction _ f _ }) _)
                    -> let callNode = funInfoStartBlk (funInfo!f)
                           succNode = nodeMp!(blockInfoBlk info,blockInfoSubBlk info+1)
                       in [(callNode,EdgeCall succNode)
@@ -210,15 +232,16 @@ mkBlockGraph (funs,_,_,_,_)
                  ITerminator (IRet _)
                    -> [ (nodeMp!(blockInfoBlk info',blockInfoSubBlk info'+1),EdgeRet)
                       | (_,info') <- nodeList
-                      , f <- case last (blockInfoInstrs info') of
-                        ITerminator (ICall _ (Operand { operandDesc = ODFunction _ f _ }) _) -> [f]
+                      , f <- case fst $ last (blockInfoInstrs info') of
+                        ITerminator (ICall _ _ (Operand { operandDesc = ODFunction _ f _ }) _)
+                          -> [f]
                         _ -> []
                       , f==blockInfoFun info]
                  ITerminator IRetVoid
                    -> [ (nodeMp!(blockInfoBlk info',blockInfoSubBlk info'+1),EdgeRet)
                       | (_,info') <- nodeList
-                      , f <- case last (blockInfoInstrs info') of
-                        ITerminator (ICall _ (Operand { operandDesc = ODFunction _ f _ }) _) -> [f]
+                      , f <- case fst $ last (blockInfoInstrs info') of
+                        ITerminator (ICall _ _ (Operand { operandDesc = ODFunction _ f _ }) _) -> [f]
                         _ -> []
                       , f==blockInfoFun info]
                  _ -> [] ]
@@ -298,7 +321,7 @@ mergePointConfig' entry prog@(funs,globs,ptrWidth,alltps,structs) select selectE
                     -> let blk_mp' = Map.fromList [ (key,(realize,nd))
                                                   | ((key,realize),nd) <- zip [ ((blk,sblk),(name,info,real))
                                                                               | (blk,name,subs) <- blks, (sblk,instrs) <- zip [0..] subs
-                                                                              , let (info,real) = preRealize $ realizeInstructions instrs ]
+                                                                              , let (info,real) = preRealize $ realizeInstructions (fmap (\x -> (x,Nothing)) instrs) ]
                                                                           [0..] ]
                            rblk_mp = fmap fst blk_mp'
                            reach_info = reachabilityInfo rblk_mp
@@ -811,8 +834,8 @@ stepUnrollCtx isFirst enqueue cfg cur = do
           info = blockInfoRealizationInfo blockInfo
           realize = blockInfoRealization blockInfo
           blk_name = (case blockInfoBlkName blockInfo of
-                         Nothing -> show (nodeIdBlock trg)
-                         Just rname -> rname)++"_"++show (nodeIdSubblock trg)
+                         Left rname -> rname
+                         Right num -> "lbl"++show num)++"_"++show (nodeIdSubblock trg)
       env <- get
       let (newNodeInfo,newInfo) = unrollInfoNewNode (unrollInfo env) trg
                                   (blockInfoBlkName blockInfo)
@@ -1175,8 +1198,8 @@ instance Show (BlockInfo mloc ptr) where
                   "__llbmc_main" -> ""
                   f -> f++".")++
               (case blockInfoBlkName info of
-                  Nothing -> show $ blockInfoBlk info
-                  Just blk -> blk)++
+                  Right lbl -> "lbl"++show lbl
+                  Left blk -> blk)++
               (if blockInfoSubBlk info==0
                then ""
                else "."++show (blockInfoSubBlk info))

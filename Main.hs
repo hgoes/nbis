@@ -45,8 +45,8 @@ instance UnrollInfo (Gr.Gr BlkInfo ()) where
   unrollInfoNewNode gr ndInfo name isMerge
     = let [nd] = Gr.newNodes 1 gr
           rname = case name of
-            Nothing -> show $ nodeIdBlock ndInfo
-            Just n -> n
+            Right lbl -> "lbl"++show lbl
+            Left n -> n
           ngr = Gr.insNode (nd,let prefix = if nodeIdFunction ndInfo=="main"
                                             then ""
                                             else (nodeIdFunction ndInfo)++"."

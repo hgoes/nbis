@@ -26,7 +26,7 @@ getDefiningBlocks isIntr
            -> foldl (\mp2 (instrs,sblk)
                      -> foldl (\mp3 instr -> case instr of
                                   IAssign trg _ _ -> Map.insert trg (blk,sblk) mp3
-                                  ITerminator (ICall trg fun _) -> case operandDesc fun of
+                                  ITerminator (ICall trg _ fun _) -> case operandDesc fun of
                                     ODFunction _ fname _ -> if isIntr fname
                                                             then Map.insert trg (blk,sblk) mp3
                                                             else Map.insert trg (blk,sblk+1) mp3
@@ -73,7 +73,7 @@ programAsGraph prog args = createEdges $ createNodes (ProgramGraph Gr.empty Map.
                                                                       (foldl (\cgr' (_,c) -> case Map.lookup (c,0) (nodeMap gr) of
                                                                                  Just t -> Gr.insEdge (node,t,()) cgr'
                                                                              ) cgr cases)
-                                                       ICall _ _ _ -> case Map.lookup (blk,sblk+1) (nodeMap gr) of
+                                                       ICall _ _ _ _ -> case Map.lookup (blk,sblk+1) (nodeMap gr) of
                                                          Just trg -> Gr.insEdge (node,trg,()) cgr
                                                   ) (programGraph gr) (programGraph gr) }
 

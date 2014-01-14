@@ -240,15 +240,15 @@ postRealize env cur_mem next_mem next_ptr act = runRWST act env (RealizationStat
                                                                                   , reLocals = Map.empty
                                                                                   , rePtrTypes = Map.empty })
 
-realizeInstructions :: (Ord ptr,Enum ptr,Enum mem) => [InstrDesc Operand] -> Realization mem ptr (BlockFinalization ptr)
+realizeInstructions :: (Ord ptr,Enum ptr,Enum mem) => [(InstrDesc Operand,Maybe Integer)] -> Realization mem ptr (BlockFinalization ptr)
 realizeInstructions [instr] = (\(Just fin) -> fin) <$> realizeInstruction instr
 realizeInstructions (instr:instrs) = ((\Nothing -> ()) <$> realizeInstruction instr) *> realizeInstructions instrs
 
-realizeInstruction :: (Ord ptr,Enum ptr,Enum mem) => InstrDesc Operand -> Realization mem ptr (Maybe (BlockFinalization ptr))
-realizeInstruction (ITerminator (IRet e)) = reSetReturn *> (Just . Return . Just <$> argToExpr e)
-realizeInstruction (ITerminator IRetVoid) = reSetReturn *> (pure $ Just $ Return Nothing)
-realizeInstruction (ITerminator (IBr to)) = (reAddSuccessor to) *> (pure $ Just $ Jump [(constant True,to)])
-realizeInstruction (ITerminator (IBrCond cond ifT ifF))
+realizeInstruction :: (Ord ptr,Enum ptr,Enum mem) => (InstrDesc Operand,Maybe Integer) -> Realization mem ptr (Maybe (BlockFinalization ptr))
+realizeInstruction (ITerminator (IRet e),_) = reSetReturn *> (Just . Return . Just <$> argToExpr e)
+realizeInstruction (ITerminator IRetVoid,_) = reSetReturn *> (pure $ Just $ Return Nothing)
+realizeInstruction (ITerminator (IBr to),_) = (reAddSuccessor to) *> (pure $ Just $ Jump [(constant True,to)])
+realizeInstruction (ITerminator (IBrCond cond ifT ifF),_)
   = (reAddSuccessor ifT) *>
     (reAddSuccessor ifF) *>
     ((\cond' -> case cond' of
@@ -258,7 +258,7 @@ realizeInstruction (ITerminator (IBrCond cond ifT ifF))
          Left v -> Just $ Jump [(valCond v,ifT)
                                ,(not' $ valCond v,ifF)]) <$>
      (argToExpr cond))
-realizeInstruction (ITerminator (ISwitch val def args))
+realizeInstruction (ITerminator (ISwitch val def args),_)
   = foldl (\cur (_,to) -> cur *> reAddSuccessor to) (reAddSuccessor def) args *>
     ((\val' args' -> case val' of
          Left (ConstValue v _)
@@ -273,23 +273,25 @@ realizeInstruction (ITerminator (ISwitch val def args))
                    in Just $ Jump jumps') <$>
      (argToExpr val) <*>
      (traverse (\(cmp_v,to) -> (\r -> (r,to)) <$> (argToExpr cmp_v)) args))
-realizeInstruction assignInstr@(IAssign trg name expr)
+realizeInstruction (assignInstr@(IAssign trg name expr),num)
   = reDefineVar trg rname (reInject getType result) *> pure Nothing
   where
     rname = case name of
       Just name' -> "assign_"++name'
-      Nothing -> "assign"++(case expr of
-                               IBinaryOperator _ _ _ -> "BinOp"
-                               IICmp _ _ _ -> "ICmp"
-                               IGetElementPtr _ _ -> "GetElementPtr"
-                               IPhi _ -> "Phi"
-                               ILoad _ -> "Load"
-                               IBitCast _ _ -> "BitCast"
-                               ISExt _ _ -> "SExt"
-                               IZExt _ _ -> "ZExt"
-                               IAlloca _ _ -> "Alloca"
-                               ISelect _ _ _ -> "Select"
-                               _ -> "Unknown")
+      Nothing -> case num of
+        Just num' -> "assign"++show num'
+        Nothing -> "assign"++(case expr of
+                                 IBinaryOperator _ _ _ -> "BinOp"
+                                 IICmp _ _ _ -> "ICmp"
+                                 IGetElementPtr _ _ -> "GetElementPtr"
+                                 IPhi _ -> "Phi"
+                                 ILoad _ -> "Load"
+                                 IBitCast _ _ -> "BitCast"
+                                 ISExt _ _ -> "SExt"
+                                 IZExt _ _ -> "ZExt"
+                                 IAlloca _ _ -> "Alloca"
+                                 ISelect _ _ _ -> "Select"
+                                 _ -> "Unknown")
     getType res = do
       structs <- asks reStructs
       case getInstrType structs assignInstr of
@@ -422,7 +424,7 @@ realizeInstruction assignInstr@(IAssign trg name expr)
                                        DirectValue bv -> Right bv
                                    ) <$> argToExpr sz
       _ -> error $ "Unknown expression: "++show expr
-realizeInstruction (IStore val to)
+realizeInstruction (IStore val to,_)
   = reErrorAnn NullDeref *>
     reErrorAnn Overrun *>
     (reInject (\(ptr,val) -> do
@@ -435,7 +437,7 @@ realizeInstruction (IStore val to)
      (\(Right ptr) val -> (ptr,val)) <$>
      (argToExpr to) <*>
      (argToExpr val))
-realizeInstruction (ITerminator (ICall trg f args)) = case operandDesc f of
+realizeInstruction (ITerminator (ICall trg _ f args),_) = case operandDesc f of
   ODFunction rtp fn argtps -> let args' = traverse (\arg -> (\r -> (r,operandType arg)) <$> argToExpr arg) args
                               in case intrinsics fn rtp argtps of
                                 Nothing -> reAddCall fn trg *> ((\args'' -> Just $ Call fn (fmap fst args'') trg) <$> args')

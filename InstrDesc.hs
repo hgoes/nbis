@@ -48,7 +48,7 @@ data TerminatorDesc a
   | IBr (Ptr BasicBlock)
   | IBrCond a (Ptr BasicBlock) (Ptr BasicBlock)
   | ISwitch a (Ptr BasicBlock) [(a,Ptr BasicBlock)]
-  | ICall (Ptr Instruction) a [a]
+  | ICall (Ptr Instruction) (Maybe String) a [a]
   | IUnreachable
   deriving (Show,Eq,Ord)
 
@@ -132,7 +132,7 @@ reifyInstr tl dl ptr
                            cobj <- callInstGetCalledValue call >>= reifyOperand
                            nargs <- callInstGetNumArgOperands call
                            args <- mapM (\i -> callInstGetArgOperand call i >>= reifyOperand) [0..(nargs-1)]
-                           return $ ITerminator $ ICall ptr cobj args)
+                           return $ ITerminator $ ICall ptr name cobj args)
             ) (castDown ptr)
       ,fmap (\cmp -> do
                 op <- getICmpOp cmp
@@ -272,7 +272,7 @@ getInstrType structs (IAssign _ _ desc) = case desc of
   IMalloc Nothing _ _ -> PointerType (IntegerType 8)
 getInstrType _ (IStore _ _) = VoidType
 getInstrType _ (ITerminator desc) = case desc of
-  ICall _ f _ -> case operandType f of
+  ICall _ _ f _ -> case operandType f of
     PointerType (FunctionType rtp _ _) -> rtp
     tp -> error $ "Invalid type for call argument: "++show tp
   _ -> VoidType
@@ -280,7 +280,7 @@ getInstrType _ (ITerminator desc) = case desc of
 getInstrTarget :: InstrDesc Operand -> Maybe (Ptr Instruction)
 getInstrTarget (IAssign x _ _) = Just x
 getInstrTarget (ITerminator desc) = case desc of
-  ICall trg _ _ -> Just trg
+  ICall trg _ _ _ -> Just trg
   _ -> Nothing
 getInstrTarget (IStore _ _) = Nothing
 
@@ -366,7 +366,7 @@ getInstrsDeps = snd . foldl (\(loc,mp) instr -> (case getInstrTarget instr of
     getInstrDeps loc mp (ITerminator term) = case term of
       IBrCond cond _ _ -> getOperandDeps loc mp cond
       ISwitch val _ cases -> getOperandDeps loc (foldl (\cmp (c,_) -> getOperandDeps loc cmp c) mp cases) val
-      ICall _ fun args -> getOperandDeps loc (foldl (getOperandDeps loc) mp args) fun
+      ICall _ _ fun args -> getOperandDeps loc (foldl (getOperandDeps loc) mp args) fun
       _ -> mp
 
     getOperandDeps loc mp op = case operandDesc op of

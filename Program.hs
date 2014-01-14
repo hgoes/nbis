@@ -233,7 +233,7 @@ getProgram is_intr entry file = do
   where
     mkSubBlocks :: [InstrDesc Operand] -> [InstrDesc Operand] -> [[InstrDesc Operand]]
     mkSubBlocks cur (i:is) = case i of
-      ITerminator (ICall _ fn _) -> case operandDesc fn of
+      ITerminator (ICall _ _ fn _) -> case operandDesc fn of
         ODFunction rtp fname argtps -> if is_intr fname rtp argtps
                                        then mkSubBlocks (cur++[i]) is
                                        else (cur++[i]):mkSubBlocks [] is
