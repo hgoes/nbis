@@ -103,11 +103,18 @@ main = do
         setOption (ProduceModels True)
         case memoryModelOption opts of
           Rivers -> do
-            (result,info) <- contextQueueRun (incremental opts)
-                             (Proxy::Proxy (RiverMemory Integer Integer))
-                             (Proxy::Proxy (Gr.Gr BlkInfo ())) cfg (entryPoint opts)
-            liftIO $ writeFile "state-space.dot" (Gr.graphviz' info)
-            return result
+            case dumpStateSpace opts of
+              Just dumpFile -> do
+                (result,info) <- contextQueueRun (incremental opts)
+                                 (Proxy::Proxy (RiverMemory Integer Integer))
+                                 (Proxy::Proxy (Gr.Gr BlkInfo ())) cfg (entryPoint opts)
+                liftIO $ writeFile dumpFile (Gr.graphviz' info)
+                return result
+              Nothing -> do
+                (result,_) <- contextQueueRun (incremental opts)
+                              (Proxy::Proxy (RiverMemory Integer Integer))
+                              (Proxy::Proxy ()) cfg (entryPoint opts)
+                return result
           {-Snow -> do
              (start,env :: UnrollEnv (Gr.Gr BlkInfo ()) (SnowMemory Integer Integer) Integer Integer) <- startingContext cfg1 (entryPoint opts)
              findBug True cfg 0 env [start]-}

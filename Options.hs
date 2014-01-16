@@ -26,6 +26,7 @@ data Options = Options
                , manualMergeNodes :: Maybe [(String,String,Integer)]
                , unwindLimit :: Maybe Integer
                , incremental :: Bool
+               , dumpStateSpace :: Maybe String
                } deriving (Eq,Ord,Show)
 
 nbisInfo :: String
@@ -42,7 +43,8 @@ defaultOptions = Options { action = Verify
                          , showHelp = False
                          , manualMergeNodes = Nothing
                          , unwindLimit = Nothing
-                         , incremental = True }
+                         , incremental = True
+                         , dumpStateSpace = Nothing }
 
 optionDescr :: [OptDescr (Options -> Options)]
 optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoint = str }) "function") "Specify the main function to test"
@@ -72,6 +74,10 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
                (NoArg (\opt -> opt { action = DumpCFG })) "Dump the control flow graph as a graphviz file."
               ,Option [] ["dump-llvm"]
                (NoArg (\opt -> opt { action = DumpLLVM })) "Dump the LLVM IR."
+              ,Option [] ["dump-state-space"]
+               (OptArg (\str opt -> opt { dumpStateSpace = case str of
+                                             Nothing -> Just "state-space.dot"
+                                             Just fname -> Just fname }) "file") "Dump the state space after verfication."
               ,Option ['h'] ["help"] (NoArg (\opt -> opt { showHelp = True })) "Show this help"
               ]
 
