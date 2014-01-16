@@ -40,7 +40,8 @@ import LLVM.FFI.ArrayRef
 import LLVM.FFI.Loop
 import LLVM.FFI.CPP
 
-type ProgDesc = (Map String ([(Ptr Argument, TypeDesc)],
+type ProgDesc = (Set (Ptr Module),
+                 Map String ([(Ptr Argument, TypeDesc)],
                              TypeDesc,
                              [(Ptr BasicBlock, Maybe String, [[InstrDesc Operand]])],
                              [LoopDesc],
@@ -229,7 +230,7 @@ getProgram is_intr entry file = do
                     return (g,(tp,init'))) >>=
            return . Map.fromList
   (tps,structs) <- getUsedTypes mod
-  return (funs,globs,fromIntegral ptrWidth,Set.fromList tps,structs)
+  return (Set.singleton mod,funs,globs,fromIntegral ptrWidth,Set.fromList tps,structs)
   where
     mkSubBlocks :: [InstrDesc Operand] -> [InstrDesc Operand] -> [[InstrDesc Operand]]
     mkSubBlocks cur (i:is) = case i of
@@ -289,8 +290,9 @@ getConstant val
         error "Unknown constant."
 
 mergePrograms :: ProgDesc -> ProgDesc -> ProgDesc
-mergePrograms (p1,g1,pw1,tp1,s1) (p2,g2,pw2,tp2,s2)
-  = (Map.unionWithKey (\name (args1,tp1,blks1,loops1,dt1) (args2,tp2,blks2,loops2,dt2)
+mergePrograms (mod1,p1,g1,pw1,tp1,s1) (mod2,p2,g2,pw2,tp2,s2)
+  = (Set.union mod1 mod2,
+     Map.unionWithKey (\name (args1,tp1,blks1,loops1,dt1) (args2,tp2,blks2,loops2,dt2)
                        -> if fmap snd args1 /= fmap snd args2 || tp1 /= tp2
                           then error $ "Conflicting signatures for function "++show name++" detected"
                           else (if P.null blks1
@@ -304,3 +306,6 @@ mergePrograms (p1,g1,pw1,tp1,s1) (p2,g2,pw2,tp2,s2)
      else error "Programs do not agree on pointer width",
      Set.union tp1 tp2,
      Map.union s1 s2)
+
+dumpProgram :: ProgDesc -> IO ()
+dumpProgram (mods,_,_,_,_,_) = mapM_ moduleDump (Set.toList mods)

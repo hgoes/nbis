@@ -85,31 +85,34 @@ main = do
         Just limit -> cfg { unrollDoRealize = \budget -> (unrollDoRealize cfg budget) &&
                                                          (all (<limit) (unrollUnrollDepth $ snd budget))
                           }
-  backend <- createSMTPipe (case solver opts of
-                               Nothing -> "~/debug-smt.sh output-" ++ (entryPoint opts) ++ ".smt"
-                               Just bin -> bin)
-  --backend <- boolectorBackend
-  --backend <- stpBackend
-  bug <- withSMTBackend (optimizeBackend backend) $ do
-    setLogic "QF_ABV"
-    setOption (PrintSuccess False)
-    setOption (ProduceModels True)
-    case memoryModelOption opts of
-      Rivers -> do
-        (result,info) <- contextQueueRun (incremental opts) (Proxy::Proxy (RiverMemory Integer Integer)) (Proxy::Proxy (Gr.Gr BlkInfo ())) cfg1 (entryPoint opts)
-        liftIO $ writeFile "state-space.dot" (Gr.graphviz' info)
-        return result
-      {-Snow -> do
-        (start,env :: UnrollEnv (Gr.Gr BlkInfo ()) (SnowMemory Integer Integer) Integer Integer) <- startingContext cfg (entryPoint opts)
-        findBug True cfg 0 env [start]-}
-  case bug of
-    Just (tr,bugs) -> do
-      putStrLn $ "Bug found: "++show bugs
-      print tr
-    Nothing -> putStrLn "No bug found."
-  {-where
-    getBlkName cfg fname blk sblk = case Map.lookup fname (unrollFunctions cfg) of
-      Just info -> case Map.lookup (blk,sblk) (unrollFunInfoBlocks info) of
-        Just (name,_,_,_) -> case name of
-          Just name' -> name'
-        Nothing -> "Unknown block"-}
+  case action opts of
+    Verify -> actVerify opts cfg1
+    DumpCFG -> dumpBlockGraph cfg1
+    DumpLLVM -> dumpProgram program
+  where
+    actVerify opts cfg = do
+      backend <- createSMTPipe
+                 (case solver opts of
+                     Nothing -> "~/debug-smt.sh output-" ++ (entryPoint opts) ++ ".smt2"
+                     Just bin -> bin)
+      --backend <- boolectorBackend
+      --backend <- stpBackend
+      bug <- withSMTBackend (optimizeBackend backend) $ do
+        setLogic "QF_ABV"
+        setOption (PrintSuccess False)
+        setOption (ProduceModels True)
+        case memoryModelOption opts of
+          Rivers -> do
+            (result,info) <- contextQueueRun (incremental opts)
+                             (Proxy::Proxy (RiverMemory Integer Integer))
+                             (Proxy::Proxy (Gr.Gr BlkInfo ())) cfg (entryPoint opts)
+            liftIO $ writeFile "state-space.dot" (Gr.graphviz' info)
+            return result
+          {-Snow -> do
+             (start,env :: UnrollEnv (Gr.Gr BlkInfo ()) (SnowMemory Integer Integer) Integer Integer) <- startingContext cfg1 (entryPoint opts)
+             findBug True cfg 0 env [start]-}
+      case bug of
+        Just (tr,bugs) -> do
+          putStrLn $ "Bug found: "++show bugs
+          print tr
+        Nothing -> putStrLn "No bug found."

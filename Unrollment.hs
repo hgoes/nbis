@@ -168,7 +168,7 @@ instance Monoid DistanceInfo where
 
 
 mkBlockGraph :: (Ord ptr,Enum mloc,Enum ptr) => ProgDesc -> BlockGraph mloc ptr
-mkBlockGraph (funs,_,_,_,_)
+mkBlockGraph (_,funs,_,_,_,_)
   = BlockGraph { blockGraph = Gr.mkGraph nodeList edgeList
                , blockFunctions = funInfo
                , blockMap = nodeMp
@@ -1222,7 +1222,7 @@ generateDistanceInfo isError gr = updateDistanceInfo gr upds
                            isRet = reReturns info ]
 
 updateDistanceInfo :: BlockGraph mloc ptr -> [(Gr.Node,DistanceInfo)] -> BlockGraph mloc ptr
-updateDistanceInfo gr [] = trace ("distanceInfo: "++show (Gr.nmap (\info -> (blockInfoFun info,blockInfoBlk info,blockInfoSubBlk info,blockInfoDistance info)) $ blockGraph gr)) $ gr
+updateDistanceInfo gr [] = gr
 updateDistanceInfo gr xs = let (ngr,upds) = updateDistanceInfo' gr xs
                            in updateDistanceInfo ngr upds
 
@@ -1297,6 +1297,6 @@ updateDistanceInfo'' gr (nd,newDist) = (gr { blockGraph = ngr },upds)
                           _ -> Nothing
                      | (edge,prevNode) <- prev ]
 
-dumpBlockGraph :: UnrollConfig mloc ptr -> String -> IO ()
-dumpBlockGraph cfg fname = do
-  writeFile fname $ Gr.graphviz' $ blockGraph $ unrollGraph cfg
+dumpBlockGraph :: UnrollConfig mloc ptr -> IO ()
+dumpBlockGraph cfg = do
+  putStrLn $ Gr.graphviz' $ blockGraph $ unrollGraph cfg

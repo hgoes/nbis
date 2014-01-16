@@ -9,8 +9,14 @@ data MemoryModelOption = Rivers
                        | Snow
                        deriving (Eq,Ord,Show)
 
+data NbisAction = Verify
+                | DumpCFG
+                | DumpLLVM
+                deriving (Eq,Ord,Show)
+
 data Options = Options
-               { entryPoint :: String
+               { action :: NbisAction
+               , entryPoint :: String
                , bmcDepth :: Integer
                , files :: [String]
                , memoryModelOption :: MemoryModelOption
@@ -26,7 +32,8 @@ nbisInfo :: String
 nbisInfo = usageInfo "USAGE:\n  nbis [OPTION...] FILE [FILE...]\n\nOptions:" optionDescr
 
 defaultOptions :: Options
-defaultOptions = Options { entryPoint = "main" 
+defaultOptions = Options { action = Verify
+                         , entryPoint = "main"
                          , bmcDepth = 10
                          , files = []
                          , memoryModelOption = Rivers
@@ -61,6 +68,10 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
               ,Option [] ["unwind-limit"]
                (ReqArg (\str opt -> opt { unwindLimit = Just (read str) }) "n")
                "Limit the number of times a loop can be unwound"
+              ,Option [] ["dump-cfg"]
+               (NoArg (\opt -> opt { action = DumpCFG })) "Dump the control flow graph as a graphviz file."
+              ,Option [] ["dump-llvm"]
+               (NoArg (\opt -> opt { action = DumpLLVM })) "Dump the LLVM IR."
               ,Option ['h'] ["help"] (NoArg (\opt -> opt { showHelp = True })) "Show this help"
               ]
 
