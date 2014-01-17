@@ -18,8 +18,9 @@ import Circuit
 import InstrDesc
 import SMTHelper
 
-import Data.Map (Map,(!))
+import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Map.Debug ((!))
 import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.List as List
@@ -97,22 +98,15 @@ data UnrollConfig mloc ptr = UnrollCfg { unrollDoMerge :: String -> Ptr BasicBlo
                                        , unrollPointerWidth :: Integer
                                        , unrollStructs :: Map String [TypeDesc]
                                        , unrollTypes :: Set TypeDesc
-                                       --, unrollFunctions :: Map String (UnrollFunInfo mloc ptr)
                                        , unrollGraph :: BlockGraph mloc ptr
                                        , unrollCfgGlobals :: Map (Ptr GlobalVariable) (TypeDesc, Maybe MemContent)
                                        , unrollBlockOrder :: [(String,Ptr BasicBlock,Integer)]
-                                       --, unrollDistances :: Map (Ptr BasicBlock,Integer) DistanceInfo
                                        , unrollDynamicOrder :: (NodeId,UnrollBudget) -> (NodeId,UnrollBudget) -> Ordering
                                        , unrollPerformCheck :: (NodeId,UnrollBudget) -> (NodeId,UnrollBudget) -> Bool
                                        , unrollDoRealize :: (NodeId,UnrollBudget) -> Bool
                                        , unrollCheckedErrors :: ErrorDesc -> Bool
                                        , unrollLoopHeaders :: Map (Ptr BasicBlock) LoopDesc
                                        }
-
-data UnrollFunInfo mloc ptr = UnrollFunInfo { unrollFunInfoBlocks :: Map (Ptr BasicBlock,Integer) (Maybe String,RealizationInfo,RealizationMonad mloc ptr (BlockFinalization ptr),Set (Ptr Instruction))
-                                            , unrollFunInfoStartBlock :: (Ptr BasicBlock,Integer)
-                                            , unrollFunInfoArguments :: [(Ptr Argument, TypeDesc)]
-                                            }
 
 data DistanceInfo = DistInfo { distanceToReturn :: Maybe Integer
                              , distanceToError :: Maybe Integer
@@ -165,7 +159,6 @@ instance Monoid DistanceInfo where
                                 (Nothing,Just d2') -> Just d2'
                                 (Nothing,Nothing) -> Nothing
                            }
-
 
 mkBlockGraph :: (Ord ptr,Enum mloc,Enum ptr) => ProgDesc -> BlockGraph mloc ptr
 mkBlockGraph (_,funs,_,_,_,_)
@@ -264,32 +257,31 @@ noMergePointConfig entr desc selectErr = mergePointConfig entr desc (const []) s
 explicitMergePointConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> [(String,String,Integer)] -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
 explicitMergePointConfig entry prog merges selectErr
   = mergePointConfig' entry prog
-    (\funs _ -> Set.fromList [ case Map.lookup fun funs of
-                                  Just info -> case List.find (\(_,(name,_,_,_)) -> case name of
-                                                                  Just name' -> name'==blk
-                                                                  Nothing -> False) (Map.toList $ unrollFunInfoBlocks info) of
-                                    Just ((blk',_),_) -> (fun,blk',sblk)
-                                    Nothing -> error $ "Merge-point "++show (fun,blk,sblk)++" not found."
-                             | (fun,blk,sblk) <- merges ]) selectErr
+    (\prog_gr -> Set.fromList [ case List.find (\(nd,blk_info)
+                                                -> if blockInfoFun blk_info==fun &&
+                                                      blockInfoSubBlk blk_info==sblk
+                                                   then (case blockInfoBlkName blk_info of
+                                                            Left n -> blk==n
+                                                            Right nr -> blk==show nr)
+                                                   else False
+                                               ) (Gr.labNodes (blockGraph prog_gr)) of
+                                  Just (_,blk_info) -> (blockInfoFun blk_info,
+                                                        blockInfoBlk blk_info,
+                                                        blockInfoSubBlk blk_info)
+                              | (fun,blk,sblk) <- merges ]) selectErr
 
 mergePointConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> ([[Gr.Node]] -> [Gr.Node]) -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
 mergePointConfig entry prog select selectErr
   = mergePointConfig' entry prog
-    (\_ prog_gr -> Set.fromList $ fmap (\nd -> let Just inf = Gr.lab (blockGraph prog_gr) nd in (blockInfoFun inf,blockInfoBlk inf,blockInfoSubBlk inf)) $
-                   select (possibleMergePoints (blockGraph prog_gr))) selectErr
+    (\prog_gr -> Set.fromList $ fmap (\nd -> let Just inf = Gr.lab (blockGraph prog_gr) nd
+                                             in (blockInfoFun inf,blockInfoBlk inf,blockInfoSubBlk inf)) $
+                 select (possibleMergePoints (blockGraph prog_gr))) selectErr
 
-mergePointConfig' :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> (Map String (UnrollFunInfo mloc ptr) -> BlockGraph mloc ptr -> Set (String,Ptr BasicBlock,Integer)) -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
-mergePointConfig' entry prog@(funs,globs,ptrWidth,alltps,structs) select selectErr
-  = trace ("Program: "++show prog_gr') $
-    trace ("Possible merges: "++show (possibleMergePoints $ blockGraph prog_gr)) $
-    trace ("Order: "++show order) $
-    trace ("Selected merges: "++show (fmap (\(fun,blk,sblk) -> case Map.lookup fun ext_funs of
-                                               Just info -> case Map.lookup (blk,sblk) (unrollFunInfoBlocks info) of
-                                                 Just (name,_,_,_) -> case name of
-                                                   Just n -> (fun,n,sblk)
-                                                   Nothing -> (fun,show blk,sblk))
-                                      $ Set.toList selectedMergePoints)) $
-    UnrollCfg { unrollPointerWidth = ptrWidth
+mergePointConfig' :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc
+                     -> (BlockGraph mloc ptr -> Set (String,Ptr BasicBlock,Integer))
+                     -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
+mergePointConfig' entry prog@(_,funs,globs,ptrWidth,alltps,structs) select selectErr
+  = UnrollCfg { unrollPointerWidth = ptrWidth
               , unrollStructs = structs
               , unrollTypes = alltps
               , unrollGraph = prog_gr
@@ -313,34 +305,6 @@ mergePointConfig' entry prog@(funs,globs,ptrWidth,alltps,structs) select selectE
               , unrollLoopHeaders = loopHdrs
               }
   where
-    ext_funs = Map.mapMaybeWithKey
-               (\fun (args,_,blks,_,_)
-                -> case blks of
-                  [] -> Nothing
-                  (start_blk,_,_):_
-                    -> let blk_mp' = Map.fromList [ (key,(realize,nd))
-                                                  | ((key,realize),nd) <- zip [ ((blk,sblk),(name,info,real))
-                                                                              | (blk,name,subs) <- blks, (sblk,instrs) <- zip [0..] subs
-                                                                              , let (info,real) = preRealize $ realizeInstructions (fmap (\x -> (x,Nothing)) instrs) ]
-                                                                          [0..] ]
-                           rblk_mp = fmap fst blk_mp'
-                           reach_info = reachabilityInfo rblk_mp
-                           defs = definitionMap rblk_mp
-                           trans_mp = Map.foldlWithKey (\cmp blk (_,info,_)
-                                                        -> let Just reach = Map.lookup blk reach_info
-                                                           in foldl (\cmp instr -> let Just def_blk = Map.lookup instr defs
-                                                                                       trans = case Map.lookup def_blk reach of
-                                                                                         Just t -> t
-                                                                                         Nothing -> Set.empty
-                                                                                   in foldl (\cmp trans_blk -> Map.insertWith Set.union trans_blk (Set.singleton instr) cmp
-                                                                                            ) cmp trans
-                                                                    ) cmp (Map.keys $ rePossibleInputs info)
-                                                       ) (fmap (const Set.empty) rblk_mp) rblk_mp
-                       in Just $ UnrollFunInfo { unrollFunInfoBlocks = Map.intersectionWith (\(name,info,realize) trans -> (name,info,realize,trans)) rblk_mp trans_mp
-                                               , unrollFunInfoStartBlock = (start_blk,0)
-                                               , unrollFunInfoArguments = args
-                                               }
-               ) funs
     blk_mp = Map.fromList [ ((fn,blk,sblk),(nd,instrs))
                           | (fn,(args,_,blks,_,_)) <- Map.toList funs
                           , (blk,name,subs) <- blks
@@ -352,8 +316,8 @@ mergePointConfig' entry prog@(funs,globs,ptrWidth,alltps,structs) select selectE
     start_nd = case Map.lookup (entry,start_blk,0) blk_mp of
       Nothing -> error $ "Failed to find entry point "++entry
       Just (x,_) -> x
-    order = calculateOrder prog_gr start_nd
-    selectedMergePoints = select ext_funs prog_gr
+    order = calculateSimpleOrder prog_gr start_nd
+    selectedMergePoints = select prog_gr
     getLoops mp loop = foldl getLoops (Map.insert (loopDescHeader loop) loop mp) (loopDescSubs loop)
     loopHdrs = foldl (\mp (_,_,_,loops,_)
                       -> foldl getLoops mp loops
@@ -375,7 +339,7 @@ calculateOrder gr startNd = reverse $ Gr.postorder dfsTree
                                                               Just rdist -> (ngr,Just (Right rdist,(blockInfoFun info,blockInfoBlk info,blockInfoSubBlk info),suc'))
                                                             Just d' -> (ngr,Just (Left d',(blockInfoFun info,blockInfoBlk info,blockInfoSubBlk info),suc'))
                                                ) gr ns
-                         ns'' = List.sortBy (comparing (\(d,_,_) -> d)) $ catMaybes ns'
+                         ns'' = List.sortBy (\(d1,_,_) (d2,_,_) -> compare d2 d1) $ catMaybes ns'
                      in dfs' gr' ns''
     dfs' gr [] = ([],gr)
     dfs' gr ((d,info,suc):ns) = let (subs,gr') = dfs d gr suc
@@ -695,7 +659,7 @@ startingContext cfg fname = case Map.lookup fname (blockFunctions $ unrollGraph 
         --(blk,sblk) = unrollFunInfoStartBlock info
         blk = blockInfoBlk blkInfo
         sblk = blockInfoSubBlk blkInfo
-        ((cptr,prog),globs') = mapAccumL (\(ptr',prog') (tp,cont) 
+        ((cptr,prog),globs') = mapAccumL (\(ptr',prog') (tp,cont)
                                           -> ((succ ptr',(ptr',tp,cont):prog'),ptr')
                                          ) (0,[]) (unrollCfgGlobals cfg)
     mem <- memNew (Proxy::Proxy Integer) (unrollPointerWidth cfg) (unrollTypes cfg) (unrollStructs cfg) [ (ptr,tp,cont) | (ptr,PointerType tp,cont) <- prog ]
@@ -971,7 +935,9 @@ stepUnrollCtx isFirst enqueue cfg cur = do
           let optAct = optimizeExpr' act'
           if isComplexExpr optAct
             then lift $ defConstNamed ("act_"++(nodeIdFunction trg)++"_"++blk_name) optAct
-            else return optAct
+            else (do
+                     lift $ comment $ "act_"++(nodeIdFunction trg)++"_"++blk_name++" = "++show optAct
+                     return optAct)
         _ -> lift $ defConstNamed ("act_"++(nodeIdFunction trg)++"_"++blk_name)
              (app or' [ act | (_,_,_,act,_,_,_) <- inc ])
       inp <- mapM getMergeValue (Map.intersection (head mergedInps) $
