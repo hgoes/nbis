@@ -15,8 +15,13 @@ import Control.Monad (when)
 import System.Exit
 import Language.SMTLib2
 import Language.SMTLib2.Pipe
+import Language.SMTLib2.Internals (SMTBackend)
+#ifdef WITH_BOOLECTOR
 import Language.SMTLib2.Boolector
+#endif
+#ifdef WITH_STP
 import Language.SMTLib2.STP
+#endif
 import Language.SMTLib2.Internals.Optimize
 import Data.Graph.Inductive (Gr)
 import qualified Data.Graph.Inductive as Gr
@@ -96,13 +101,16 @@ main = do
     DumpLLVM -> dumpProgram program
   where
     actVerify opts cfg = do
-      backend <- createSMTPipe
-                 (case solver opts of
-                     Nothing -> "z3 -in -smt2"
-                     Just bin -> bin)
-      --backend <- boolectorBackend
-      --backend <- stpBackend
-      bug <- withSMTBackend (optimizeBackend backend) $ do
+      backend <- case solver opts of
+            SMTLib2Solver name -> fmap AnyBackend $ createSMTPipe name
+#ifdef WITH_STP
+            STPSolver -> fmap AnyBackend stpBackend
+#endif
+#ifdef WITH_BOOLECTOR
+            BoolectorSolver -> fmap AnyBackend boolectorBackend
+#endif
+
+      bug <- withSMTBackend (optimizeBackend (backend::AnyBackend IO)) $ do
         setLogic "QF_ABV"
         setOption (PrintSuccess False)
         setOption (ProduceModels True)

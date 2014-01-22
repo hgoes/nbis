@@ -8,15 +8,30 @@ Build-Type:	Custom
 Category:	Testing
 Cabal-Version:	>= 1.2
 
+Flag STP
+  Description: Enable support for the STP solver
+  Default: False
+
+Flag Boolector
+  Description: Enable support for the boolector solver
+  Default: False
+
 Executable nbis
   Main-Is:		Main.hs
-  Extensions:           CPP,ScopedTypeVariables,GADTs,GeneralizedNewtypeDeriving,ParallelListComp,TypeFamilies,FlexibleInstances,RankNTypes
+  Extensions:           CPP,ScopedTypeVariables,GADTs,GeneralizedNewtypeDeriving,ParallelListComp,TypeFamilies,FlexibleInstances,RankNTypes,FlexibleContexts
   Other-Modules:
+    Abstraction
     MemoryModel
     MemoryModel.Untyped
     MemoryModel.Typed
     MemoryModel.Plain
     MemoryModel.Snow
     MemoryModel.Rivers
-  Build-Depends:	base,bindings-llvm,containers,mtl,smtlib2,fgl,tagged,random,smtlib2-boolector,smtlib2-stp
+  Build-Depends:	base,bindings-llvm,containers,mtl,smtlib2,fgl,tagged,random
+  if flag(STP)
+    Build-Depends: smtlib2-stp
+    Cpp-Options: -DWITH_STP
+  if flag(Boolector)
+    Build-Depends: smtlib2-boolector
+    Cpp-Options: -DWITH_BOOLECTOR
   GHC-Options: -fwarn-unused-imports

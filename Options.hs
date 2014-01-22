@@ -14,13 +14,22 @@ data NbisAction = Verify
                 | DumpLLVM
                 deriving (Eq,Ord,Show)
 
+data Solver = SMTLib2Solver String
+#ifdef WITH_STP
+            | STPSolver
+#endif
+#ifdef WITH_BOOLECTOR
+            | BoolectorSolver
+#endif
+            deriving (Eq,Ord,Show)
+
 data Options = Options
                { action :: NbisAction
                , entryPoint :: String
                , bmcDepth :: Integer
                , files :: [String]
                , memoryModelOption :: MemoryModelOption
-               , solver :: Maybe String
+               , solver :: Solver
                , checkErrors :: [ErrorDesc]
                , showHelp :: Bool
                , manualMergeNodes :: Maybe [(String,String,Integer)]
@@ -39,7 +48,7 @@ defaultOptions = Options { action = Verify
                          , bmcDepth = 10
                          , files = []
                          , memoryModelOption = Rivers
-                         , solver = Nothing
+                         , solver = SMTLib2Solver "z3 -in -smt2"
                          , checkErrors = [Custom]
                          , showHelp = False
                          , manualMergeNodes = Nothing
@@ -56,7 +65,13 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
                                                                            "snow" -> Snow
                                                                            _ -> error $ "Unknown memory model "++show str
                                                                       }) "model") "Memory model to use (rivers or snow)"
-              ,Option [] ["solver"] (ReqArg (\str opt -> opt { solver = Just str }) "smt-binary") "The SMT solver to use to solve the generated instance"
+              ,Option [] ["solver"] (ReqArg (\str opt -> opt { solver = SMTLib2Solver str }) "smt-binary") "The SMT solver to use to solve the generated instance"
+#ifdef WITH_STP
+              ,Option [] ["stp"] (NoArg (\opt -> opt { solver = STPSolver })) "Use the STP solver."
+#endif
+#ifdef WITH_BOOLECTOR
+              ,Option [] ["boolector"] (NoArg (\opt -> opt { solver = BoolectorSolver })) "Use the boolector solver."
+#endif
               ,Option [] ["check-errors"] (ReqArg (\str opt -> opt { checkErrors = fmap (\n -> case n of
                                                                                             "user" -> Custom
                                                                                             "null" -> NullDeref
