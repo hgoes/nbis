@@ -110,7 +110,9 @@ reDefineVar instr name genval = Realization $ \info -> let (info1,rgen) = runRea
                                                                Left rval -> let nval = valOptimize rval
                                                                             in if valIsComplex nval
                                                                                then lift $ fmap Left $ valCopy name nval
-                                                                               else return $ Left nval
+                                                                               else (do
+                                                                                        lift $ comment $ name++" = "++show nval
+                                                                                        return $ Left nval)
                                                                Right ptr -> return (Right ptr)
                                                              modify (\st -> st { reLocals = Map.insert instr nval (reLocals st) })
                                                           )
