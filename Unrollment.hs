@@ -991,6 +991,7 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                                          , unrollErrorDistance = errorDistanceForNodeId (unrollGraph cfg) nodeId
                                          }
                       } | (cond,trg_blk) <- trgs
+                        , cond /= constant False
                         , let nodeId = NodeId { nodeIdFunction = nodeIdFunction trg
                                               , nodeIdBlock = trg_blk
                                               , nodeIdSubblock = 0
