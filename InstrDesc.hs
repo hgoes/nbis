@@ -40,6 +40,8 @@ data AssignDesc a
   | IZExt TypeDesc a
   | IAlloca TypeDesc (Maybe a)
   | IMalloc (Maybe TypeDesc) a Bool
+  | IPtrToInt a
+  | IIntToPtr a
   deriving (Show,Eq,Ord)
 
 data TerminatorDesc a
@@ -68,6 +70,8 @@ data OperandDesc a
   | ODArgument (Ptr Argument)
   | ODGetElementPtr a [a]
   | ODBitcast a
+  | ODPtrToInt a
+  | ODIntToPtr a
   deriving (Show,Eq,Ord)
 
 reifyInstr :: Ptr TargetLibraryInfo
@@ -223,6 +227,14 @@ reifyInstr tl dl ptr
                 return $ ITerminator (ISwitch cond def_blk cases)
             ) (castDown ptr)
       ,fmap (\(_::Ptr UnreachableInst) -> return $ ITerminator IUnreachable) (castDown ptr)
+      ,fmap (\ptrToInt -> do
+                op <- getOperand (ptrToInt::Ptr PtrToIntInst) 0 >>= reifyOperand
+                return $ IAssign ptr name (IPtrToInt op)
+            ) (castDown ptr)
+      ,fmap (\intToPtr -> do
+                op <- getOperand (intToPtr::Ptr IntToPtrInst) 0 >>= reifyOperand
+                return $ IAssign ptr name (IIntToPtr op)
+            ) (castDown ptr)
       ]
   where
     mkSwitch ((Just act):_) = act
@@ -324,6 +336,12 @@ reifyOperand ptr = do
                       CastOp BitCast -> do
                         ptr <- getOperand expr 0 >>= reifyOperand
                         return $ ODBitcast ptr
+                      CastOp PtrToInt -> do
+                        ptr <- getOperand expr 0 >>= reifyOperand
+                        return $ ODPtrToInt ptr
+                      CastOp IntToPtr -> do
+                        int <- getOperand expr 0 >>= reifyOperand
+                        return $ ODIntToPtr int
                       _ -> do
                            valueDump expr
                            error "Unknown constant expr"
