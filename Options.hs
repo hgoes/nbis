@@ -25,6 +25,7 @@ data Options = Options
                , showHelp :: Bool
                , manualMergeNodes :: Maybe [(String,String,Integer)]
                , unwindLimit :: Maybe Integer
+               , recursionLimit :: Maybe Integer
                , incremental :: Bool
                , dumpStateSpace :: Maybe String
                } deriving (Eq,Ord,Show)
@@ -43,6 +44,7 @@ defaultOptions = Options { action = Verify
                          , showHelp = False
                          , manualMergeNodes = Nothing
                          , unwindLimit = Nothing
+                         , recursionLimit = Nothing
                          , incremental = True
                          , dumpStateSpace = Nothing }
 
@@ -64,12 +66,15 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
                                                                                         ) (splitOptions str) }) "opts") "A comma seperated list of bug types which should be checked:\n  user - User defined assertions\n  null - Null pointer dereferentiations\n  invalid - Invalid memory accesses\n  free-access - Access to freed memory locations\n  double-free - Double frees of memory locations"
               ,Option [] ["merge-nodes"]
                (ReqArg (\str opt -> opt { manualMergeNodes = Just (read str) }) "list")
-               "A list of merge nodes to use"
+               "A list of merge nodes to use."
               ,Option [] ["non-incremental"]
-               (NoArg (\opt -> opt { incremental = False })) "Use non-incremental solving"
+               (NoArg (\opt -> opt { incremental = False })) "Use non-incremental solving."
               ,Option [] ["unwind-limit"]
                (ReqArg (\str opt -> opt { unwindLimit = Just (read str) }) "n")
-               "Limit the number of times a loop can be unwound"
+               "Limit the number of times a loop can be unwound."
+              ,Option [] ["recursion-limit"]
+               (ReqArg (\str opt -> opt { recursionLimit = Just (read str) }) "n")
+               "Limit the number of times a function can be called recursively."
               ,Option [] ["dump-cfg"]
                (NoArg (\opt -> opt { action = DumpCFG })) "Dump the control flow graph as a graphviz file."
               ,Option [] ["dump-llvm"]
@@ -78,7 +83,7 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
                (OptArg (\str opt -> opt { dumpStateSpace = case str of
                                              Nothing -> Just "state-space.dot"
                                              Just fname -> Just fname }) "file") "Dump the state space after verfication."
-              ,Option ['h'] ["help"] (NoArg (\opt -> opt { showHelp = True })) "Show this help"
+              ,Option ['h'] ["help"] (NoArg (\opt -> opt { showHelp = True })) "Show this help."
               ]
 
 splitOptions :: String -> [String]

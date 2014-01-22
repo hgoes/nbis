@@ -85,9 +85,14 @@ main = do
         Just limit -> cfg { unrollDoRealize = \budget -> (unrollDoRealize cfg budget) &&
                                                          (all (<limit) (unrollUnrollDepth $ snd budget))
                           }
+      cfg2 = case recursionLimit opts of
+        Nothing -> cfg1
+        Just limit -> cfg1 { unrollDoRealize = \budget -> (unrollDoRealize cfg1 budget) &&
+                                                          (all (<limit) (nodeIdRecursionCount $ fst budget))
+                           }
   case action opts of
-    Verify -> actVerify opts cfg1
-    DumpCFG -> dumpBlockGraph cfg1
+    Verify -> actVerify opts cfg2
+    DumpCFG -> dumpBlockGraph cfg2
     DumpLLVM -> dumpProgram program
   where
     actVerify opts cfg = do

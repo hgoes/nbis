@@ -245,6 +245,14 @@ nodeIdCallStackList nd = (nodeIdFunction nd,nodeIdBlock nd,nodeIdSubblock nd):
                              Nothing -> []
                              Just (nd',_) -> nodeIdCallStackList nd')
 
+nodeIdRecursionCount :: NodeId -> Map String Integer
+nodeIdRecursionCount = count' Map.empty
+  where
+    count' mp nd = let mp' = Map.insertWith (+) (nodeIdFunction nd) 1 mp
+                   in case nodeIdCallStack nd of
+                     Nothing -> mp'
+                     Just (nd',_) -> count' mp' nd'
+
 defaultConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
 defaultConfig entr desc selectErr = mergePointConfig entr desc safeMergePoints selectErr
 
