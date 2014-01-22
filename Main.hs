@@ -98,7 +98,7 @@ main = do
     actVerify opts cfg = do
       backend <- createSMTPipe
                  (case solver opts of
-                     Nothing -> "~/debug-smt.sh output-" ++ (entryPoint opts) ++ ".smt2"
+                     Nothing -> "z3 -in -smt2"
                      Just bin -> bin)
       --backend <- boolectorBackend
       --backend <- stpBackend
