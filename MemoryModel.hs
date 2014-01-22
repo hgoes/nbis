@@ -135,4 +135,6 @@ dynNumCombine _ g (Right i1) (Left i2) = g i1 (constantAnn (BitVector i2) (extra
 
 dynNumExpr :: Integer -> DynNum -> SMTExpr (BitVector BVUntyped)
 dynNumExpr width (Left x) = constantAnn (BitVector x) width
-dynNumExpr _ (Right x) = x
+dynNumExpr width (Right x) = case compare width (extractAnnotation x) of
+  EQ -> x
+  GT -> bvconcat (constantAnn (BitVector 0::BitVector BVUntyped) (width - (extractAnnotation x))) x
