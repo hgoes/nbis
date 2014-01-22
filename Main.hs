@@ -2,20 +2,15 @@ module Main where
 
 import Options
 import Program
-import Realization (isIntrinsic)
 import Unrollment
-import Analyzation
-import MemoryModel
 import MemoryModel.Snow
 import MemoryModel.Rivers
-import Circuit
 import Realization
 
 import Control.Monad (when)
 import System.Exit
 import Language.SMTLib2
 import Language.SMTLib2.Pipe
-import Language.SMTLib2.Internals (SMTBackend)
 #ifdef WITH_BOOLECTOR
 import Language.SMTLib2.Boolector
 #endif
@@ -23,21 +18,13 @@ import Language.SMTLib2.Boolector
 import Language.SMTLib2.STP
 #endif
 import Language.SMTLib2.Internals.Optimize
-import Data.Graph.Inductive (Gr)
 import qualified Data.Graph.Inductive as Gr
-import Data.Maybe (catMaybes)
-import Data.Foldable (mapM_,all)
+import Data.Foldable (all)
 import Prelude hiding (mapM_,all)
-import qualified Data.Map as Map
-import qualified Data.Set as Set
-import Control.Monad.State.Strict (runStateT)
 import System.Random
 import Control.Monad.Trans (liftIO)
 import qualified Data.List as List
 import Data.Proxy
-
-import Debug.Trace
-import MemoryModel (debugMem)
 
 data BlkInfo = BlkInfo String
 
