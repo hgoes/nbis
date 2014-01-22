@@ -116,6 +116,9 @@ valBinOp op l@(ConditionValue lhs w) r@(ConditionValue rhs _) = case op of
   Or -> ConditionValue (lhs .||. rhs) w
   Mul -> DirectValue (bvmul (valValue l) (valValue r))
   SDiv -> DirectValue (bvsdiv (valValue l) (valValue r))
+  UDiv -> DirectValue (bvudiv (valValue l) (valValue r))
+  URem -> DirectValue (bvurem (valValue l) (valValue r))
+  AShr -> DirectValue (bvashr (valValue l) (valValue r))
   _ -> error $ "nbis: Unsupported binary operator "++show op
 valBinOp op lhs rhs 
   = let lhs' = valValue lhs
@@ -131,6 +134,9 @@ valBinOp op lhs rhs
           Mul -> bvmul
           SRem -> bvsrem
           SDiv -> bvsdiv
+          UDiv -> bvudiv
+          URem -> bvurem
+          AShr -> bvashr
           _ -> error $ "nbis: Unsupported binary operator "++show op
     in DirectValue (rop lhs' rhs')
 
