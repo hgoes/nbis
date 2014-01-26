@@ -18,14 +18,14 @@ Flag Boolector
 
 Executable nbis
   Main-Is:		Main.hs
-  Extensions:           CPP,ScopedTypeVariables,GADTs,GeneralizedNewtypeDeriving,ParallelListComp,TypeFamilies,FlexibleInstances,RankNTypes,FlexibleContexts
+  Extensions:           CPP,ScopedTypeVariables,GADTs,GeneralizedNewtypeDeriving,ParallelListComp,TypeFamilies,FlexibleInstances,RankNTypes,FlexibleContexts,ImpredicativeTypes
   Other-Modules:
     Abstraction
     MemoryModel
     MemoryModel.Untyped
     MemoryModel.Typed
     MemoryModel.Plain
-    MemoryModel.Snow
+    --MemoryModel.Snow
     MemoryModel.Rivers
   Build-Depends:	base,bindings-llvm,containers,mtl,smtlib2,fgl,tagged,random
   if flag(STP)

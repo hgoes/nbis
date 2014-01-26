@@ -2,15 +2,12 @@
 module MemoryModel where
 
 import Language.SMTLib2
-import Data.Typeable
-import Data.Unit
 import Data.List (genericSplitAt,genericReplicate)
 import Data.Set as Set
 import Data.Map as Map
 import TypeDesc
-import Foreign.Ptr
-import LLVM.FFI.BasicBlock
 import Data.Proxy
+import Value
 
 data MemContent = MemCell Integer Integer
                 | MemArray [MemContent]
@@ -27,30 +24,30 @@ data ErrorDesc = Custom
 
 type DynNum = Either Integer (SMTExpr (BitVector BVUntyped))
 
-data MemoryInstruction m p
-  = MINull TypeDesc p
-  | MIAlloc m TypeDesc DynNum p m
-  | MILoad m p (SMTExpr (BitVector BVUntyped))
-  | MILoadPtr m p p
-  | MIStore m (SMTExpr (BitVector BVUntyped)) p m
-  | MIStorePtr m p p m
-  | MICompare p p (SMTExpr Bool)
-  | MISelect [(SMTExpr Bool,p)] p
-  | MICast TypeDesc TypeDesc p p
-  | MIIndex TypeDesc TypeDesc [DynNum] p p
-  | MIPhi [(SMTExpr Bool,m)] m
-  | MICopy m p p CopyOptions m
-  | MIStrLen m p (SMTExpr (BitVector BVUntyped))
-  | MISet m p DynNum DynNum m
-  | MIFree m p m
-  deriving (Show,Eq)
+data MemoryInstruction m p res where
+  MIMerge :: m -> MemoryInstruction m p ()
+  MIConnect :: m -> m -> MemoryInstruction m p ()
+  MIPtrConnect :: p -> p -> MemoryInstruction m p ()
+  MINull :: TypeDesc -> p -> MemoryInstruction m p ()
+  MIAlloc :: m -> TypeDesc -> DynNum -> p -> m -> MemoryInstruction m p ()
+  MILoad :: m -> p -> Integer -> MemoryInstruction m p Val
+  MILoadPtr :: m -> p -> p -> MemoryInstruction m p ()
+  MIStore :: m -> Val -> p -> m -> MemoryInstruction m p ()
+  MIStorePtr :: m -> p -> p -> m -> MemoryInstruction m p ()
+  MICompare :: p -> p -> MemoryInstruction m p BoolVal
+  MISelect :: [(BoolVal,p)] -> p -> MemoryInstruction m p ()
+  MICast :: TypeDesc -> TypeDesc -> p -> p -> MemoryInstruction m p ()
+  MIIndex :: TypeDesc -> TypeDesc -> [Val] -> p -> p -> MemoryInstruction m p ()
+  MIPhi :: [(BoolVal,m)] -> m -> MemoryInstruction m p ()
+  MICopy :: m -> p -> p -> CopyOptions -> m -> MemoryInstruction m p ()
+  MIStrLen :: m -> p -> MemoryInstruction m p Val
+  MISet :: m -> p -> Val -> Val -> m -> MemoryInstruction m p ()
+  MIFree :: m -> p -> m -> MemoryInstruction m p ()
 
-data CopyOptions = CopyOpts { copySizeLimit :: Maybe DynNum -- ^ A size in bytes after which to stop the copying
-                            , copyStopper :: Maybe DynNum   -- ^ If this character is found in the source, stop copying
-                            , copyMayOverlap :: Bool        -- ^ Are source and destination allowed to overlap?
+data CopyOptions = CopyOpts { copySizeLimit :: Maybe Val -- ^ A size in bytes after which to stop the copying
+                            , copyStopper :: Maybe Val   -- ^ If this character is found in the source, stop copying
+                            , copyMayOverlap :: Bool     -- ^ Are source and destination allowed to overlap?
                             } deriving (Show,Eq)
-
-type MemoryProgram m p = [MemoryInstruction m p]
 
 class MemoryModel mem mloc ptr where
   memNew :: Proxy mloc
@@ -60,43 +57,46 @@ class MemoryModel mem mloc ptr where
             -> [(ptr,TypeDesc,Maybe MemContent)] -- ^ Global variables
             -> SMT mem
   makeEntry :: Proxy ptr -> mem -> mloc -> SMT mem
-  addProgram :: mem -> SMTExpr Bool -> [mloc] -> MemoryProgram mloc ptr -> Map ptr TypeDesc -> SMT mem
-  connectLocation :: mem -> Proxy ptr -> SMTExpr Bool -> mloc -> mloc -> SMT mem
-  connectPointer :: mem -> Proxy mloc -> SMTExpr Bool -> ptr -> ptr -> SMT mem
+  addInstruction :: mem -> BoolVal
+                    -> MemoryInstruction mloc ptr res -> Map ptr TypeDesc
+                    -> SMT (res,mem)
+  --addProgram :: mem -> SMTExpr Bool -> [mloc] -> MemoryProgram mloc ptr -> Map ptr TypeDesc -> SMT mem
+  --connectLocation :: mem -> Proxy ptr -> SMTExpr Bool -> mloc -> mloc -> SMT mem
+  --connectPointer :: mem -> Proxy mloc -> SMTExpr Bool -> ptr -> ptr -> SMT mem
   memoryErrors :: mem -> Proxy mloc -> Proxy ptr -> [(ErrorDesc,SMTExpr Bool)]
   debugMem :: mem -> Proxy mloc -> Proxy ptr -> String
 
-memInstrSrc :: MemoryInstruction m p -> Maybe m
+memInstrSrc :: MemoryInstruction m p res -> Maybe m
 memInstrSrc (MINull _ _) = Nothing
 memInstrSrc (MIAlloc m _ _ _ _) = Just m
 memInstrSrc (MILoad m _ _) = Just m
 memInstrSrc (MILoadPtr m _ _) = Just m
 memInstrSrc (MIStore m _ _ _) = Just m
 memInstrSrc (MIStorePtr m _ _ _) = Just m
-memInstrSrc (MICompare _ _ _) = Nothing
+memInstrSrc (MICompare _ _) = Nothing
 memInstrSrc (MISelect _ _) = Nothing
 memInstrSrc (MICast _ _ _ _) = Nothing
 memInstrSrc (MIIndex _ _ _ _ _) = Nothing
 memInstrSrc (MIPhi _ _) = Nothing
 memInstrSrc (MICopy m _ _ _ _) = Just m
-memInstrSrc (MIStrLen m _ _) = Just m
+memInstrSrc (MIStrLen m _) = Just m
 memInstrSrc (MISet m _ _ _ _) = Just m
 memInstrSrc (MIFree m _ _) = Just m
 
-memInstrTrg :: MemoryInstruction m p -> Maybe m
+memInstrTrg :: MemoryInstruction m p res -> Maybe m
 memInstrTrg (MINull _ _) = Nothing
 memInstrTrg (MIAlloc _ _ _ _ m) = Just m
 memInstrTrg (MILoad _ _ _) = Nothing
 memInstrTrg (MILoadPtr _ _ _) = Nothing
 memInstrTrg (MIStore _ _ _ m) = Just m
 memInstrTrg (MIStorePtr _ _ _ m) = Just m
-memInstrTrg (MICompare _ _ _) = Nothing
+memInstrTrg (MICompare _ _) = Nothing
 memInstrTrg (MISelect _ _) = Nothing
 memInstrTrg (MICast _ _ _ _) = Nothing
 memInstrTrg (MIIndex _ _ _ _ _) = Nothing
 memInstrTrg (MIPhi _ m) = Just m
 memInstrTrg (MICopy _ _ _ _ m) = Just m
-memInstrTrg (MIStrLen _ _ _) = Nothing
+memInstrTrg (MIStrLen _ _) = Nothing
 memInstrTrg (MISet _ _ _ _ m) = Just m
 memInstrTrg (MIFree _ _ m) = Just m
 

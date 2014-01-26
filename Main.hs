@@ -3,7 +3,7 @@ module Main where
 import Options
 import Program
 import Unrollment
-import MemoryModel.Snow
+--import MemoryModel.Snow
 import MemoryModel.Rivers
 import Realization
 

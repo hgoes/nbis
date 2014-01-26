@@ -63,7 +63,7 @@ data NodeId = NodeId { nodeIdFunction :: String
 type MergeValueRef ptr = IORef (MergeValue ptr)
 
 data MergeValue ptr = MergedValue Bool (Either Val ptr)
-                    | UnmergedValue String Bool [(MergeValueRef ptr,SMTExpr Bool)]
+                    | UnmergedValue String Bool [(MergeValueRef ptr,BoolVal)]
 
 data UnrollEnv a mem mloc ptr = UnrollEnv { unrollNextMem :: mloc
                                           , unrollNextPtr :: ptr
@@ -89,24 +89,25 @@ data UnrollContext a mloc ptr = UnrollContext { unrollOrder :: [(String,Ptr Basi
 type UnrollQueue a mloc ptr = [(UnrollContext a mloc ptr,NodeId,UnrollBudget)]
 
 data Edge a mloc ptr = Edge { edgeTarget :: NodeId
-                            , edgeConds :: [(String,Ptr BasicBlock,Integer,SMTExpr Bool,[ValueMap ptr],mloc,Maybe (UnrollNodeInfo a))]
+                            , edgeConds :: [(String,Ptr BasicBlock,Integer,BoolVal,[ValueMap ptr],mloc,Maybe (UnrollNodeInfo a))]
                             , edgeCreatedMergeNodes :: Set NodeId
                             , edgeBudget :: UnrollBudget
                             }
 
-data UnrollConfig mloc ptr = UnrollCfg { unrollDoMerge :: String -> Ptr BasicBlock -> Integer -> Bool
-                                       , unrollPointerWidth :: Integer
-                                       , unrollStructs :: Map String [TypeDesc]
-                                       , unrollTypes :: Set TypeDesc
-                                       , unrollGraph :: BlockGraph mloc ptr
-                                       , unrollCfgGlobals :: Map (Ptr GlobalVariable) (TypeDesc, Maybe MemContent)
-                                       , unrollBlockOrder :: [(String,Ptr BasicBlock,Integer)]
-                                       , unrollDynamicOrder :: (NodeId,UnrollBudget) -> (NodeId,UnrollBudget) -> Ordering
-                                       , unrollPerformCheck :: (NodeId,UnrollBudget) -> (NodeId,UnrollBudget) -> Bool
-                                       , unrollDoRealize :: (NodeId,UnrollBudget) -> Bool
-                                       , unrollCheckedErrors :: ErrorDesc -> Bool
-                                       , unrollLoopHeaders :: Map (Ptr BasicBlock) LoopDesc
-                                       }
+data UnrollConfig mem mloc ptr
+  = UnrollCfg { unrollDoMerge :: String -> Ptr BasicBlock -> Integer -> Bool
+              , unrollPointerWidth :: Integer
+              , unrollStructs :: Map String [TypeDesc]
+              , unrollTypes :: Set TypeDesc
+              , unrollGraph :: BlockGraph mem mloc ptr
+              , unrollCfgGlobals :: Map (Ptr GlobalVariable) (TypeDesc, Maybe MemContent)
+              , unrollBlockOrder :: [(String,Ptr BasicBlock,Integer)]
+              , unrollDynamicOrder :: (NodeId,UnrollBudget) -> (NodeId,UnrollBudget) -> Ordering
+              , unrollPerformCheck :: (NodeId,UnrollBudget) -> (NodeId,UnrollBudget) -> Bool
+              , unrollDoRealize :: (NodeId,UnrollBudget) -> Bool
+              , unrollCheckedErrors :: ErrorDesc -> Bool
+              , unrollLoopHeaders :: Map (Ptr BasicBlock) LoopDesc
+              }
 
 data DistanceInfo = DistInfo { distanceToReturn :: Maybe Integer
                              , distanceToError :: Maybe Integer
@@ -127,24 +128,26 @@ data BlockEdge = EdgeJmp
                | EdgeRet
                deriving (Eq,Ord,Show)
 
-data BlockInfo mloc ptr = BlockInfo { blockInfoFun :: String
-                                    , blockInfoBlk :: Ptr BasicBlock
-                                    , blockInfoBlkName :: Either String Integer
-                                    , blockInfoSubBlk :: Integer
-                                    , blockInfoInstrs :: [(InstrDesc Operand,Maybe Integer)]
-                                    , blockInfoRealizationInfo :: RealizationInfo
-                                    , blockInfoRealization :: RealizationMonad mloc ptr (BlockFinalization ptr)
-                                    , blockInfoDistance :: DistanceInfo
-                                    }
+data BlockInfo mem mloc ptr
+  = BlockInfo { blockInfoFun :: String
+              , blockInfoBlk :: Ptr BasicBlock
+              , blockInfoBlkName :: Either String Integer
+              , blockInfoSubBlk :: Integer
+              , blockInfoInstrs :: [(InstrDesc Operand,Maybe Integer)]
+              , blockInfoRealizationInfo :: RealizationInfo
+              , blockInfoRealization :: RealizationMonad mem mloc ptr (BlockFinalization ptr)
+              , blockInfoDistance :: DistanceInfo
+              }
 
 data FunInfo = FunInfo { funInfoStartBlk :: Gr.Node
                        , funInfoArguments :: [(Ptr Argument,TypeDesc)]
                        } deriving (Show)
 
-data BlockGraph mloc ptr = BlockGraph { blockGraph :: Gr.Gr (BlockInfo mloc ptr) BlockEdge
-                                      , blockFunctions :: Map String FunInfo
-                                      , blockMap :: Map (Ptr BasicBlock,Integer) Gr.Node
-                                      } deriving (Show)
+data BlockGraph mem mloc ptr
+  = BlockGraph { blockGraph :: Gr.Gr (BlockInfo mem mloc ptr) BlockEdge
+               , blockFunctions :: Map String FunInfo
+               , blockMap :: Map (Ptr BasicBlock,Integer) Gr.Node
+               } deriving (Show)
 
 instance Monoid DistanceInfo where
   mempty = DistInfo Nothing Nothing
@@ -160,7 +163,8 @@ instance Monoid DistanceInfo where
                                 (Nothing,Nothing) -> Nothing
                            }
 
-mkBlockGraph :: (Ord ptr,Enum mloc,Enum ptr) => ProgDesc -> BlockGraph mloc ptr
+mkBlockGraph :: (MemoryModel mem mloc ptr,Ord ptr,Enum mloc,Enum ptr)
+                => ProgDesc -> BlockGraph mem mloc ptr
 mkBlockGraph (_,funs,_,_,_,_)
   = BlockGraph { blockGraph = Gr.mkGraph nodeList edgeList
                , blockFunctions = funInfo
@@ -253,16 +257,26 @@ nodeIdRecursionCount = count' Map.empty
                      Nothing -> mp'
                      Just (nd',_) -> count' mp' nd'
 
-defaultConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
+defaultConfig :: (MemoryModel mem mloc ptr,Ord ptr,Enum ptr,Enum mloc)
+                 => String -> ProgDesc -> (ErrorDesc -> Bool)
+                 -> UnrollConfig mem mloc ptr
 defaultConfig entr desc selectErr = mergePointConfig entr desc safeMergePoints selectErr
 
-randomMergePointConfig :: (Ord ptr,Enum ptr,Enum mloc,RandomGen g) => String -> ProgDesc -> g -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
-randomMergePointConfig entr desc gen selectErr = mergePointConfig entr desc (randomMergePoints gen) selectErr
+randomMergePointConfig :: (MemoryModel mem mloc ptr,Ord ptr,Enum ptr,Enum mloc,RandomGen g)
+                          => String -> ProgDesc -> g -> (ErrorDesc -> Bool)
+                          -> UnrollConfig mem mloc ptr
+randomMergePointConfig entr desc gen selectErr
+  = mergePointConfig entr desc (randomMergePoints gen) selectErr
 
-noMergePointConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
+noMergePointConfig :: (MemoryModel mem mloc ptr,Ord ptr,Enum ptr,Enum mloc)
+                      => String -> ProgDesc -> (ErrorDesc -> Bool)
+                      -> UnrollConfig mem mloc ptr
 noMergePointConfig entr desc selectErr = mergePointConfig entr desc (const []) selectErr
 
-explicitMergePointConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> [(String,String,Integer)] -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
+explicitMergePointConfig :: (MemoryModel mem mloc ptr,Ord ptr,Enum ptr,Enum mloc)
+                            => String -> ProgDesc -> [(String,String,Integer)]
+                            -> (ErrorDesc -> Bool)
+                            -> UnrollConfig mem mloc ptr
 explicitMergePointConfig entry prog merges selectErr
   = mergePointConfig' entry prog
     (\prog_gr -> Set.fromList [ case List.find (\(nd,blk_info)
@@ -278,16 +292,19 @@ explicitMergePointConfig entry prog merges selectErr
                                                         blockInfoSubBlk blk_info)
                               | (fun,blk,sblk) <- merges ]) selectErr
 
-mergePointConfig :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc -> ([[Gr.Node]] -> [Gr.Node]) -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
+mergePointConfig :: (MemoryModel mem mloc ptr,Ord ptr,Enum ptr,Enum mloc)
+                    => String -> ProgDesc -> ([[Gr.Node]] -> [Gr.Node]) -> (ErrorDesc -> Bool)
+                    -> UnrollConfig mem mloc ptr
 mergePointConfig entry prog select selectErr
   = mergePointConfig' entry prog
     (\prog_gr -> Set.fromList $ fmap (\nd -> let Just inf = Gr.lab (blockGraph prog_gr) nd
                                              in (blockInfoFun inf,blockInfoBlk inf,blockInfoSubBlk inf)) $
                  select (possibleMergePoints (blockGraph prog_gr))) selectErr
 
-mergePointConfig' :: (Ord ptr,Enum ptr,Enum mloc) => String -> ProgDesc
-                     -> (BlockGraph mloc ptr -> Set (String,Ptr BasicBlock,Integer))
-                     -> (ErrorDesc -> Bool) -> UnrollConfig mloc ptr
+mergePointConfig' :: (MemoryModel mem mloc ptr,Ord ptr,Enum ptr,Enum mloc)
+                     => String -> ProgDesc
+                     -> (BlockGraph mem mloc ptr -> Set (String,Ptr BasicBlock,Integer))
+                     -> (ErrorDesc -> Bool) -> UnrollConfig mem mloc ptr
 mergePointConfig' entry prog@(_,funs,globs,ptrWidth,alltps,structs) select selectErr
   = UnrollCfg { unrollPointerWidth = ptrWidth
               , unrollStructs = structs
@@ -331,7 +348,7 @@ mergePointConfig' entry prog@(_,funs,globs,ptrWidth,alltps,structs) select selec
                       -> foldl getLoops mp loops
                      ) Map.empty funs
 
-calculateOrder :: BlockGraph mloc ptr -> Gr.Node -> [(String,Ptr BasicBlock,Integer)]
+calculateOrder :: BlockGraph mem mloc ptr -> Gr.Node -> [(String,Ptr BasicBlock,Integer)]
 calculateOrder gr startNd = reverse $ Gr.postorder dfsTree
   where
     ([dfsTree],_) = dfs (error "First node must have distance to error.") (blockGraph gr) [startNd]
@@ -354,7 +371,7 @@ calculateOrder gr startNd = reverse $ Gr.postorder dfsTree
                                     (rest,gr'') = dfs' gr' ns
                                 in ((Node info subs):rest,gr'')
 
-calculateSimpleOrder :: BlockGraph mloc ptr -> Gr.Node -> [(String,Ptr BasicBlock,Integer)]
+calculateSimpleOrder :: BlockGraph mem mloc ptr -> Gr.Node -> [(String,Ptr BasicBlock,Integer)]
 calculateSimpleOrder gr startNd = reverse $ Gr.postorder dfsTree
   where
     [dfsTree] = Gr.xdffWith (\(_,_,_,succ) -> mapMaybe (\(edge,nd) -> case edge of
@@ -363,8 +380,11 @@ calculateSimpleOrder gr startNd = reverse $ Gr.postorder dfsTree
                                                        ) succ)
                 (\(_,_,info,_) -> (blockInfoFun info,blockInfoBlk info,blockInfoSubBlk info)) [startNd] (blockGraph gr)
 
-reachabilityInfo :: Map (Ptr BasicBlock,Integer) (Maybe String,RealizationInfo,RealizationMonad mloc ptr (BlockFinalization ptr))
-                    -> Map (Ptr BasicBlock,Integer) (Map (Ptr BasicBlock,Integer) (Set (Ptr BasicBlock,Integer)))
+reachabilityInfo :: Map (Ptr BasicBlock,Integer)
+                    (Maybe String,RealizationInfo,
+                     RealizationMonad mem mloc ptr (BlockFinalization ptr))
+                    -> Map (Ptr BasicBlock,Integer)
+                           (Map (Ptr BasicBlock,Integer) (Set (Ptr BasicBlock,Integer)))
 reachabilityInfo info = Map.foldlWithKey (\cmp entr (_,info',_)
                                           -> let cmp1 = foldl (\cmp succ -> addReach cmp entr (succ,0) Set.empty) cmp (reSuccessors info')
                                                  cmp2 = if Set.null (reCalls info')
@@ -398,27 +418,33 @@ reachabilityInfo info = Map.foldlWithKey (\cmp entr (_,info',_)
                        in nmp2))
            else mp
 
-definitionMap :: Map (Ptr BasicBlock,Integer) (Maybe String,RealizationInfo,RealizationMonad mloc ptr (BlockFinalization ptr))
+definitionMap :: Map (Ptr BasicBlock,Integer)
+                     (Maybe String,RealizationInfo,
+                      RealizationMonad mem mloc ptr (BlockFinalization ptr))
               -> Map (Ptr Instruction) (Ptr BasicBlock,Integer)
 definitionMap = Map.foldlWithKey (\cmp blk (_,info,_) -> let cmp1 = foldl (\cmp (_,ret_addr) -> Map.insert ret_addr (fst blk,snd blk+1) cmp) cmp (reCalls info)
                                                              cmp2 = foldl (\cmp instr -> Map.insert instr blk cmp) cmp1 (reLocallyDefined info)
                                                          in cmp2
                                  ) Map.empty
 
-mergeValueMaps :: Bool -> [(SMTExpr Bool,ValueMap ptr)] -> UnrollMonad a mem mloc ptr (ValueMap ptr)
+mergeValueMaps :: Bool -> [(BoolVal,ValueMap ptr)]
+                  -> UnrollMonad a mem mloc ptr (ValueMap ptr)
 mergeValueMaps extensible mps = do
   let merge_map = Map.unionsWith (++) $ fmap (\(c,mp) -> fmap (\ref -> [(ref,c)]) mp) mps
   sequence $ Map.mapWithKey (\instr entrs -> liftIO $ newIORef (UnmergedValue "inp" extensible entrs)
                             ) merge_map
 
-mergeValueStacks :: Bool -> [(SMTExpr Bool,[ValueMap ptr])] -> UnrollMonad a mem mloc ptr [ValueMap ptr]
+mergeValueStacks :: Bool -> [(BoolVal,[ValueMap ptr])]
+                    -> UnrollMonad a mem mloc ptr [ValueMap ptr]
 mergeValueStacks _ ((_,[]):_) = return []
 mergeValueStacks extensible stacks = do
   st_head <- mergeValueMaps extensible (fmap (\(c,x:xs) -> (c,x)) stacks)
   st_tail <- mergeValueStacks extensible (fmap (\(c,x:xs) -> (c,xs)) stacks)
   return $ st_head:st_tail
 
-addMerge :: (MemoryModel mem mloc ptr,Enum ptr) => Bool -> SMTExpr Bool -> ValueMap ptr -> ValueMap ptr -> UnrollMonad a mem mloc ptr (ValueMap ptr)
+addMerge :: (MemoryModel mem mloc ptr,Enum ptr)
+            => Bool -> BoolVal -> ValueMap ptr -> ValueMap ptr
+            -> UnrollMonad a mem mloc ptr (ValueMap ptr)
 addMerge extensible cond mp_new mp_old
   = mapM (\entr -> case entr of
              Left (Left x) -> liftIO $ newIORef (UnmergedValue "inp" extensible [(x,cond)])
@@ -458,7 +484,9 @@ checkLoops visited checked ref
       MergedValue _ _ -> return (ref:checked)
       UnmergedValue _ _ vals -> foldlM (checkLoops (ref:visited)) (ref:checked) (fmap fst vals)
 
-getMergeValue :: (MemoryModel mem mloc ptr,Enum ptr) => MergeValueRef ptr -> UnrollMonad a mem mloc ptr (Either Val ptr)
+getMergeValue :: (MemoryModel mem mloc ptr,Enum ptr)
+                 => MergeValueRef ptr
+                 -> UnrollMonad a mem mloc ptr (Either Val ptr)
 getMergeValue ref = do
   res <- liftIO $ readIORef ref
   case res of
@@ -471,7 +499,8 @@ getMergeValue ref = do
                            nval <- lift $ valNewSameType name v
                            mapM_ (\(ref,cond) -> do
                                      Left val <- getMergeValue ref
-                                     lift $ assert $ cond .=>. (valEq nval val)) refs
+                                     lift $ assert $ (boolValValue cond) .=>. (valEq nval val)
+                                 ) refs
                            return $ Left nval)
                   else (do
                            lst <- mapM (\(ref,cond) -> do
@@ -492,29 +521,36 @@ getMergeValue ref = do
                         ) refs
           if extensible
             then mapM_ (\(cond,ptr) -> do
-                           env <- get
-                           let (prx,_) = unrollProxies env
-                           nmem <- lift $ connectPointer (unrollMemory env) prx cond ptr nptr
+                           (env :: UnrollEnv a mem mloc ptr) <- get
+                           ((),nmem) <- lift $ addInstruction (unrollMemory env) cond
+                                        (MIPtrConnect ptr nptr :: MemoryInstruction mloc ptr ())
+                                        Map.empty
                            put $ env { unrollMemory = nmem }
                        ) refs'
             else (do
-                     env <- get
+                     (env :: UnrollEnv a mem mloc ptr) <- get
                      let (prx,_) = unrollProxies env
                          emptyLike :: Proxy a -> [a]
                          emptyLike _ = []
-                     nmem <- lift $ addProgram (unrollMemory env) (constant True) (emptyLike prx) [MISelect refs' nptr] Map.empty
+                     ((),nmem) <- lift $ addInstruction (unrollMemory env) (ConstBool True)
+                                  (MISelect refs' nptr :: MemoryInstruction mloc ptr ())
+                                  Map.empty
                      put $ env { unrollMemory = nmem })
           return (Right nptr)
       liftIO $ writeIORef ref (MergedValue extensible ret)
       return ret
 
-mergeValues :: (MemoryModel mem mloc ptr,Enum ptr) => MergeValueRef ptr -> MergeValueRef ptr -> SMTExpr Bool -> UnrollMonad a mem mloc ptr ()
+mergeValues :: (MemoryModel mem mloc ptr,Enum ptr)
+               => MergeValueRef ptr -> MergeValueRef ptr -> BoolVal
+               -> UnrollMonad a mem mloc ptr ()
 mergeValues ref val cond = do
   mn <- liftIO $ readIORef ref
   nmn <- mergeValue val cond mn
   liftIO $ writeIORef ref nmn
 
-mergeValue :: (MemoryModel mem mloc ptr,Enum ptr) => MergeValueRef ptr -> SMTExpr Bool -> MergeValue ptr -> UnrollMonad a mem mloc ptr (MergeValue ptr)
+mergeValue :: (MemoryModel mem mloc ptr,Enum ptr)
+              => MergeValueRef ptr -> BoolVal -> MergeValue ptr
+              -> UnrollMonad a mem mloc ptr (MergeValue ptr)
 mergeValue val cond (UnmergedValue name extensible uvals)
   = if extensible
     then return $ UnmergedValue name extensible ((val,cond):uvals)
@@ -523,12 +559,12 @@ mergeValue val cond (MergedValue extensible mval) = do
   rval <- getMergeValue val
   case (rval,mval) of
     (Left v1,Left v2) -> if extensible
-                         then lift $ assert $ cond .=>. (valEq v2 v1)
+                         then lift $ assert $ (boolValValue cond) .=>. (valEq v2 v1)
                          else error $ "Merging into non-extensible variable "++show v2
     (Right p1,Right p2) -> do
-      env <- get
-      let (prx,_) = unrollProxies env
-      nmem <- lift $ connectPointer (unrollMemory env) prx cond p1 p2
+      (env :: UnrollEnv a mem mloc ptr) <- get
+      ((),nmem) <- lift $ addInstruction (unrollMemory env) cond
+                   (MIPtrConnect p1 p2::MemoryInstruction mloc ptr ()) Map.empty
       put $ env { unrollMemory = nmem }
   return (MergedValue extensible mval)
 
@@ -561,7 +597,7 @@ enqueueEdge
                              nodeIdSubblock $ edgeTarget x))
 
 enqueueEdges :: (Edge a mloc ptr -> Maybe Bool)
-             -> UnrollConfig mloc ptr -> [Edge a mloc ptr]
+             -> UnrollConfig mem mloc ptr -> [Edge a mloc ptr]
              -> UnrollContext a mloc ptr
              -> UnrollContext a mloc ptr
 enqueueEdges nxtCtx cfg edges ctx
@@ -658,7 +694,7 @@ initOrder pgr = trace ("ORDER: "++show order) order
     order = reverse $ fmap (\nd -> let Just (blk,_,sblk,_) = Gr.lab (programGraph pgr) nd in (blk,sblk)) $ Gr.postorder dffTree
 
 startingContext :: (MemoryModel mem Integer Integer,UnrollInfo a)
-                   => UnrollConfig Integer Integer -> String
+                   => UnrollConfig mem Integer Integer -> String
                    -> SMT (UnrollContext a Integer Integer,UnrollEnv a mem Integer Integer)
 startingContext cfg fname = case Map.lookup fname (blockFunctions $ unrollGraph cfg) of
   Just info -> do
@@ -687,7 +723,7 @@ startingContext cfg fname = case Map.lookup fname (blockFunctions $ unrollGraph 
                           , nextMergeNodes = Map.empty
                           , usedMergeNodes = Map.empty
                           , realizationQueue = [Edge { edgeTarget = nId
-                                                     , edgeConds = [(fname,nullPtr,0,constant True,[Map.fromList startArgs],0,Nothing)]
+                                                     , edgeConds = [(fname,nullPtr,0,ConstBool True,[Map.fromList startArgs],0,Nothing)]
                                                      , edgeCreatedMergeNodes = Set.empty
                                                      , edgeBudget = UnrollBudget 0 0 Map.empty (errorDistanceForNodeId (unrollGraph cfg) nId) 0
                                                      }]
@@ -704,7 +740,8 @@ startingContext cfg fname = case Map.lookup fname (blockFunctions $ unrollGraph 
                                       })
   Nothing -> error $ "Function "++fname++" not found in program graph."
 
-spawnContexts :: UnrollConfig mloc ptr -> UnrollContext a mloc ptr -> [UnrollContext a mloc ptr]
+spawnContexts :: UnrollConfig mem mloc ptr -> UnrollContext a mloc ptr
+                 -> [UnrollContext a mloc ptr]
 spawnContexts cfg ctx
   = [ UnrollContext { unrollOrder = norder
                     , currentMergeNodes = Map.filterWithKey (\key _ -> not $ Set.member key (edgeCreatedMergeNodes edge))
@@ -739,7 +776,7 @@ spawnContexts cfg ctx
 performUnrollmentCtx :: (MemoryModel mem mloc ptr,UnrollInfo a,Eq ptr,Enum ptr,Eq mloc,Enum mloc)
                         => Bool
                         -> Bool
-                        -> UnrollConfig mloc ptr
+                        -> UnrollConfig mem mloc ptr
                         -> UnrollContext a mloc ptr
                         -> UnrollMonad a mem mloc ptr (UnrollContext a mloc ptr)
 performUnrollmentCtx incremental isFirst cfg ctx
@@ -758,7 +795,7 @@ nextEdge :: Monad m => UnrollContext a mloc ptr -> m (Edge a mloc ptr,UnrollCont
 nextEdge ctx = case realizationQueue ctx of
   e:es -> return (e,ctx { realizationQueue = es })
 
-incrementalEnqueue :: UnrollConfig mloc ptr
+incrementalEnqueue :: UnrollConfig mem mloc ptr
                    -> NodeId -> [Edge a mloc ptr]
                    -> UnrollContext a mloc ptr
                    -> UnrollContext a mloc ptr
@@ -776,7 +813,7 @@ incrementalEnqueue cfg trg edges ctx
              _ -> Just True)
     cfg edges ctx
 
-staticEnqueue :: UnrollConfig mloc ptr
+staticEnqueue :: UnrollConfig mem mloc ptr
                  -> NodeId -> [Edge a mloc ptr]
                  -> UnrollContext a mloc ptr
                  -> UnrollContext a mloc ptr
@@ -787,7 +824,7 @@ stepUnrollCtx :: (MemoryModel mem mloc ptr,UnrollInfo a,Eq ptr,Enum ptr,Eq mloc,
                  => Bool
                  -> (NodeId -> [Edge a mloc ptr]
                      -> UnrollContext a mloc ptr -> UnrollContext a mloc ptr)
-                 -> UnrollConfig mloc ptr
+                 -> UnrollConfig mem mloc ptr
                  -> UnrollContext a mloc ptr
                  -> UnrollMonad a mem mloc ptr (UnrollContext a mloc ptr)
 stepUnrollCtx isFirst enqueue cfg cur = do
@@ -820,20 +857,22 @@ stepUnrollCtx isFirst enqueue cfg cur = do
            then createMerge blk_name info newNodeInfo inc
            else createNormal blk_name info trg inc
       env <- get
-      (fin,nst,outp) <- lift $ postRealize (RealizationEnv { reFunction = nodeIdFunction trg
-                                                           , reBlock = nodeIdBlock trg
-                                                           , reSubblock = nodeIdSubblock trg
-                                                           , reActivation = act
-                                                           , reGlobals = unrollGlobals env
-                                                           , reInputs = inp
-                                                           , rePhis = phis
-                                                           , reStructs = unrollStructs cfg })
+      (fin,nst,outp) <- lift $ postRealize (unrollMemory env)
+                        (RealizationEnv { reFunction = nodeIdFunction trg
+                                        , reBlock = nodeIdBlock trg
+                                        , reSubblock = nodeIdSubblock trg
+                                        , reActivation = act
+                                        , reGlobals = unrollGlobals env
+                                        , reInputs = inp
+                                        , rePhis = phis
+                                        , reStructs = unrollStructs cfg })
                         start_loc
                         (unrollNextMem env)
                         (unrollNextPtr env)
                         realize
       put $ env { unrollNextPtr = reNextPtr nst
-                , unrollNextMem = reNextMemLoc nst }
+                , unrollNextMem = reNextMemLoc nst
+                , unrollMemory = reMem nst }
       outp' <- createMergeValues False (Map.mapKeys Right $ reLocals nst)
       let arg_vars = Map.filterWithKey (\k _ -> case k of
                                            Left _ -> True
@@ -857,41 +896,44 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                  put $ env { unrollMemory = nmem })
         else return ()
       mapM_ (\(cond,src,trg) -> do
-                env <- get
-                let (_,prx) = unrollProxies env
-                nmem <- lift $ connectLocation (unrollMemory env) prx cond src trg
+                (env :: UnrollEnv a mem mloc ptr) <- get
+                ((),nmem) <- lift $ addInstruction (unrollMemory env) cond
+                             (MIConnect src trg :: MemoryInstruction mloc ptr ())
+                             Map.empty
                 put $ env { unrollMemory = nmem }
             ) mem_eqs
-      case mem_instr++(reMemInstrs outp) of
-        [] -> return ()
-        xs -> do
-          env <- get
-          nmem <- lift $ addProgram (unrollMemory env) act prev_locs xs (rePtrTypes nst)
-          put $ env { unrollMemory = nmem }
       modify (\env -> env { unrollGuards = (reGuards outp)++(unrollGuards env)
                           , unrollWatchpoints = (reWatchpoints outp)++(unrollWatchpoints env)
                           })
       return cur2
   where
+    connectMerge :: (MemoryModel mem mloc ptr,Enum ptr,UnrollInfo a)
+                    => UnrollContext a mloc ptr
+                    -> Integer -> NodeId
+                    -> [(String,Ptr BasicBlock,Integer,BoolVal,[ValueMap ptr],mloc,Maybe (UnrollNodeInfo a))]
+                    -> UnrollMonad a mem mloc ptr (UnrollContext a mloc ptr)
     connectMerge cur mn trg inc = do
       rmn <- getMergeNode mn
       nprx <- lift $ varNamed "proxy"
       lift $ assert $ (mergeActivationProxy rmn) .==.
-        (app or' ([ act | (_,_,_,act,_,_,_) <- inc ]++[nprx]))
+        (app or' ([ boolValValue act | (_,_,_,act,_,_,_) <- inc ]++[nprx]))
       mapM_ (\(fun,blk,sblk,act,_,loc,_) -> do
-                env <- get
-                let (_,prx_ptr) = unrollProxies env
-                nmem <- lift $ connectLocation (unrollMemory env) prx_ptr act loc (mergeLoc rmn)
+                (env :: UnrollEnv a mem mloc ptr) <- get
+                ((),nmem) <- lift $ addInstruction (unrollMemory env) act
+                             (MIConnect loc (mergeLoc rmn) :: MemoryInstruction mloc ptr ())
+                             Map.empty
                 put $ env { unrollMemory = nmem }
                 case Map.lookup blk (mergePhis rmn) of
                   Nothing -> return ()
-                  Just phi -> lift $ assert $ act .=>.
+                  Just phi -> lift $ assert $ (boolValValue act) .=>.
                               (app and' $ phi:[ not' phi'
                                               | (blk',phi') <- Map.toList (mergePhis rmn),
                                                 blk'/=blk ])
             ) inc
       ninp <- foldlM (\cinp (_,_,_,act,mp,_,_) -> do
-                         sequence $ zipWith (\mp' cinp' -> addMerge True act mp' cinp') mp cinp
+                         sequence $ zipWith (\mp' cinp'
+                                             -> addMerge True act mp' cinp'
+                                            ) mp cinp
                      ) (mergeInputs rmn) inc
       modify $ \env -> env { unrollInfo = foldl (\info ndSrc
                                                  -> unrollInfoConnect info ndSrc (mergeUnrollInfo rmn)
@@ -902,7 +944,7 @@ stepUnrollCtx isFirst enqueue cfg cur = do
     createMerge blk_name info newNodeInfo inc = do
       act_proxy <- lift $ varNamed $ "proxy_"++blk_name
       act_static <- lift $ defConstNamed ("act_"++blk_name)
-                    (app or' ([ act | (_,_,_,act,_,_,_) <- inc ]++[act_proxy]))
+                    (app or' ([ boolValValue act | (_,_,_,act,_,_,_) <- inc ]++[act_proxy]))
       mergedInps <- mergeValueStacks True [ (cond,mp) | (_,_,_,cond,mp,_,_) <- inc ]
       inp <- mapM getMergeValue (Map.intersection (head mergedInps) $
                                  Map.union
@@ -915,11 +957,11 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                    ) (Set.toList $ rePossiblePhis info)
       mapM_ (\(_,blk,_,cond,_,_,_) -> case Map.lookup blk phis of
                 Nothing -> return ()
-                Just phi -> lift $ assert $ cond .=>.
+                Just phi -> lift $ assert $ (boolValValue cond) .=>.
                             (app and' $ phi:[ not' phi'
                                             | (blk',phi') <- Map.toList phis,
                                               blk'/=blk ])
-                    ) inc
+            ) inc
       loc <- do
         env <- get
         put $ env { unrollNextMem = succ $ unrollNextMem env }
@@ -940,14 +982,14 @@ stepUnrollCtx isFirst enqueue cfg cur = do
       mergedInps <- mergeValueStacks False [ (cond,mp) | (_,_,_,cond,mp,_,_) <- inc ]
       act <- case inc of
         [(_,_,_,act',_,_,_)] -> do
-          let optAct = optimizeExpr' act'
+          let optAct = optimizeExpr' (boolValValue act')
           if isComplexExpr optAct
             then lift $ defConstNamed ("act_"++(nodeIdFunction trg)++"_"++blk_name) optAct
             else (do
                      lift $ comment $ "act_"++(nodeIdFunction trg)++"_"++blk_name++" = "++show optAct
                      return optAct)
         _ -> lift $ defConstNamed ("act_"++(nodeIdFunction trg)++"_"++blk_name)
-             (app or' [ act | (_,_,_,act,_,_,_) <- inc ])
+             (app or' [ boolValValue act | (_,_,_,act,_,_,_) <- inc ])
       inp <- mapM getMergeValue (Map.intersection (head mergedInps) $
                                  Map.union
                                  (fmap (const ()) $ Map.mapKeys Right (rePossibleInputs info))
@@ -962,7 +1004,8 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                       put $ env { unrollNextMem = succ loc'' }
                       return (loc'',[ loc''' | (_,_,_,_,_,loc''',_) <- inc ],
                               [MIPhi [ (act'',loc''') | (_,_,_,act'',_,loc''',_) <- inc ] loc'']))
-      phis <- mapM (\blk' -> case [ cond | (_,blk'',_,cond,_,_,_) <- inc, blk''==blk' ] of
+      phis <- mapM (\blk' -> case [ boolValValue cond
+                                  | (_,blk'',_,cond,_,_,_) <- inc, blk''==blk' ] of
                        [] -> return Nothing
                        xs -> do
                          let phiExpr = optimizeExpr' $ app or' xs
@@ -979,7 +1022,7 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                       , edgeConds = [(nodeIdFunction trg,
                                       nodeIdBlock trg,
                                       nodeIdSubblock trg,
-                                      act .&&. cond,
+                                      DirectBool $ act .&&. cond,
                                       new_vars:(tail inp'),
                                       curMLoc,
                                       Just newNodeInfo)]
@@ -1008,7 +1051,13 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                           , nodeIdCallStack = Just (trg { nodeIdSubblock = succ $ nodeIdSubblock trg },ret)
                           }
       return [ Edge { edgeTarget = nodeId
-                    , edgeConds = [(nodeIdFunction trg,nodeIdBlock trg,nodeIdSubblock trg,act,arg_vars:new_vars:(tail inp'),curMLoc,Just newNodeInfo)]
+                    , edgeConds = [(nodeIdFunction trg,
+                                    nodeIdBlock trg,
+                                    nodeIdSubblock trg,
+                                    DirectBool act,
+                                    arg_vars:new_vars:(tail inp'),
+                                    curMLoc,
+                                    Just newNodeInfo)]
                     , edgeCreatedMergeNodes = nCreatedMerges
                     , edgeBudget = lvl { unrollDepth = unrollDepth lvl + 1
                                        , unrollUnwindDepth = unrollUnwindDepth lvl + 1
@@ -1028,7 +1077,7 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                       , edgeConds = [(nodeIdFunction trg,
                                       nodeIdBlock trg,
                                       nodeIdSubblock trg,
-                                      act,nvars,curMLoc,
+                                      DirectBool act,nvars,curMLoc,
                                       Just newNodeInfo)]
                       , edgeCreatedMergeNodes = nCreatedMerges
                       , edgeBudget = lvl { unrollDepth = unrollDepth lvl + 1
@@ -1038,7 +1087,7 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                       } ]
       Nothing -> return []
 
-errorDistanceForNodeId :: BlockGraph mloc ptr -> NodeId -> Maybe Integer
+errorDistanceForNodeId :: BlockGraph mem mloc ptr -> NodeId -> Maybe Integer
 errorDistanceForNodeId gr nd = case Map.lookup (nodeIdBlock nd,nodeIdSubblock nd) (blockMap gr) of
   Nothing -> Nothing
   Just nd -> case Gr.lab (blockGraph gr) nd of
@@ -1062,7 +1111,7 @@ errorDistanceForNodeId gr nd = case Map.lookup (nodeIdBlock nd,nodeIdSubblock nd
 allProxies :: UnrollEnv a mem mloc ptr -> [SMTExpr Bool]
 allProxies env = [ mergeActivationProxy nd | nd <- Map.elems (unrollMergeNodes env) ]
 
-contextQueueInsert :: UnrollConfig mloc ptr -> UnrollContext a mloc ptr
+contextQueueInsert :: UnrollConfig mem mloc ptr -> UnrollContext a mloc ptr
                       -> UnrollQueue a mloc ptr
                       -> UnrollQueue a mloc ptr
 contextQueueInsert cfg ctx
@@ -1077,9 +1126,10 @@ contextQueueInsert cfg ctx
     (minNd,budget) = getMinBudget cfg ctx
 
 contextQueueStep :: (UnrollInfo a,MemoryModel mem mloc ptr,Eq mloc,Eq ptr,Enum mloc,Enum ptr)
-                    => Bool -> Bool -> UnrollConfig mloc ptr -> (NodeId,UnrollBudget)
+                    => Bool -> Bool -> UnrollConfig mem mloc ptr -> (NodeId,UnrollBudget)
                     -> UnrollQueue a mloc ptr
-                    -> UnrollMonad a mem mloc ptr (Maybe ((NodeId,UnrollBudget),UnrollQueue a mloc ptr))
+                    -> UnrollMonad a mem mloc ptr (Maybe ((NodeId,UnrollBudget),
+                                                          UnrollQueue a mloc ptr))
 contextQueueStep incremental isFirst cfg lvl queue = case queue of
   (ctx,minN,minB):qs -> case realizationQueue ctx of
     [] -> contextQueueStep incremental isFirst cfg lvl
@@ -1101,7 +1151,7 @@ contextQueueStep incremental isFirst cfg lvl queue = case queue of
   [] -> return Nothing
 
 checkForErrors :: (MemoryModel mem mloc ptr)
-                  => UnrollConfig mloc ptr
+                  => UnrollConfig mem mloc ptr
                   -> UnrollMonad a mem mloc ptr (Maybe ([(String,[BitVector BVUntyped])],[ErrorDesc]))
 checkForErrors cfg = do
   env <- get
@@ -1135,7 +1185,7 @@ contextQueueRun :: (UnrollInfo a,MemoryModel mem Integer Integer)
                    => Bool
                    -> Proxy mem
                    -> Proxy a
-                   -> UnrollConfig Integer Integer
+                   -> UnrollConfig mem Integer Integer
                    -> String
                    -> SMT (Maybe ([(String,[BitVector BVUntyped])],[ErrorDesc]),a)
 contextQueueRun incremental (_::Proxy mem) (_::Proxy a) cfg entry = do
@@ -1145,9 +1195,12 @@ contextQueueRun incremental (_::Proxy mem) (_::Proxy a) cfg entry = do
   return (res,unrollInfo nenv)
 
 contextQueueCheck :: (UnrollInfo a,MemoryModel mem mloc ptr,Eq mloc,Eq ptr,Enum mloc,Enum ptr)
-                     => Bool -> Integer -> Bool -> Bool -> UnrollConfig mloc ptr -> (NodeId,UnrollBudget) -> (NodeId,UnrollBudget)
+                     => Bool -> Integer -> Bool -> Bool
+                     -> UnrollConfig mem mloc ptr -> (NodeId,UnrollBudget)
+                     -> (NodeId,UnrollBudget)
                      -> UnrollQueue a mloc ptr
-                     -> UnrollMonad a mem mloc ptr (Maybe ([(String,[BitVector BVUntyped])],[ErrorDesc]))
+                     -> UnrollMonad a mem mloc ptr (Maybe ([(String,[BitVector BVUntyped])],
+                                                           [ErrorDesc]))
 contextQueueCheck incremental n isFirst mustCheck cfg lastLvl lvl queue = do
   --liftIO $ putStrLn $ "Depth: "++show n++" "++show (length queue,length $ realizationQueue $ head queue)
   res <- contextQueueStep incremental isFirst cfg lvl queue
@@ -1163,11 +1216,11 @@ contextQueueCheck incremental n isFirst mustCheck cfg lastLvl lvl queue = do
                                      Nothing -> contextQueueCheck incremental (n+1) False False cfg nlvl nlvl nqueue)
                           else contextQueueCheck incremental (n+1) False True cfg lastLvl nlvl nqueue
 
-getMinBudget :: UnrollConfig mloc ptr -> UnrollContext a mloc ptr -> (NodeId,UnrollBudget)
+getMinBudget :: UnrollConfig mem mloc ptr -> UnrollContext a mloc ptr -> (NodeId,UnrollBudget)
 getMinBudget cfg ctx = minimumBy (unrollDynamicOrder cfg)
                        [ (edgeTarget edge,edgeBudget edge) | edge <- realizationQueue ctx ]
 
-instance Show (BlockInfo mloc ptr) where
+instance Show (BlockInfo mem mloc ptr) where
   show info = (case blockInfoFun info of
                   "main" -> ""
                   "__llbmc_main" -> ""
@@ -1179,7 +1232,8 @@ instance Show (BlockInfo mloc ptr) where
                then ""
                else "."++show (blockInfoSubBlk info))
 
-generateDistanceInfo :: (ErrorDesc -> Bool) -> BlockGraph mloc ptr -> BlockGraph mloc ptr
+generateDistanceInfo :: (ErrorDesc -> Bool) -> BlockGraph mem mloc ptr
+                        -> BlockGraph mem mloc ptr
 generateDistanceInfo isError gr = updateDistanceInfo gr upds
   where
     upds = catMaybes [ if hasErrs || isRet
@@ -1196,18 +1250,21 @@ generateDistanceInfo isError gr = updateDistanceInfo gr upds
                            hasErrs = any isError (rePotentialErrors info)
                            isRet = reReturns info ]
 
-updateDistanceInfo :: BlockGraph mloc ptr -> [(Gr.Node,DistanceInfo)] -> BlockGraph mloc ptr
+updateDistanceInfo :: BlockGraph mem mloc ptr -> [(Gr.Node,DistanceInfo)]
+                      -> BlockGraph mem mloc ptr
 updateDistanceInfo gr [] = gr
 updateDistanceInfo gr xs = let (ngr,upds) = updateDistanceInfo' gr xs
                            in updateDistanceInfo ngr upds
 
-updateDistanceInfo' :: BlockGraph mloc ptr -> [(Gr.Node,DistanceInfo)] -> (BlockGraph mloc ptr,[(Gr.Node,DistanceInfo)])
+updateDistanceInfo' :: BlockGraph mem mloc ptr -> [(Gr.Node,DistanceInfo)]
+                       -> (BlockGraph mem mloc ptr,[(Gr.Node,DistanceInfo)])
 updateDistanceInfo' gr [] = (gr,[])
 updateDistanceInfo' gr (x:xs) = let (gr1,upd1) = updateDistanceInfo'' gr x
                                     (gr2,upd2) = updateDistanceInfo' gr1 xs
                                 in (gr2,upd1++upd2)
 
-updateDistanceInfo'' :: BlockGraph mloc ptr -> (Gr.Node,DistanceInfo) -> (BlockGraph mloc ptr,[(Gr.Node,DistanceInfo)])
+updateDistanceInfo'' :: BlockGraph mem mloc ptr -> (Gr.Node,DistanceInfo)
+                        -> (BlockGraph mem mloc ptr,[(Gr.Node,DistanceInfo)])
 updateDistanceInfo'' gr (nd,newDist) = (gr { blockGraph = ngr },upds)
   where
     (Just (prev,_,blk,succ),gr') = Gr.match nd (blockGraph gr)
@@ -1272,6 +1329,6 @@ updateDistanceInfo'' gr (nd,newDist) = (gr { blockGraph = ngr },upds)
                           _ -> Nothing
                      | (edge,prevNode) <- prev ]
 
-dumpBlockGraph :: UnrollConfig mloc ptr -> IO ()
+dumpBlockGraph :: UnrollConfig mem mloc ptr -> IO ()
 dumpBlockGraph cfg = do
   putStrLn $ Gr.graphviz' $ blockGraph $ unrollGraph cfg
