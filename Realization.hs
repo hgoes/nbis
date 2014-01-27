@@ -56,8 +56,7 @@ data RealizationOutput
                       }
 
 data RealizationInfo = RealizationInfo { rePossiblePhis :: Set (Ptr BasicBlock)
-                                       , rePossibleInputs :: Map (Ptr Instruction) (TypeDesc,Maybe String)
-                                       , rePossibleArgs :: Map (Ptr Argument) (TypeDesc,Maybe String)
+                                       , rePossibleInputs :: Map (Either (Ptr Argument) (Ptr Instruction)) (TypeDesc,Maybe String)
                                        , rePossibleGlobals :: Set (Ptr GlobalVariable)
                                        , reLocallyDefined :: Set (Ptr Instruction)
                                        , reSuccessors :: Set (Ptr BasicBlock)
@@ -210,7 +209,7 @@ argToExpr expr = reInject getType result
                                            rs <- get
                                            case Map.lookup instr (reLocals rs) of
                                              Just res -> return res)
-                                  else (info { rePossibleInputs = Map.insert instr (operandType expr,name) (rePossibleInputs info) },do
+                                  else (info { rePossibleInputs = Map.insert (Right instr) (operandType expr,name) (rePossibleInputs info) },do
                                            re <- ask
                                            case Map.lookup (Right instr) (reInputs re) of
                                              Just res -> return res
@@ -224,7 +223,7 @@ argToExpr expr = reInject getType result
                                                re <- ask
                                                case Map.lookup g (reGlobals re) of
                                                  Just res -> return $ Right res)
-      ODArgument arg -> Realization $ \info -> (info { rePossibleArgs = Map.insert arg (operandType expr,Nothing) (rePossibleArgs info) },do
+      ODArgument arg -> Realization $ \info -> (info { rePossibleInputs = Map.insert (Left arg) (operandType expr,Nothing) (rePossibleInputs info) },do
                                                    re <- ask
                                                    case Map.lookup (Left arg) (reInputs re) of
                                                      Just res -> return res)
@@ -254,7 +253,7 @@ data BlockFinalization ptr = Jump (CondList (Ptr BasicBlock))
                            deriving (Show)
 
 preRealize :: Realization mem mloc ptr a -> (RealizationInfo,RealizationMonad mem mloc ptr a)
-preRealize r = runRealization r (RealizationInfo Set.empty Map.empty Map.empty Set.empty Set.empty Set.empty Set.empty False [])
+preRealize r = runRealization r (RealizationInfo Set.empty Map.empty Set.empty Set.empty Set.empty Set.empty False [])
 
 postRealize :: mem -> RealizationEnv ptr -> mloc -> mloc -> ptr -> RealizationMonad mem mloc ptr a
                -> SMT (a,RealizationState mem mloc ptr,RealizationOutput)

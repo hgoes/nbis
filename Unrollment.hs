@@ -881,8 +881,10 @@ stepUnrollCtx isFirst enqueue cfg cur = do
       let arg_vars = Map.filterWithKey (\k _ -> case k of
                                            Left _ -> True
                                            _ -> False
-                                       ) (head inp')
-          new_vars = Map.union (Map.union outp' (head inp')) arg_vars
+                                       ) (case inp' of
+                                             h:_ -> h)
+          new_vars = Map.union (Map.union outp' (case inp' of
+                                                    h:_ -> h)) arg_vars
           nCreatedMerges = if mergeNodeCreate
                            then Set.insert trg createdMerges
                            else createdMerges
@@ -945,15 +947,33 @@ stepUnrollCtx isFirst enqueue cfg cur = do
       updateMergeNode mn (rmn { mergeActivationProxy = nprx
                               , mergeInputs = ninp })
       return (cur { usedMergeNodes = Map.insert trg () (usedMergeNodes cur) })
+
     createMerge blk_name info newNodeInfo inc = do
       act_proxy <- lift $ varNamed $ "proxy_"++blk_name
       act_static <- lift $ defConstNamed ("act_"++blk_name)
                     (app or' ([ boolValValue act | (_,_,_,act,_,_,_) <- inc ]++[act_proxy]))
-      mergedInps <- mergeValueStacks True [ (cond,mp) | (_,_,_,cond,mp,_,_) <- inc ]
-      inp <- mapM getMergeValue (Map.intersection (head mergedInps) $
-                                 Map.union
-                                 (fmap (const ()) $ Map.mapKeys Right (rePossibleInputs info))
-                                 (fmap (const ()) $ Map.mapKeys Left (rePossibleArgs info)))
+
+      mergedInps <- mergeValueStacks True [ (cond,mp) | (_,_,_,cond,_:mp,_,_) <- inc ]
+
+      inputProxies <- mapM (\(tp,name) -> case tp of
+                               PointerType tp' -> do
+                                 env <- get
+                                 put $ env { unrollNextPtr = succ (unrollNextPtr env) }
+                                 return (Right (unrollNextPtr env))
+                               _ -> do
+                                 val <- lift $ valNew (case name of
+                                                          Nothing -> "inp"
+                                                          Just n -> n) tp
+                                 return $ Left val
+                           ) (rePossibleInputs info)
+      inputProxies' <- createMergeValues True inputProxies
+      inputProxies'' <- foldlM (\curInp (_,_,_,cond,mp:_,_,_)
+                                -> addMerge True cond mp curInp
+                               ) inputProxies' inc
+      
+      let inputs = inputProxies'':mergedInps
+          inp = inputProxies
+      
       phis <- fmap Map.fromList $
               mapM (\blk' -> do
                        phi <- lift $ varNamed "phi"
@@ -973,13 +993,13 @@ stepUnrollCtx isFirst enqueue cfg cur = do
       env <- get
       put $ env { unrollMergeNodes = Map.insert (unrollNextMergeNode env)
                                      (MergeNode { mergeActivationProxy = act_proxy
-                                                , mergeInputs = mergedInps --inp''
+                                                , mergeInputs = inputs
                                                 , mergePhis = phis
                                                 , mergeLoc = loc
                                                 , mergeUnrollInfo = newNodeInfo })
                                      (unrollMergeNodes env)
                 , unrollNextMergeNode = succ $ unrollNextMergeNode env }
-      return (act_static,inp,mergedInps,phis,loc,[loc],
+      return (act_static,inp,inputs,phis,loc,[loc],
               Just $ unrollNextMergeNode env,[],[ (act',loc',loc)
                                                 | (_,_,_,act',_,loc',_) <- inc ])
     createNormal blk_name info trg inc = do
@@ -994,10 +1014,9 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                      return optAct)
         _ -> lift $ defConstNamed ("act_"++(nodeIdFunction trg)++"_"++blk_name)
              (app or' [ boolValValue act | (_,_,_,act,_,_,_) <- inc ])
-      inp <- mapM getMergeValue (Map.intersection (head mergedInps) $
-                                 Map.union
-                                 (fmap (const ()) $ Map.mapKeys Right (rePossibleInputs info))
-                                 (fmap (const ()) $ Map.mapKeys Left (rePossibleArgs info)))
+      inp <- mapM getMergeValue (Map.intersection (case mergedInps of
+                                                      h:_ -> h) $
+                                 rePossibleInputs info)
       (start_loc,prev_locs,mphis) <- case inc of
         (_,_,_,_,_,loc',_):inc'
           -> if all (\(_,_,_,_,_,loc'',_) -> loc'==loc'') inc'
