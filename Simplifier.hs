@@ -5,6 +5,7 @@ import Data.List (nub)
 
 import Language.SMTLib2
 import Language.SMTLib2.Internals
+import Language.SMTLib2.Internals.Operators
 
 isFalse :: SMTExpr Bool -> Bool
 isFalse (Const False _) = True

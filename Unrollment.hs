@@ -2,6 +2,7 @@
 module Unrollment where
 
 import Language.SMTLib2
+import Language.SMTLib2.Strategy
 import LLVM.FFI.BasicBlock (BasicBlock)
 import LLVM.FFI.Instruction (Instruction)
 import LLVM.FFI.Value
@@ -1161,7 +1162,10 @@ checkForErrors cfg = do
   lift $ stack $ do
     mapM_ (\mn -> assert $ not' $ mergeActivationProxy mn) (unrollMergeNodes env)
     assert $ app or' [ cond | (desc,cond) <- bugs ]
-    res <- checkSat
+    res <- checkSatUsing (AndThen [UsingParams (CustomTactic "tseitin-cnf") []
+                                  ,UsingParams (CustomTactic "bit-blast") []
+                                  ,UsingParams (CustomTactic "sat") []])
+    --res <- checkSatUsing (UsingParams (CustomTactic "smt") [])
     if res
       then (do
                outp <- mapM (\(name,cond,args) -> do
