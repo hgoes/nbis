@@ -108,6 +108,7 @@ data UnrollConfig mem mloc ptr
               , unrollDoRealize :: (NodeId,UnrollBudget) -> Bool
               , unrollCheckedErrors :: ErrorDesc -> Bool
               , unrollLoopHeaders :: Map (Ptr BasicBlock) LoopDesc
+              , unrollInstrNums :: Map (Ptr Instruction) Integer
               }
 
 data DistanceInfo = DistInfo { distanceToReturn :: Maybe Integer
@@ -329,6 +330,7 @@ mergePointConfig' entry prog@(_,funs,globs,ptrWidth,alltps,structs) select selec
               , unrollDoRealize = \b -> True
               , unrollCheckedErrors = selectErr
               , unrollLoopHeaders = loopHdrs
+              , unrollInstrNums = getInstructionNumbers prog_gr
               }
   where
     blk_mp = Map.fromList [ ((fn,blk,sblk),(nd,instrs))
@@ -866,7 +868,8 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                                         , reGlobals = unrollGlobals env
                                         , reInputs = inp
                                         , rePhis = phis
-                                        , reStructs = unrollStructs cfg })
+                                        , reStructs = unrollStructs cfg
+                                        , reInstrNums = unrollInstrNums cfg })
                         start_loc
                         (unrollNextMem env)
                         (unrollNextPtr env)
@@ -1336,3 +1339,19 @@ updateDistanceInfo'' gr (nd,newDist) = (gr { blockGraph = ngr },upds)
 dumpBlockGraph :: UnrollConfig mem mloc ptr -> IO ()
 dumpBlockGraph cfg = do
   putStrLn $ Gr.graphviz' $ blockGraph $ unrollGraph cfg
+
+getInstructionNumbers :: BlockGraph mem mloc ptr -> Map (Ptr Instruction) Integer
+getInstructionNumbers gr
+  = getNums' Map.empty (Gr.labNodes (blockGraph gr))
+  where
+    getNums' mp [] = mp
+    getNums' mp ((_,bi):rest) = getNums'' mp
+                                (blockInfoInstrs bi) rest
+
+    getNums'' mp [] rest = getNums' mp rest
+    getNums'' mp ((IAssign instr Nothing _,Just num):instrs) rest
+      = getNums'' (Map.insert instr num mp) instrs rest
+    getNums'' mp ((ITerminator (ICall instr Nothing _ _),Just num):instrs) rest
+      = getNums'' (Map.insert instr num mp) instrs rest
+    getNums'' mp (_:instrs) rest
+      = getNums'' mp instrs rest

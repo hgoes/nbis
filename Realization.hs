@@ -38,6 +38,7 @@ data RealizationEnv ptr
                    , reInputs :: Map (Either (Ptr Argument) (Ptr Instruction)) (Either Val ptr)
                    , rePhis :: Map (Ptr BasicBlock) (SMTExpr Bool)
                    , reStructs :: Map String [TypeDesc]
+                   , reInstrNums :: Map (Ptr Instruction) Integer
                    }
 
 data RealizationState mem mloc ptr
@@ -214,7 +215,9 @@ argToExpr expr = reInject getType result
                                            case Map.lookup (Right instr) (reInputs re) of
                                              Just res -> return res
                                              Nothing -> error $ "Can't find value "++show instr++(case name of
-                                                                                                     Nothing -> ""
+                                                                                                     Nothing -> case Map.lookup instr (reInstrNums re) of
+                                                                                                       Just i -> "(%"++show i++")"
+                                                                                                       Nothing -> ""
                                                                                                      Just rname -> "("++rname++")")
                                        )
       ODGlobal g -> Realization $ \info -> (info { rePossibleGlobals = Set.insert g (rePossibleGlobals info) },do
