@@ -21,6 +21,9 @@ data Solver = SMTLib2Solver String
 #ifdef WITH_BOOLECTOR
             | BoolectorSolver
 #endif
+#ifdef WITH_YICES
+            | YicesSolver
+#endif
             deriving (Eq,Ord,Show)
 
 data Options = Options
@@ -71,6 +74,9 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
 #endif
 #ifdef WITH_BOOLECTOR
               ,Option [] ["boolector"] (NoArg (\opt -> opt { solver = BoolectorSolver })) "Use the boolector solver."
+#endif
+#ifdef WITH_YICES
+              ,Option [] ["yices"] (NoArg (\opt -> opt { solver = YicesSolver })) "Use the yices solver."
 #endif
               ,Option [] ["check-errors"] (ReqArg (\str opt -> opt { checkErrors = fmap (\n -> case n of
                                                                                             "user" -> Custom

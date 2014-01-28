@@ -1173,21 +1173,27 @@ contextQueueStep incremental isFirst cfg lvl queue = case queue of
                  in return $ Just (lvl,(ctx',minN',minB'):qs)
   [] -> return Nothing
 
+assertProxies :: UnrollMonad a mem mloc ptr ()
+assertProxies = do
+  env <- get
+  lift $ mapM_ (\mn -> assert $ not' $ mergeActivationProxy mn) (unrollMergeNodes env)
+
 checkForErrors :: (MemoryModel mem mloc ptr)
                   => UnrollConfig mem mloc ptr
-                  -> UnrollMonad a mem mloc ptr (Maybe ([(String,[BitVector BVUntyped])],[ErrorDesc]))
+                  -> UnrollMonad a mem mloc ptr
+                     (Maybe ([(String,[BitVector BVUntyped])],[ErrorDesc]))
 checkForErrors cfg = do
   env <- get
   let (p1,p2) = unrollProxies env
       bugs = filter (\(desc,_) -> unrollCheckedErrors cfg desc) $
              unrollGuards env ++ (memoryErrors (unrollMemory env) p1 p2)
+  
   lift $ stack $ do
-    mapM_ (\mn -> assert $ not' $ mergeActivationProxy mn) (unrollMergeNodes env)
     assert $ app or' [ cond | (desc,cond) <- bugs ]
-    res <- checkSatUsing (AndThen [UsingParams (CustomTactic "tseitin-cnf") []
+    {-res <- checkSatUsing (AndThen [UsingParams (CustomTactic "tseitin-cnf") []
                                   ,UsingParams (CustomTactic "bit-blast") []
-                                  ,UsingParams (CustomTactic "sat") []])
-    --res <- checkSatUsing (UsingParams (CustomTactic "smt") [])
+                                  ,UsingParams (CustomTactic "sat") []])-}
+    res <- checkSat
     if res
       then (do
                outp <- mapM (\(name,cond,args) -> do

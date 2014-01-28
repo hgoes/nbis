@@ -16,6 +16,10 @@ Flag Boolector
   Description: Enable support for the boolector solver
   Default: False
 
+Flag Yices
+  Description: Enable support for the Yices solver
+  Default: False
+
 Executable nbis
   Main-Is:		Main.hs
   Extensions:           CPP,ScopedTypeVariables,GADTs,GeneralizedNewtypeDeriving,ParallelListComp,TypeFamilies,FlexibleInstances,RankNTypes,FlexibleContexts,ImpredicativeTypes
@@ -34,4 +38,7 @@ Executable nbis
   if flag(Boolector)
     Build-Depends: smtlib2-boolector
     Cpp-Options: -DWITH_BOOLECTOR
+  if flag(Yices)
+    Build-Depends: smtlib2-yices
+    Cpp-Options: -DWITH_YICES
   GHC-Options: -fwarn-unused-imports

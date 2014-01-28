@@ -17,6 +17,9 @@ import Language.SMTLib2.Boolector
 #ifdef WITH_STP
 import Language.SMTLib2.STP
 #endif
+#ifdef WITH_YICES
+import Language.SMTLib2.Yices
+#endif
 import Language.SMTLib2.Internals.Optimize
 import qualified Data.Graph.Inductive as Gr
 import Data.Foldable (all)
@@ -87,7 +90,12 @@ main = do
     DumpCFG -> dumpBlockGraph cfg2
     DumpLLVM -> dumpProgram program
   where
-    actVerify opts cfg = do
+    initSolver opts = case solver opts of
+#ifdef WITH_YICES
+      YicesSolver -> withYices
+#endif
+      _ -> id
+    actVerify opts cfg = initSolver opts $ do
       backend <- case solver opts of
             SMTLib2Solver name -> fmap AnyBackend $ createSMTPipe name
 #ifdef WITH_STP
@@ -95,6 +103,9 @@ main = do
 #endif
 #ifdef WITH_BOOLECTOR
             BoolectorSolver -> fmap AnyBackend boolectorBackend
+#endif
+#ifdef WITH_YICES
+            YicesSolver -> fmap AnyBackend yicesBackend
 #endif
 
       bug <- withSMTBackend (optimizeBackend (backend::AnyBackend IO)) $ do
