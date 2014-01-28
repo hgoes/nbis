@@ -39,6 +39,7 @@ data Options = Options
                , unwindLimit :: Maybe Integer
                , recursionLimit :: Maybe Integer
                , incremental :: Bool
+               , completeness :: Bool
                , dumpStateSpace :: Maybe String
                } deriving (Eq,Ord,Show)
 
@@ -58,6 +59,7 @@ defaultOptions = Options { action = Verify
                          , unwindLimit = Nothing
                          , recursionLimit = Nothing
                          , incremental = True
+                         , completeness = False
                          , dumpStateSpace = Nothing }
 
 optionDescr :: [OptDescr (Options -> Options)]
@@ -90,6 +92,8 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
                "A list of merge nodes to use."
               ,Option [] ["non-incremental"]
                (NoArg (\opt -> opt { incremental = False })) "Use non-incremental solving."
+              ,Option [] ["check-completeness"]
+               (NoArg (\opt -> opt { completeness = True })) "Check if the completeness threshhold of the model has been reached."
               ,Option [] ["unwind-limit"]
                (ReqArg (\str opt -> opt { unwindLimit = Just (read str) }) "n")
                "Limit the number of times a loop can be unwound."

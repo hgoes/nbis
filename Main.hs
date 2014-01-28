@@ -116,13 +116,13 @@ main = do
           Rivers -> do
             case dumpStateSpace opts of
               Just dumpFile -> do
-                (result,info) <- contextQueueRun (incremental opts)
+                (result,info) <- contextQueueRun (incremental opts) (completeness opts)
                                  (Proxy::Proxy (RiverMemory Integer Integer))
                                  (Proxy::Proxy (Gr.Gr BlkInfo ())) cfg (entryPoint opts)
                 liftIO $ writeFile dumpFile (Gr.graphviz' info)
                 return result
               Nothing -> do
-                (result,_) <- contextQueueRun (incremental opts)
+                (result,_) <- contextQueueRun (incremental opts) (completeness opts)
                               (Proxy::Proxy (RiverMemory Integer Integer))
                               (Proxy::Proxy ()) cfg (entryPoint opts)
                 return result

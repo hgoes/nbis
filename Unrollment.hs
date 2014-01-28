@@ -292,7 +292,8 @@ explicitMergePointConfig entry prog merges selectErr
                                   Just (_,blk_info) -> (blockInfoFun blk_info,
                                                         blockInfoBlk blk_info,
                                                         blockInfoSubBlk blk_info)
-                              | (fun,blk,sblk) <- merges ]) selectErr
+                                  Nothing -> error $ "Merge node "++show m++" not found."
+                              | m@(fun,blk,sblk) <- merges ]) selectErr
 
 mergePointConfig :: (MemoryModel mem mloc ptr,Ord ptr,Enum ptr,Enum mloc)
                     => String -> ProgDesc -> ([[Gr.Node]] -> [Gr.Node]) -> (ErrorDesc -> Bool)
@@ -1215,38 +1216,55 @@ checkForErrors cfg = do
 
 contextQueueRun :: (UnrollInfo a,MemoryModel mem Integer Integer)
                    => Bool
+                   -> Bool
                    -> Proxy mem
                    -> Proxy a
                    -> UnrollConfig mem Integer Integer
                    -> String
                    -> SMT (Maybe ([(String,[BitVector BVUntyped])],[ErrorDesc]),a)
-contextQueueRun incremental (_::Proxy mem) (_::Proxy a) cfg entry = do
+contextQueueRun incremental complCheck (_::Proxy mem) (_::Proxy a) cfg entry = do
   (start,env :: UnrollEnv a mem Integer Integer) <- startingContext cfg entry
   let lvl@(minN,minB) = getMinBudget cfg start
-  (res,nenv) <- runStateT (contextQueueCheck incremental 0 True False cfg lvl lvl [(start,minN,minB)]) env
+  (res,nenv) <- runStateT (contextQueueCheck incremental complCheck True False cfg lvl lvl [(start,minN,minB)]) env
   return (res,unrollInfo nenv)
 
 contextQueueCheck :: (UnrollInfo a,MemoryModel mem mloc ptr,Eq mloc,Eq ptr,Enum mloc,Enum ptr)
-                     => Bool -> Integer -> Bool -> Bool
+                     => Bool -> Bool -> Bool -> Bool
                      -> UnrollConfig mem mloc ptr -> (NodeId,UnrollBudget)
                      -> (NodeId,UnrollBudget)
                      -> UnrollQueue a mloc ptr
                      -> UnrollMonad a mem mloc ptr (Maybe ([(String,[BitVector BVUntyped])],
                                                            [ErrorDesc]))
-contextQueueCheck incremental n isFirst mustCheck cfg lastLvl lvl queue = do
+contextQueueCheck incremental complCheck isFirst mustCheck cfg lastLvl lvl queue = do
   --liftIO $ putStrLn $ "Depth: "++show n++" "++show (length queue,length $ realizationQueue $ head queue)
   res <- contextQueueStep incremental isFirst cfg lvl queue
   case res of
     Nothing -> if mustCheck
-               then checkForErrors cfg
+               then (do
+                        assertProxies
+                        checkForErrors cfg)
                else return Nothing
-    Just (nlvl,nqueue) -> if unrollPerformCheck cfg lastLvl nlvl
-                          then (do
-                                   err <- checkForErrors cfg
-                                   case err of
-                                     Just err' -> return $ Just err'
-                                     Nothing -> contextQueueCheck incremental (n+1) False False cfg nlvl nlvl nqueue)
-                          else contextQueueCheck incremental (n+1) False True cfg lastLvl nlvl nqueue
+    Just (nlvl,nqueue)
+      -> if unrollPerformCheck cfg lastLvl nlvl
+         then (do
+                  lift push
+                  assertProxies
+                  err <- checkForErrors cfg
+                  case err of
+                    Just err' -> do
+                      lift pop
+                      return $ Just err'
+                    Nothing -> if complCheck
+                               then (do
+                                        compl <- lift $ checkCompleteness nqueue
+                                        lift pop
+                                        if compl
+                                          then return Nothing
+                                          else contextQueueCheck incremental complCheck False False cfg nlvl nlvl nqueue)
+                               else (do
+                                        lift pop
+                                        contextQueueCheck incremental complCheck False False cfg nlvl nlvl nqueue))
+         else contextQueueCheck incremental complCheck False True cfg lastLvl nlvl nqueue
 
 getMinBudget :: UnrollConfig mem mloc ptr -> UnrollContext a mloc ptr -> (NodeId,UnrollBudget)
 getMinBudget cfg ctx = minimumBy (unrollDynamicOrder cfg)
@@ -1380,3 +1398,13 @@ getInstructionNumbers gr
       = getNums'' (Map.insert instr num mp) instrs rest
     getNums'' mp (_:instrs) rest
       = getNums'' mp instrs rest
+
+-- | Check whether the unrollment is complete, i.e. no active edge is actually
+--   reachable.
+checkCompleteness :: UnrollQueue a mloc ptr -> SMT Bool
+checkCompleteness queue = stack $ do
+  assert $ app or' [ boolValValue cond
+                   | (ctx,_,_) <- queue
+                   , edge <- (realizationQueue ctx)++(outgoingEdges ctx)
+                   , (_,_,_,cond,_,_,_) <- edgeConds edge ]
+  fmap not checkSat
