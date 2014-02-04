@@ -3,7 +3,7 @@ Version:	0.1
 Description:	A model checker for LLVM code
 License:	GPL
 License-File:	LICENSE
-Author:		Henning Günther <guenther@iti.cs.tu-bs.de>
+Author:		Henning Günther <guenther@forsyte.at>
 Build-Type:	Custom
 Category:	Testing
 Cabal-Version:	>= 1.2
