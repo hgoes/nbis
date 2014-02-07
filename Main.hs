@@ -71,8 +71,8 @@ main = do
   let program = foldl1 mergePrograms progs
       selectErr = \err -> List.elem err (checkErrors opts)
       cfg = case manualMergeNodes opts of
-        Nothing -> defaultConfig (entryPoint opts) program selectErr
-        Just nodes -> explicitMergePointConfig (entryPoint opts) program nodes selectErr
+        Nothing -> defaultConfig (entryPoint opts) program selectErr (bitblast opts)
+        Just nodes -> explicitMergePointConfig (entryPoint opts) program nodes selectErr (bitblast opts)
       --cfg = randomMergePointConfig (entryPoint opts) program gen
       --cfg = noMergePointConfig (entryPoint opts) program
       cfg1 = case unwindLimit opts of

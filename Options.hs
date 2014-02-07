@@ -40,6 +40,7 @@ data Options = Options
                , recursionLimit :: Maybe Integer
                , incremental :: Bool
                , completeness :: Bool
+               , bitblast :: Bool
                , dumpStateSpace :: Maybe String
                } deriving (Eq,Ord,Show)
 
@@ -60,6 +61,7 @@ defaultOptions = Options { action = Verify
                          , recursionLimit = Nothing
                          , incremental = True
                          , completeness = False
+                         , bitblast = False
                          , dumpStateSpace = Nothing }
 
 optionDescr :: [OptDescr (Options -> Options)]
@@ -94,6 +96,8 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
                (NoArg (\opt -> opt { incremental = False })) "Use non-incremental solving."
               ,Option [] ["check-completeness"]
                (NoArg (\opt -> opt { completeness = True })) "Check if the completeness threshhold of the model has been reached."
+              ,Option [] ["bitblast"]
+               (NoArg (\opt -> opt { bitblast = True })) "Use the bitblast strategy for Z3."
               ,Option [] ["unwind-limit"]
                (ReqArg (\str opt -> opt { unwindLimit = Just (read str) }) "n")
                "Limit the number of times a loop can be unwound."

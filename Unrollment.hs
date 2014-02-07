@@ -109,6 +109,7 @@ data UnrollConfig mem mloc ptr
               , unrollCheckedErrors :: ErrorDesc -> Bool
               , unrollLoopHeaders :: Map (Ptr BasicBlock) LoopDesc
               , unrollInstrNums :: Map (Ptr Instruction) Integer
+              , unrollCheckSat :: SMT Bool
               }
 
 data DistanceInfo = DistInfo { distanceToReturn :: Maybe Integer
@@ -261,25 +262,29 @@ nodeIdRecursionCount = count' Map.empty
 
 defaultConfig :: (MemoryModel mem mloc ptr,Ord ptr,Enum ptr,Enum mloc)
                  => String -> ProgDesc -> (ErrorDesc -> Bool)
+                 -> Bool
                  -> UnrollConfig mem mloc ptr
-defaultConfig entr desc selectErr = mergePointConfig entr desc safeMergePoints selectErr
+defaultConfig entr desc = mergePointConfig entr desc safeMergePoints
 
 randomMergePointConfig :: (MemoryModel mem mloc ptr,Ord ptr,Enum ptr,Enum mloc,RandomGen g)
                           => String -> ProgDesc -> g -> (ErrorDesc -> Bool)
+                          -> Bool
                           -> UnrollConfig mem mloc ptr
-randomMergePointConfig entr desc gen selectErr
-  = mergePointConfig entr desc (randomMergePoints gen) selectErr
+randomMergePointConfig entr desc gen
+  = mergePointConfig entr desc (randomMergePoints gen)
 
 noMergePointConfig :: (MemoryModel mem mloc ptr,Ord ptr,Enum ptr,Enum mloc)
                       => String -> ProgDesc -> (ErrorDesc -> Bool)
+                      -> Bool
                       -> UnrollConfig mem mloc ptr
-noMergePointConfig entr desc selectErr = mergePointConfig entr desc (const []) selectErr
+noMergePointConfig entr desc = mergePointConfig entr desc (const [])
 
 explicitMergePointConfig :: (MemoryModel mem mloc ptr,Ord ptr,Enum ptr,Enum mloc)
                             => String -> ProgDesc -> [(String,String,Integer)]
                             -> (ErrorDesc -> Bool)
+                            -> Bool
                             -> UnrollConfig mem mloc ptr
-explicitMergePointConfig entry prog merges selectErr
+explicitMergePointConfig entry prog merges selectErr bitBlast
   = mergePointConfig' entry prog
     (\prog_gr -> Set.fromList [ case List.find (\(nd,blk_info)
                                                 -> if blockInfoFun blk_info==fun &&
@@ -293,22 +298,25 @@ explicitMergePointConfig entry prog merges selectErr
                                                         blockInfoBlk blk_info,
                                                         blockInfoSubBlk blk_info)
                                   Nothing -> error $ "Merge node "++show m++" not found."
-                              | m@(fun,blk,sblk) <- merges ]) selectErr
+                              | m@(fun,blk,sblk) <- merges ]) selectErr bitBlast
 
 mergePointConfig :: (MemoryModel mem mloc ptr,Ord ptr,Enum ptr,Enum mloc)
                     => String -> ProgDesc -> ([[Gr.Node]] -> [Gr.Node]) -> (ErrorDesc -> Bool)
+                    -> Bool
                     -> UnrollConfig mem mloc ptr
-mergePointConfig entry prog select selectErr
+mergePointConfig entry prog select selectErr bitBlast
   = mergePointConfig' entry prog
     (\prog_gr -> Set.fromList $ fmap (\nd -> let Just inf = Gr.lab (blockGraph prog_gr) nd
                                              in (blockInfoFun inf,blockInfoBlk inf,blockInfoSubBlk inf)) $
-                 select (possibleMergePoints (blockGraph prog_gr))) selectErr
+                 select (possibleMergePoints (blockGraph prog_gr))) selectErr bitBlast
 
 mergePointConfig' :: (MemoryModel mem mloc ptr,Ord ptr,Enum ptr,Enum mloc)
                      => String -> ProgDesc
                      -> (BlockGraph mem mloc ptr -> Set (String,Ptr BasicBlock,Integer))
-                     -> (ErrorDesc -> Bool) -> UnrollConfig mem mloc ptr
-mergePointConfig' entry prog@(_,funs,globs,ptrWidth,alltps,structs) select selectErr
+                     -> (ErrorDesc -> Bool)
+                     -> Bool
+                     -> UnrollConfig mem mloc ptr
+mergePointConfig' entry prog@(_,funs,globs,ptrWidth,alltps,structs) select selectErr bitBlast
   = UnrollCfg { unrollPointerWidth = ptrWidth
               , unrollStructs = structs
               , unrollTypes = alltps
@@ -332,6 +340,12 @@ mergePointConfig' entry prog@(_,funs,globs,ptrWidth,alltps,structs) select selec
               , unrollCheckedErrors = selectErr
               , unrollLoopHeaders = loopHdrs
               , unrollInstrNums = getInstructionNumbers prog_gr
+              , unrollCheckSat = if bitBlast
+                                 then checkSatUsing (AndThen [UsingParams (CustomTactic "simplify") []
+                                                             ,UsingParams (CustomTactic "tseitin-cnf") []
+                                                             ,UsingParams (CustomTactic "bit-blast") []
+                                                             ,UsingParams (CustomTactic "sat") []])
+                                 else checkSat
               }
   where
     blk_mp = Map.fromList [ ((fn,blk,sblk),(nd,instrs))
@@ -1191,10 +1205,11 @@ checkForErrors cfg = do
   
   lift $ stack $ do
     assert $ app or' [ cond | (desc,cond) <- bugs ]
-    {-res <- checkSatUsing (AndThen [UsingParams (CustomTactic "tseitin-cnf") []
+    {-res <- checkSatUsing (AndThen [UsingParams (CustomTactic "simplify") []
+                                  ,UsingParams (CustomTactic "tseitin-cnf") []
                                   ,UsingParams (CustomTactic "bit-blast") []
                                   ,UsingParams (CustomTactic "sat") []])-}
-    res <- checkSat
+    res <- unrollCheckSat cfg
     if res
       then (do
                outp <- mapM (\(name,cond,args) -> do
@@ -1256,7 +1271,7 @@ contextQueueCheck incremental complCheck isFirst mustCheck cfg lastLvl lvl queue
                       return $ Just err'
                     Nothing -> if complCheck
                                then (do
-                                        compl <- lift $ checkCompleteness nqueue
+                                        compl <- lift $ checkCompleteness cfg nqueue
                                         lift pop
                                         if compl
                                           then return Nothing
@@ -1401,10 +1416,15 @@ getInstructionNumbers gr
 
 -- | Check whether the unrollment is complete, i.e. no active edge is actually
 --   reachable.
-checkCompleteness :: UnrollQueue a mloc ptr -> SMT Bool
-checkCompleteness queue = stack $ do
+checkCompleteness :: UnrollConfig mem mloc ptr -> UnrollQueue a mloc ptr -> SMT Bool
+checkCompleteness cfg queue = stack $ do
   assert $ app or' [ boolValValue cond
                    | (ctx,_,_) <- queue
                    , edge <- (realizationQueue ctx)++(outgoingEdges ctx)
                    , (_,_,_,cond,_,_,_) <- edgeConds edge ]
-  fmap not checkSat
+  fmap not (unrollCheckSat cfg)
+  {-fmap not $ checkSatUsing (AndThen [UsingParams (CustomTactic "simplify") []
+                                    ,UsingParams (CustomTactic "tseitin-cnf") []
+                                    ,UsingParams (CustomTactic "bit-blast") []
+                                    ,UsingParams (CustomTactic "sat") []])-}
+
