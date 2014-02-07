@@ -2,6 +2,7 @@
 module Unrollment where
 
 import Language.SMTLib2
+import Language.SMTLib2.Pipe (renderExpr)
 import Language.SMTLib2.Strategy
 import LLVM.FFI.BasicBlock (BasicBlock)
 import LLVM.FFI.Instruction (Instruction)
@@ -476,15 +477,17 @@ dumpMergeValue :: MergeValueRef ptr -> UnrollMonad a mem mloc ptr String
 dumpMergeValue ref = do
   res <- liftIO $ readIORef ref
   case res of
-    MergedValue ext v -> return $ "Merged "++
-                         (if ext then "extensible " else "")++
-                         (case v of
-                             Left v' -> show v'
-                             Right _ -> "pointer")
+    MergedValue ext v -> do
+      str <- case v of
+        Left v' -> lift $ renderValue v'
+        Right _ -> return "pointer"
+      return $ "Merged "++
+        (if ext then "extensible " else "")++str
     UnmergedValue name ext vals -> do
       rvals <- mapM (\(ref,cond) -> do
                         rval <- dumpMergeValue ref
-                        return $ show cond++" ~> "++rval) vals
+                        condStr <- lift $ renderBoolValue cond
+                        return $ condStr++" ~> "++rval) vals
       return $ "Unmerged "++
         (if ext then "extensible " else "")++
         ("{"++List.intercalate ", " rvals++"}")
@@ -578,7 +581,9 @@ mergeValue val cond (MergedValue extensible mval) = do
   case (rval,mval) of
     (Left v1,Left v2) -> if extensible
                          then lift $ assert $ (boolValValue cond) .=>. (valEq v2 v1)
-                         else error $ "Merging into non-extensible variable "++show v2
+                         else (do
+                                  v2str <- lift $ renderValue v2
+                                  error $ "Merging into non-extensible variable "++v2str)
     (Right p1,Right p2) -> do
       (env :: UnrollEnv a mem mloc ptr) <- get
       ((),nmem) <- lift $ addInstruction (unrollMemory env) cond
@@ -1025,7 +1030,8 @@ stepUnrollCtx isFirst enqueue cfg cur = do
           if isComplexExpr optAct
             then lift $ defConstNamed ("act_"++(nodeIdFunction trg)++"_"++blk_name) optAct
             else (do
-                     lift $ comment $ "act_"++(nodeIdFunction trg)++"_"++blk_name++" = "++show optAct
+                     optActStr <- lift $ renderExpr optAct
+                     lift $ comment $ "act_"++(nodeIdFunction trg)++"_"++blk_name++" = "++optActStr
                      return optAct)
         _ -> lift $ defConstNamed ("act_"++(nodeIdFunction trg)++"_"++blk_name)
              (app or' [ boolValValue act | (_,_,_,act,_,_,_) <- inc ])

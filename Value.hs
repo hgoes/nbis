@@ -5,6 +5,7 @@ import TypeDesc
 import SMTHelper
 
 import Language.SMTLib2 as SMT2
+import Language.SMTLib2.Pipe (renderExpr)
 import Data.Typeable
 import Data.Bits as Bits
 import LLVM.FFI.Instruction
@@ -20,14 +21,14 @@ data BoolVal = ConstBool Bool
              | DirectBool (SMTExpr Bool)
              deriving (Typeable,Eq)
 
-instance Show Val where
-  show (ConstValue c _) = show c
-  show (DirectValue dv) = show dv
-  show (ConditionValue c _) = show c
+renderValue :: Val -> SMT String
+renderValue (ConstValue c _) = return $ show c
+renderValue (DirectValue dv) = renderExpr dv
+renderValue (ConditionValue c _) = renderBoolValue c
 
-instance Show BoolVal where
-  show (ConstBool c) = show c
-  show (DirectBool v) = show v
+renderBoolValue :: BoolVal -> SMT String
+renderBoolValue (ConstBool c) = return $ show c
+renderBoolValue (DirectBool v) = renderExpr v
 
 valValue :: Val -> SMTExpr (BitVector BVUntyped)
 valValue (ConstValue x w) = constantAnn (BitVector x) w

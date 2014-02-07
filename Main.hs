@@ -97,7 +97,8 @@ main = do
       _ -> id
     actVerify opts cfg = initSolver opts $ do
       backend <- case solver opts of
-            SMTLib2Solver name -> fmap AnyBackend $ createSMTPipe name
+            SMTLib2Solver name -> case words name of
+              solv:args -> fmap AnyBackend $ createSMTPipe solv args
 #ifdef WITH_STP
             STPSolver -> fmap AnyBackend stpBackend
 #endif
@@ -108,7 +109,7 @@ main = do
             YicesSolver -> fmap AnyBackend yicesBackend
 #endif
 
-      bug <- withSMTBackend (optimizeBackend (backend::AnyBackend IO)) $ do
+      bug <- withSMTBackendExitCleanly (optimizeBackend (backend::AnyBackend IO)) $ do
         setLogic "QF_ABV"
         setOption (PrintSuccess False)
         setOption (ProduceModels True)

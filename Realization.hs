@@ -112,7 +112,8 @@ reDefineVar instr name genval = Realization $ \info -> let (info1,rgen) = runRea
                                                                             in if valIsComplex nval
                                                                                then lift $ fmap Left $ valCopy name nval
                                                                                else (do
-                                                                                        lift $ comment $ name++" = "++show nval
+                                                                                        nvalStr <- lift $ renderValue nval
+                                                                                        lift $ comment $ name++" = "++nvalStr
                                                                                         return $ Left nval)
                                                                Right ptr -> return (Right ptr)
                                                              modify (\st -> st { reLocals = Map.insert instr nval (reLocals st) })
@@ -250,7 +251,6 @@ argToExpr expr = reInject getType result
 data BlockFinalization ptr = Jump (CondList (Ptr BasicBlock))
                            | Return (Maybe (Either Val ptr))
                            | Call String [Either Val ptr] (Ptr Instruction)
-                           deriving (Show)
 
 preRealize :: Realization mem mloc ptr a -> (RealizationInfo,RealizationMonad mem mloc ptr a)
 preRealize r = runRealization r (RealizationInfo Set.empty Map.empty Set.empty Set.empty Set.empty Set.empty False [])
