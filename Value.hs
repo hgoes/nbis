@@ -15,11 +15,11 @@ data Val = ConstValue { asConst :: Integer
          | DirectValue { asValue :: SMTExpr (BitVector BVUntyped) }
          | ConditionValue { asCondition :: BoolVal
                           , conditionWidth :: Integer }
-         deriving (Typeable,Eq)
+         deriving (Typeable,Eq,Show)
 
 data BoolVal = ConstBool Bool
              | DirectBool (SMTExpr Bool)
-             deriving (Typeable,Eq)
+             deriving (Typeable,Eq,Show)
 
 renderValue :: Val -> SMT String
 renderValue (ConstValue c _) = return $ show c
