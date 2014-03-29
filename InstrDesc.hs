@@ -14,6 +14,7 @@ import LLVM.FFI.Constant
 import LLVM.FFI.APInt
 import LLVM.FFI.Use
 import LLVM.FFI.Pass
+import LLVM.FFI.Metadata
 import qualified Data.Map as Map
 import Data.Map (Map)
 import qualified Data.Set as Set
