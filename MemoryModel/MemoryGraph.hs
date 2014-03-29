@@ -5,7 +5,6 @@ import MemoryModel
 import TypeDesc
 import Value
 
-import Language.SMTLib2
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -93,7 +92,7 @@ connectPointer cond pSrc pTrg gr
     = gr { ptrPhisBySrc = Map.insertWith Map.union pSrc (Map.singleton pTrg cond) (ptrPhisBySrc gr)
          , ptrPhisByTrg = Map.insertWith Map.union pTrg (Map.singleton pSrc cond) (ptrPhisByTrg gr) }
 
-addGraphInstruction :: (Ord mloc,Ord ptr) => BoolVal -> MemoryInstruction mloc ptr res -> res
+addGraphInstruction :: (Ord mloc,Ord ptr,Show mloc,Show ptr) => BoolVal -> MemoryInstruction mloc ptr res -> res
                   -> MemoryGraph mloc ptr -> MemoryGraph mloc ptr
 addGraphInstruction _ (MINull tp ptr) () gr
   = gr { nullsByPtr = Map.insert ptr tp (nullsByPtr gr) }
@@ -148,3 +147,10 @@ addGraphInstruction act (MICopy mfrom ptrFrom ptrTo opts mto) () gr
 addGraphInstruction act (MIFree mfrom ptr mto) () gr
   = gr { freesBySrc = Map.insertWith Map.union mfrom (Map.singleton mto ptr) (freesBySrc gr)
        , freesByPtr = Map.insertWith Set.union ptr (Set.singleton (mfrom,mto)) (freesByPtr gr) }
+addGraphInstruction act (MIConnect mfrom mto) () gr
+  = gr { locPhisBySrc = Map.insertWith Map.union mfrom (Map.singleton mto act) (locPhisBySrc gr)
+       , locPhisByTrg = Map.insertWith Map.union mto (Map.singleton mfrom act) (locPhisByTrg gr) }
+addGraphInstruction act (MIPtrConnect pfrom pto) () gr
+  = gr { ptrPhisBySrc = Map.insertWith Map.union pfrom (Map.singleton pto act) (ptrPhisBySrc gr)
+       , ptrPhisByTrg = Map.insertWith Map.union pto (Map.singleton pfrom act) (ptrPhisByTrg gr) }
+addGraphInstruction _ instr _ _ = error $ "MemoryGraph: Unimplemented instruction: "++show instr
