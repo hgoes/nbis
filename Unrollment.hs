@@ -1,4 +1,4 @@
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleContexts,ScopedTypeVariables #-}
 module Unrollment where
 
 import Language.SMTLib2
@@ -875,10 +875,17 @@ stepUnrollCtx isFirst enqueue cfg cur = do
           newInfo' = foldl (\info srcNd -> unrollInfoConnect info srcNd newNodeInfo) newInfo
                      [ srcNd | (_,_,_,_,_,_,Just srcNd) <- inc ]
       put $ env { unrollInfo = newInfo' }
-      (act,inp,inp',phis,start_loc,prev_locs,merge_node,mem_instr,mem_eqs)
+      (act,inp,inp',phis,start_loc,prev_locs,merge_node,mem_eqs)
         <- if mergeNodeCreate
            then createMerge blk_name info newNodeInfo inc
            else createNormal blk_name info trg inc
+      if isFirst
+        then (do
+                 env <- get
+                 let (_,prx) = unrollProxies env
+                 nmem <- lift $ makeEntry prx (unrollMemory env) start_loc
+                 put $ env { unrollMemory = nmem })
+        else return ()
       env <- get
       (fin,nst,outp) <- lift $ postRealize (unrollMemory env)
                         (RealizationEnv { reFunction = nodeIdFunction trg
@@ -914,13 +921,6 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                  (cur1 { nextMergeNodes = case merge_node of
                             Nothing -> nextMergeNodes cur
                             Just mn -> Map.insert trg mn (nextMergeNodes cur) })
-      if isFirst
-        then (do
-                 env <- get
-                 let (_,prx) = unrollProxies env
-                 nmem <- lift $ makeEntry prx (unrollMemory env) start_loc
-                 put $ env { unrollMemory = nmem })
-        else return ()
       mapM_ (\(cond,src,trg) -> do
                 (env :: UnrollEnv a mem mloc ptr) <- get
                 ((),nmem) <- lift $ addInstruction (unrollMemory env) cond
@@ -1020,8 +1020,9 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                                      (unrollMergeNodes env)
                 , unrollNextMergeNode = succ $ unrollNextMergeNode env }
       return (act_static,inp,inputs,phis,loc,[loc],
-              Just $ unrollNextMergeNode env,[],[ (act',loc',loc)
-                                                | (_,_,_,act',_,loc',_) <- inc ])
+              Just $ unrollNextMergeNode env,[ (act',loc',loc)
+                                             | (_,_,_,act',_,loc',_) <- inc ])
+
     createNormal blk_name info trg inc = do
       mergedInps <- mergeValueStacks False [ (cond,mp) | (_,_,_,cond,mp,_,_) <- inc ]
       act <- case inc of
@@ -1038,16 +1039,21 @@ stepUnrollCtx isFirst enqueue cfg cur = do
       inp <- mapM getMergeValue (Map.intersection (case mergedInps of
                                                       h:_ -> h) $
                                  rePossibleInputs info)
-      (start_loc,prev_locs,mphis) <- case inc of
+      (start_loc,prev_locs) <- case inc of
         (_,_,_,_,_,loc',_):inc'
           -> if all (\(_,_,_,_,_,loc'',_) -> loc'==loc'') inc'
-             then return (loc',[loc'],[])
+             then return (loc',[loc'])
              else (do
-                      env <- get
+                      (env::UnrollEnv a mem mloc ptr) <- get
                       let loc'' = unrollNextMem env
-                      put $ env { unrollNextMem = succ loc'' }
-                      return (loc'',[ loc''' | (_,_,_,_,_,loc''',_) <- inc ],
-                              [MIPhi [ (act'',loc''') | (_,_,_,act'',_,loc''',_) <- inc ] loc'']))
+                      ((),nmem) <- lift $ addInstruction (unrollMemory env) (DirectBool act)
+                                   (MIPhi [ (act'',loc''')
+                                          | (_,_,_,act'',_::[ValueMap ptr],loc''',_) <- inc
+                                          ] loc''::MemoryInstruction mloc ptr ())
+                                   Map.empty
+                      put $ env { unrollNextMem = succ loc''
+                                , unrollMemory = nmem }
+                      return (loc'',[ loc''' | (_,_,_,_,_,loc''',_) <- inc ]))
       phis <- mapM (\blk' -> case [ boolValValue cond
                                   | (_,blk'',_,cond,_,_,_) <- inc, blk''==blk' ] of
                        [] -> return Nothing
@@ -1059,8 +1065,7 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                          return $ Just (blk',phi)
                    ) (Set.toList $ rePossiblePhis info)
       return (act,inp,mergedInps,
-              Map.fromList $ catMaybes phis,start_loc,prev_locs,Nothing,
-              mphis,[])
+              Map.fromList $ catMaybes phis,start_loc,prev_locs,Nothing,[])
     getOutEdges trg act lvl curMLoc new_vars inp' newNodeInfo nCreatedMerges (Jump trgs)
       = return [ Edge { edgeTarget = nodeId
                       , edgeConds = [(nodeIdFunction trg,
