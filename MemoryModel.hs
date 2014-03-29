@@ -49,7 +49,7 @@ data CopyOptions = CopyOpts { copySizeLimit :: Maybe Val -- ^ A size in bytes af
                             , copyMayOverlap :: Bool     -- ^ Are source and destination allowed to overlap?
                             } deriving (Show,Eq)
 
-class MemoryModel mem mloc ptr where
+class (Show mloc,Show ptr) => MemoryModel mem mloc ptr where
   memNew :: Proxy mloc
             -> Integer      -- ^ Pointer width
             -> Set TypeDesc      -- ^ A set of all types occuring in the program
@@ -138,3 +138,112 @@ dynNumExpr width (Left x) = constantAnn (BitVector x) width
 dynNumExpr width (Right x) = case compare width (extractAnnotation x) of
   EQ -> x
   GT -> bvconcat (constantAnn (BitVector 0::BitVector BVUntyped) (width - (extractAnnotation x))) x
+
+instance (Show m,Show p) => Show (MemoryInstruction m p res) where
+  showsPrec p (MIMerge mloc)
+    = showParen (p>10) (showString "MIMerge " .
+                        showsPrec 11 mloc)
+  showsPrec p (MIConnect m1 m2)
+    = showParen (p>10) (showString "MIConnect " .
+                        showsPrec 11 m1 .
+                        showString " " .
+                        showsPrec 11 m2)
+  showsPrec p (MIPtrConnect p1 p2)
+    = showParen (p>10) (showString "MIPtrConnect " .
+                        showsPrec 11 p1 .
+                        showString " " .
+                        showsPrec 11 p2)
+  showsPrec p (MINull tp ptr)
+    = showParen (p>10) (showString "MINull " .
+                        showsPrec 11 tp .
+                        showString " " .
+                        showsPrec 11 ptr)
+  showsPrec p (MIAlloc mfrom tp sz ptr mto)
+    = showParen (p>10) (showString "MIAlloc " .
+                        showsPrec 11 mfrom .
+                        showString " " .
+                        showsPrec 11 tp .
+                        showString " " .
+                        showsPrec 11 sz .
+                        showString " " .
+                        showsPrec 11 ptr .
+                        showString " " .
+                        showsPrec 11 mto)
+  showsPrec p (MILoad mfrom ptr sz)
+    = showParen (p>10) (showString "MILoad " .
+                        showsPrec 11 mfrom .
+                        showString " " .
+                        showsPrec 11 ptr .
+                        showString " " .
+                        showsPrec 11 sz)
+  showsPrec p (MILoadPtr mfrom pfrom pto)
+    = showParen (p>10) (showString "MILoadPtr " .
+                        showsPrec 11 mfrom .
+                        showString " " .
+                        showsPrec 11 pfrom .
+                        showString " " .
+                        showsPrec 11 pto)
+  showsPrec p (MIStore mfrom val ptr mto)
+    = showParen (p>10) (showString "MIStore " .
+                        showsPrec 11 mfrom .
+                        showString " " .
+                        showsPrec 11 val .
+                        showString " " .
+                        showsPrec 11 ptr .
+                        showString " " .
+                        showsPrec 11 mto)
+  showsPrec p (MIStorePtr mfrom pfrom pto mto)
+    = showParen (p>10) (showString "MIStorePtr " .
+                        showsPrec 11 mfrom .
+                        showString " " .
+                        showsPrec 11 pfrom .
+                        showString " " .
+                        showsPrec 11 pto .
+                        showString " " .
+                        showsPrec 11 mto)
+  showsPrec p (MICompare p1 p2)
+    = showParen (p>10) (showString "MICompare " .
+                        showsPrec 11 p1 .
+                        showString " " .
+                        showsPrec 11 p2)
+  showsPrec p (MISelect pfroms pto)
+    = showParen (p>10) (showString "MISelect " .
+                        showsPrec 11 pfroms .
+                        showString " " .
+                        showsPrec 11 pto)
+  showsPrec p (MICast tfrom tto pfrom pto)
+    = showParen (p>10) (showString "MICast " .
+                        showsPrec 11 tfrom .
+                        showString " " .
+                        showsPrec 11 tto .
+                        showString " " .
+                        showsPrec 11 pfrom .
+                        showString " " .
+                        showsPrec 11 pto)
+  showsPrec p (MIIndex tfrom tto idxs pfrom pto)
+    = showParen (p>10) (showString "MIIndex " .
+                        showsPrec 11 tfrom .
+                        showString " " .
+                        showsPrec 11 tto .
+                        showString " " .
+                        showsPrec 11 idxs .
+                        showString " " .
+                        showsPrec 11 pfrom .
+                        showString " " .
+                        showsPrec 11 pto)
+  showsPrec p (MIPhi conds mto)
+    = showParen (p>10) (showString "MIPhi " .
+                        showsPrec 11 conds .
+                        showString " " .
+                        showsPrec 11 mto)
+  showsPrec p (MICopy mfrom pfrom pto opts mto)
+    = showParen (p>10) (showString "MICopy " .
+                        showsPrec 11 mfrom .
+                        showString " " .
+                        showsPrec 11 pfrom .
+                        showString " " .
+                        showsPrec 11 pto .
+                        showString " " .
+                        showsPrec 11 opts .
+                        showString " " .
+                        showsPrec 11 mto)
