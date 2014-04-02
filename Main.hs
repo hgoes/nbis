@@ -21,6 +21,7 @@ import Language.SMTLib2.STP
 import Language.SMTLib2.Yices
 #endif
 import Language.SMTLib2.Internals.Optimize
+import Language.SMTLib2.Debug
 import qualified Data.Graph.Inductive as Gr
 import Data.Foldable (all)
 import Prelude hiding (mapM_,all)
@@ -90,26 +91,25 @@ main = do
     DumpCFG -> dumpBlockGraph cfg2
     DumpLLVM -> dumpProgram program
   where
-    initSolver opts = case solver opts of
-#ifdef WITH_YICES
-      YicesSolver -> withYices
-#endif
-      _ -> id
-    actVerify opts cfg = initSolver opts $ do
-      backend <- case solver opts of
-            SMTLib2Solver name -> case words name of
-              solv:args -> fmap AnyBackend $ createSMTPipe solv args
+    withBackend0,withBackend1 :: Options -> (forall b. SMTBackend b IO => b -> IO a) -> IO a
+    withBackend0 opts f = case solver opts of
+      SMTLib2Solver name -> case words name of
+        solv:args -> createSMTPipe solv args >>= f
 #ifdef WITH_STP
-            STPSolver -> fmap AnyBackend stpBackend
+      STPSolver -> stpBackend >>= f
 #endif
 #ifdef WITH_BOOLECTOR
-            BoolectorSolver -> fmap AnyBackend boolectorBackend
+      BoolectorSolver -> boolectorBackend >>= f
 #endif
 #ifdef WITH_YICES
-            YicesSolver -> fmap AnyBackend yicesBackend
+      YicesSolver -> withYices $ yicesBackend >>= f
 #endif
 
-      bug <- withSMTBackendExitCleanly (optimizeBackend (backend::AnyBackend IO)) $ do
+    withBackend1 opts f = if debugSMT opts
+                          then withBackend0 opts (\b -> f $ debugBackend b)
+                          else withBackend0 opts f
+    actVerify opts cfg = do
+      bug <- withBackend1 opts $ \b -> withSMTBackendExitCleanly (optimizeBackend b) $ do
         setLogic "QF_ABV"
         setOption (PrintSuccess False)
         setOption (ProduceModels True)

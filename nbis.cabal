@@ -31,7 +31,7 @@ Executable nbis
     MemoryModel.Plain
     --MemoryModel.Snow
     MemoryModel.Rivers
-  Build-Depends:	base,bindings-llvm,containers,mtl,smtlib2,fgl,tagged,random
+  Build-Depends:	base,bindings-llvm,containers,mtl,smtlib2,fgl,tagged,random,smtlib2-debug
   if flag(STP)
     Build-Depends: smtlib2-stp
     Cpp-Options: -DWITH_STP

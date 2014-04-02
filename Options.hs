@@ -42,6 +42,7 @@ data Options = Options
                , completeness :: Bool
                , bitblast :: Bool
                , dumpStateSpace :: Maybe String
+               , debugSMT :: Bool
                } deriving (Eq,Ord,Show)
 
 nbisInfo :: String
@@ -62,7 +63,8 @@ defaultOptions = Options { action = Verify
                          , incremental = True
                          , completeness = False
                          , bitblast = False
-                         , dumpStateSpace = Nothing }
+                         , dumpStateSpace = Nothing
+                         , debugSMT = False }
 
 optionDescr :: [OptDescr (Options -> Options)]
 optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoint = str }) "function") "Specify the main function to test"
@@ -112,6 +114,8 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
                (OptArg (\str opt -> opt { dumpStateSpace = case str of
                                              Nothing -> Just "state-space.dot"
                                              Just fname -> Just fname }) "file") "Dump the state space after verfication."
+              ,Option [] ["debug-smt"]
+               (NoArg (\opt -> opt { debugSMT = True })) "Dump the communication with the SMT solver to stderr."
               ,Option ['h'] ["help"] (NoArg (\opt -> opt { showHelp = True })) "Show this help."
               ]
 
