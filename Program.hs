@@ -36,6 +36,7 @@ import LLVM.FFI.SetVector
 import LLVM.FFI.StringRef
 import LLVM.FFI.Transforms.Scalar
 import LLVM.FFI.Transforms.IPO
+import LLVM.FFI.Transforms.Misc
 import LLVM.FFI.ArrayRef
 import LLVM.FFI.Loop
 import LLVM.FFI.CPP
@@ -102,7 +103,6 @@ passes :: String -> MVar (Map String ([LoopDesc],Maybe DomTree)) -> [APass]
 passes entry var
   = [APass createPromoteMemoryToRegisterPass
     ,APass createConstantPropagationPass
-    ,APass createSimplifyLibCallsPass
     ,APass createIndVarSimplifyPass
     ,APass createLoopSimplifyPass
     ,APass createCFGSimplificationPass
@@ -146,6 +146,7 @@ passes entry var
                            ) funs
                 putMVar var (Map.fromList loop_mp)
                 return False))
+    ,APass createInstructionNamerPass
     ]
 
 applyOptimizations :: Ptr Module -> String -> IO (Map String ([LoopDesc],Maybe DomTree))
