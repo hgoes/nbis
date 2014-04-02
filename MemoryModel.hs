@@ -1,4 +1,4 @@
-{-# LANGUAGE TypeFamilies,FlexibleContexts,MultiParamTypeClasses #-}
+{-# LANGUAGE TypeFamilies,FlexibleContexts,MultiParamTypeClasses,GADTs #-}
 module MemoryModel where
 
 import Language.SMTLib2

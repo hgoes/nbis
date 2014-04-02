@@ -39,9 +39,9 @@ data MemoryGraph mloc ptr
              , locPhisByTrg :: Map mloc (Map mloc BoolVal)
              , memSetsBySrc :: Map mloc (Map mloc (ptr,Val,Val,BoolVal))
              , memSetsByPtr :: Map ptr (Map (mloc,mloc) (Val,Val,BoolVal))
-             , memCopyBySrc :: Map mloc (Map mloc (ptr,ptr,CopyOptions))
-             , memCopyBySrcPtr :: Map ptr (Map (mloc,mloc) (ptr,CopyOptions))
-             , memCopyByTrgPtr :: Map ptr (Map (mloc,mloc) (ptr,CopyOptions))
+             , memCopyBySrc :: Map mloc (Map mloc (ptr,ptr,CopyOptions,BoolVal))
+             , memCopyBySrcPtr :: Map ptr (Map (mloc,mloc) (ptr,CopyOptions,BoolVal))
+             , memCopyByTrgPtr :: Map ptr (Map (mloc,mloc) (ptr,CopyOptions,BoolVal))
              , freesBySrc :: Map mloc (Map mloc ptr)
              , freesByPtr :: Map ptr (Set (mloc,mloc))
              }
@@ -140,10 +140,14 @@ addGraphInstruction act (MISet mfrom ptr val len mto) () gr
        , memSetsByPtr = Map.insertWith Map.union ptr (Map.singleton (mfrom,mto) (val,len,act))
                         (memSetsByPtr gr) }
 addGraphInstruction act (MICopy mfrom ptrFrom ptrTo opts mto) () gr
-  = gr { memCopyBySrc = Map.insertWith Map.union mfrom (Map.singleton mto (ptrFrom,ptrTo,opts))
+  = gr { memCopyBySrc = Map.insertWith Map.union mfrom (Map.singleton mto (ptrFrom,ptrTo,opts,act))
                         (memCopyBySrc gr)
-       , memCopyBySrcPtr = Map.insertWith Map.union ptrFrom (Map.singleton (mfrom,mto) (ptrTo,opts))
-                           (memCopyBySrcPtr gr) }
+       , memCopyBySrcPtr = Map.insertWith Map.union ptrFrom (Map.singleton (mfrom,mto) (ptrTo,opts,act))
+                           (memCopyBySrcPtr gr)
+       , memCopyByTrgPtr = Map.insertWith Map.union ptrTo
+                           (Map.singleton (mfrom,mto) (ptrFrom,opts,act))
+                           (memCopyByTrgPtr gr)
+       }
 addGraphInstruction act (MIFree mfrom ptr mto) () gr
   = gr { freesBySrc = Map.insertWith Map.union mfrom (Map.singleton mto ptr) (freesBySrc gr)
        , freesByPtr = Map.insertWith Set.union ptr (Set.singleton (mfrom,mto)) (freesByPtr gr) }

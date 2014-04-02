@@ -11,6 +11,7 @@ import Prelude hiding (foldl,foldl1,mapM,mapM_,sum,sequence,sequence_,concat,all
 import Data.List (genericLength,genericSplitAt)
 import qualified Data.List as List
 import Data.Monoid
+import Data.Proxy
 
 import Language.SMTLib2
 import MemoryModel
@@ -434,16 +435,21 @@ updateInstruction upd mem = do
                               )
                              ) Map.empty $
                   Map.difference (memSetsByPtr $ riverProgram mem) (newPtrReachability upd)
-      {-copyMp = Map.intersectionWithKey
-               (\ptrSrc copies nreach
-                -> let Just ptrSrcInfo = Map.lookup ptrSrc (riverPointers mem)
-                   in Map.foldlWithKey'
-                      (\(cupd,errs) (mfrom,mto) (ptrTrg,opts)
-                        -> let Just locFrom = Map.lookup mfrom (riverLocations mem)
-                               newObjs1 = Map.findWithDefault Map.empty mfrom (newObjects upd)
-                               (newObjs2,nerrs) = updateCopy 
-                                         ) (memCopyBySrcPtr $ riverProgram mem) (newPtrReachability upd)-}
-
+      copyMp = Map.intersectionWithKey
+               (\ptrTrg copies nreach
+                 -> let Just ptrTrgInfo = Map.lookup ptrTrg (riverPointers mem)
+                    in Map.foldlWithKey'
+                       (\(cupd,errs) (mfrom,mto) (ptrSrc,opts,act)
+                         -> let Just ptrSrcInfo = Map.lookup ptrSrc (riverPointers mem)
+                                Just locFrom = Map.lookup mfrom (riverLocations mem)
+                                newObjs1 = Map.findWithDefault Map.empty mfrom (newObjects upd)
+                                (newObjs2,nerrs) = updateCopyByTrg opts locFrom
+                                                   ptrSrcInfo ptrTrgInfo act nreach
+                            in (Map.insert mto (Map.union newObjs2 newObjs1) cupd,nerrs++errs)
+                       ) (Map.empty,[]) copies
+               ) (memCopyByTrgPtr $ riverProgram mem) (newPtrReachability upd)
+      (copyUpds,copyErrs) = Map.foldl' (\(cupd,cerr) (nupd,nerr) -> (Map.union cupd nupd,nerr++cerr)
+                                       ) (Map.empty,[]) copyMp
   return (allocUpds `mappend`
           (noUpdate { newPtrReachability = loadPtrUpds }) `mappend`
           (noUpdate { newObjects = storeUpds }) `mappend`
@@ -458,8 +464,9 @@ updateInstruction upd mem = do
           (noUpdate { newObjects = newObjsPhi }) `mappend`
           (noUpdate { newObjReachability = newObjReachPhi }) `mappend`
           (noUpdate { newObjects = setUpds }) `mappend`
-          (noUpdate { newObjects = noSetUpds }),
-          loadErrs'++loadPtrErrs++storeErrs++ptrStoreErrs++setErrs)
+          (noUpdate { newObjects = noSetUpds }) `mappend`
+          (noUpdate { newObjects = copyUpds }),
+          loadErrs'++loadPtrErrs++storeErrs++ptrStoreErrs++setErrs++copyErrs)
   where
     updateMem :: (SMTExpr Bool -> ObjectInfo -> Offset -> (Maybe ObjectInfo,a,[(ErrorDesc,SMTExpr Bool)]))
                  -> PointerInfo -> RiverLocation -> SMTExpr Bool
@@ -560,6 +567,28 @@ updateInstruction upd mem = do
                                              in (Just $ obj { objectRepresentation = obj' },(),errs')
                                          ) ptrInfo locFrom (boolValValue act) nreach
         in (newObjs,errs)
+    updateCopyByTrg :: CopyOptions -> RiverLocation -> PointerInfo -> PointerInfo -> BoolVal
+                    -> RiverReachability
+                    -> (Map RiverObjectRef ObjectInfo,[(ErrorDesc,SMTExpr Bool)])
+    updateCopyByTrg opts locFrom srcInfo trgInfo act nreach
+      = Map.foldlWithKey
+        (\(cupd,cerrs) srcRef srcOffs
+          -> let srcObj = (riverObjects locFrom)!srcRef
+             in case srcOffs of
+               Just srcOffs'
+                 -> Set.foldl
+                    (\(cupd,cerrs) srcOff
+                     -> let srcOff' = Offset { staticOffset = srcOff
+                                             , dynamicOffset = Nothing }
+                            (newObjs,_,errs) = updateMem
+                                               (\cond obj off
+                                                -> let (obj',errs') = copyObject (DirectBool cond)
+                                                                      opts (objectRepresentation srcObj) srcOff' (objectRepresentation obj) off
+                                                   in (Just $ obj { objectRepresentation = obj' },(),errs')
+                                               ) trgInfo locFrom (boolValValue act) nreach
+                        in (Map.union cupd newObjs,errs++cerrs)
+                    ) (cupd,cerrs) srcOffs'
+        ) (Map.empty,[]) (pointerReachability srcInfo) 
     {-updateCopyBySrc :: CopyOptions -> RiverLocation -> PointerInfo -> PointerInfo -> SMTExpr Bool
                     -> RiverReachability -> (Map RiverObjectRef ObjectInfo,[(ErrorDesc,SMTExpr Bool)])
     updateCopyBySrc opts locFrom ptrFrom ptrTo act nreach
@@ -1099,16 +1128,31 @@ setObject act byte (ConstValue len _) (StaticObject tp obj) off
       Nothing -> (StaticObject tp obj,[(Overrun,boolValValue act)])
       Just nobj -> (StaticObject tp nobj,[])
 
-copyObject :: SMTExpr Bool -> CopyOptions -> RiverObject -> Offset -> RiverObject -> Offset -> (RiverObject,[(ErrorDesc,SMTExpr Bool)])
+copyObject :: BoolVal -> CopyOptions -> RiverObject -> Offset -> RiverObject -> Offset -> (RiverObject,[(ErrorDesc,SMTExpr Bool)])
 copyObject act (CopyOpts { copySizeLimit = Just len
-                         , copyStopper = Nothing
-                         , copyMayOverlap = overlap }) (StaticObject _ objFrom) offFrom (StaticObject tp objTo) offTo
+                         , copyStopper = Nothing }) (StaticObject _ objFrom) offFrom (StaticObject tp objTo) offTo
   = case valConstInt len of
     Just len' -> case dynamicOffset offFrom of
       Nothing -> case dynamicOffset offTo of
         Nothing -> case modifyBVString (staticOffset offFrom*8) (len'*8) (\x -> (x,x)) objFrom of
           Just (copyBV,_) -> case modifyBVString (staticOffset offTo*8) (len'*8) (const ((),copyBV)) objTo of
             Just (_,resBV) -> (StaticObject tp resBV,[])
+copyObject act (CopyOpts { copySizeLimit = Just len
+                         , copyStopper = Nothing }) (DynamicObject _ arrSrc limSrc) offSrc (DynamicObject tp arrTrg limTrg) offTrg
+  = case valConstInt len of
+  Just len' -> case dynamicOffset offSrc of
+    Nothing -> case dynamicOffset offTrg of
+      Nothing
+        -> let (_,annSrc) = extractAnnotation arrSrc
+               (_,annTrg) = extractAnnotation arrTrg
+               nobj = foldl (\cobj (idxFrom,idxTo)
+                             -> store cobj (constantAnn (BitVector idxTo) 64)
+                                (select arrSrc (constantAnn (BitVector idxFrom) 64))
+                            ) arrTrg (List.genericTake len' $
+                                      zip [(staticOffset offSrc)..] [(staticOffset offTrg)..])
+           in if annSrc == annTrg
+              then (DynamicObject tp nobj limTrg,[])
+              else error "memcopy for different arrays not supported."
 
 checkLimits :: SMTExpr Bool -> Integer -> Integer -> Either Integer (SMTExpr (BitVector BVUntyped)) -> Offset -> [(ErrorDesc,SMTExpr Bool)]
 checkLimits act elSize idx_width limit off
