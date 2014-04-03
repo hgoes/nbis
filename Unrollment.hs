@@ -886,6 +886,13 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                  nmem <- lift $ makeEntry prx (unrollMemory env) start_loc
                  put $ env { unrollMemory = nmem })
         else return ()
+      mapM_ (\(cond,src,trg) -> do
+                (env :: UnrollEnv a mem mloc ptr) <- get
+                ((),nmem) <- lift $ addInstruction (unrollMemory env) cond
+                             (MIConnect src trg :: MemoryInstruction mloc ptr ())
+                             Map.empty
+                put $ env { unrollMemory = nmem }
+            ) mem_eqs
       env <- get
       (fin,nst,outp) <- lift $ postRealize (unrollMemory env)
                         (RealizationEnv { reFunction = nodeIdFunction trg
@@ -921,13 +928,6 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                  (cur1 { nextMergeNodes = case merge_node of
                             Nothing -> nextMergeNodes cur
                             Just mn -> Map.insert trg mn (nextMergeNodes cur) })
-      mapM_ (\(cond,src,trg) -> do
-                (env :: UnrollEnv a mem mloc ptr) <- get
-                ((),nmem) <- lift $ addInstruction (unrollMemory env) cond
-                             (MIConnect src trg :: MemoryInstruction mloc ptr ())
-                             Map.empty
-                put $ env { unrollMemory = nmem }
-            ) mem_eqs
       modify (\env -> env { unrollGuards = (reGuards outp)++(unrollGuards env)
                           , unrollWatchpoints = (reWatchpoints outp)++(unrollWatchpoints env)
                           })
