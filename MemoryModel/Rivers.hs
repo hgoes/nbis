@@ -655,9 +655,13 @@ restrictUpdate mem upd
 
 allocateObject :: RiverMemory mloc ptr -> String -> TypeDesc -> DynNum -> SMT RiverObject
 allocateObject mem name tp sz = case sz of
-  Left 1 -> do
-    v <- allocaSimple tp
-    return $ StaticObject tp v
+  Left 1 -> case tp of
+    ArrayType sz tp' -> do
+      v <- varNamedAnn name (64,bitWidth ((riverPointerWidth mem)*8) (riverStructs mem) tp')
+      return $ DynamicObject tp v (Left sz)
+    _ -> do
+      v <- allocaSimple tp
+      return $ StaticObject tp v
   Left n -> do
     v <- varNamedAnn name (64,bitWidth ((riverPointerWidth mem)*8) (riverStructs mem) tp)
     return $ DynamicObject tp v (Left n)
