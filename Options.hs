@@ -84,13 +84,17 @@ optionDescr = [Option ['e'] ["entry-point"] (ReqArg (\str opt -> opt { entryPoin
 #ifdef WITH_YICES
               ,Option [] ["yices"] (NoArg (\opt -> opt { solver = YicesSolver })) "Use the yices solver."
 #endif
-              ,Option [] ["check-errors"] (ReqArg (\str opt -> opt { checkErrors = fmap (\n -> case n of
-                                                                                            "user" -> Custom
-                                                                                            "null" -> NullDeref
-                                                                                            "invalid" -> Overrun
-                                                                                            "free-access" -> FreeAccess
-                                                                                            "double-free" -> DoubleFree
-                                                                                        ) (splitOptions str) }) "opts") "A comma seperated list of bug types which should be checked:\n  user - User defined assertions\n  null - Null pointer dereferentiations\n  invalid - Invalid memory accesses\n  free-access - Access to freed memory locations\n  double-free - Double frees of memory locations"
+              ,Option [] ["check-errors"] (ReqArg (\str opt -> let errs = splitOptions str
+                                                                in if "all" `elem` errs
+                                                                   then opt { checkErrors = [Custom,NullDeref,Overrun,FreeAccess,DoubleFree] }
+                                                                   else opt { checkErrors = fmap (\n -> case n of
+                                                                                                    "user" -> Custom
+                                                                                                    "null" -> NullDeref
+                                                                                                    "invalid" -> Overrun
+                                                                                                    "free-access" -> FreeAccess
+                                                                                                    "double-free" -> DoubleFree
+                                                                                                  ) (splitOptions str) }) "opts")
+                                               "A comma seperated list of bug types which should be checked:\n  user - User defined assertions\n  null - Null pointer dereferentiations\n  invalid - Invalid memory accesses\n  free-access - Access to freed memory locations\n  double-free - Double frees of memory locations\n  all - Check all possible errors"
               ,Option [] ["merge-nodes"]
                (ReqArg (\str opt -> opt { manualMergeNodes = Just (read str) }) "list")
                "A list of merge nodes to use."
