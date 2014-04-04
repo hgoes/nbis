@@ -338,7 +338,8 @@ realizeInstruction (assignInstr@(IAssign trg name expr),num)
                                       return $ Left $ ConditionValue
                                         (case op of
                                             I_EQ -> cond
-                                            I_NE -> boolValNot cond) 1
+                                            _ -> boolValNot cond
+                                        ) 1
                                   ) $
                          (\(Right lhs') (Right rhs')
                           -> MICompare lhs' rhs') <$>
