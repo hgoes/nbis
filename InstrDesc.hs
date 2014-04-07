@@ -73,6 +73,7 @@ data OperandDesc a
   | ODBitcast a
   | ODPtrToInt a
   | ODIntToPtr a
+  | ODICmp ICmpOp a a
   deriving (Show,Eq,Ord)
 
 reifyInstr :: Ptr TargetLibraryInfo
@@ -343,6 +344,11 @@ reifyOperand ptr = do
                       CastOp IntToPtr -> do
                         int <- getOperand expr 0 >>= reifyOperand
                         return $ ODIntToPtr int
+                      OtherOp ICmp -> do
+                        lhs <- getOperand expr 0 >>= reifyOperand
+                        rhs <- getOperand expr 1 >>= reifyOperand
+                        ICmpOp pred <- constantExprGetPredicate expr
+                        return $ ODICmp pred lhs rhs
                       _ -> do
                            valueDump expr
                            error "Unknown constant expr"
