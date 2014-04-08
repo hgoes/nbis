@@ -15,31 +15,9 @@ import Data.Maybe (catMaybes)
 import Control.Concurrent.MVar
 import Data.Proxy
 import Data.Tree
+import Foreign
 
-import LLVM.FFI.BasicBlock
-import LLVM.FFI.Constant
-import LLVM.FFI.MemoryBuffer
-import LLVM.FFI.SMDiagnostic
-import LLVM.FFI.Module
-import LLVM.FFI.Context
-import LLVM.FFI.IPList
-import LLVM.FFI.Function
-import LLVM.FFI.Value
-import LLVM.FFI.Type
-import LLVM.FFI.APInt
-import LLVM.FFI.OOP
-import LLVM.FFI.User
-import LLVM.FFI.Pass
-import LLVM.FFI.Pass.Haskell
-import LLVM.FFI.PassManager
-import LLVM.FFI.SetVector
-import LLVM.FFI.StringRef
-import LLVM.FFI.Transforms.Scalar
-import LLVM.FFI.Transforms.IPO
-import LLVM.FFI.Transforms.Misc
-import LLVM.FFI.ArrayRef
-import LLVM.FFI.Loop
-import LLVM.FFI.CPP
+import LLVM.FFI
 
 type ProgDesc = (Set (Ptr Module),
                  Map String ([(Ptr Argument, TypeDesc)],
@@ -181,12 +159,34 @@ getDataLayout mod = do
   return dl
 #endif
 
-getProgram :: (String -> TypeDesc -> [TypeDesc] -> Bool) -> String -> String -> IO ProgDesc
+getProgram :: (String -> TypeDesc -> [TypeDesc] -> Bool) -> String -> [String] -> IO ProgDesc
 getProgram is_intr entry file = do
-  Just buf <- getFileMemoryBufferSimple file
+  Just buf <- getFileMemoryBufferSimple (head file)
   diag <- newSMDiagnostic
   ctx <- newLLVMContext
-  mod <- parseIR buf diag ctx
+  mod' <- parseIR buf diag ctx
+  mod <- case tail file of
+    [] -> return mod'
+    xs -> do
+      linker <- newLinker mod'
+      mapM_ (\f -> do
+                Just buf <- getFileMemoryBufferSimple f
+                mod'' <- parseIR buf diag ctx
+                errs <- alloca (\err -> do
+                                   res <- linkerLinkInModule linker mod'' 0 err
+                                   if not res
+                                     then return Nothing
+                                     else (do
+                                              err_str <- peek err >>= cppStringToString >>= peekCString
+                                              return (Just err_str))
+                               )
+                case errs of
+                  Nothing -> return ()
+                  Just err -> error $ "Failed to link in "++f++": "++err
+            ) xs
+      rmod <- linkerGetModule linker
+      deleteLinker linker
+      return rmod
   loop_mp <- applyOptimizations mod entry
   tli <- getTargetLibraryInfo mod
   dl <- getDataLayout mod

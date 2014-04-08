@@ -67,10 +67,9 @@ main = do
   when (showHelp opts) $ do
     putStrLn nbisInfo
     exitSuccess
-  progs <- mapM (getProgram isIntrinsic (entryPoint opts)) (files opts)
+  program <- getProgram isIntrinsic (entryPoint opts) (files opts)
   gen <- getStdGen
-  let program = foldl1 mergePrograms progs
-      selectErr = \err -> List.elem err (checkErrors opts)
+  let selectErr = \err -> List.elem err (checkErrors opts)
       cfg = case manualMergeNodes opts of
         Nothing -> defaultConfig (entryPoint opts) program selectErr (bitblast opts)
         Just nodes -> explicitMergePointConfig (entryPoint opts) program nodes selectErr (bitblast opts)
