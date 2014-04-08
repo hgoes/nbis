@@ -72,8 +72,7 @@ instance (Ord ptr,Ord mloc,Show ptr,Show mloc) => MemoryModel (RiverMemory mloc 
   memNew prx ptrWidth allTps structs globals = do
     let ptrOffset = ptrWidth `div` 2
     (globs,ptrs,next) <- foldlM (\(loc,ptrs,next) (ptr,tp,cont) -> do
-                                    glob <- case cont of
-                                      Just cont' -> mkGlobal ptrWidth structs tp cont'
+                                    glob <- mkGlobal ptrWidth structs tp cont
                                     return (loc { riverObjects = Map.insert (RiverObjectRef next) (ObjectInfo { objectRepresentation = glob
                                                                                                               , objectReachability = Map.empty }) (riverObjects loc)
                                                 },Map.insert ptr (PointerInfo { pointerObject = objRepr ptrOffset (RiverObjectRef next)
@@ -1005,14 +1004,18 @@ getLocation mem loc def = case Map.lookup loc (riverLocations mem) of
   Just cont -> (cont,mem)
   Nothing -> (def,mem { riverLocations = Map.insert loc def (riverLocations mem) })
 
-mkGlobal :: Integer -> Map String [TypeDesc] -> TypeDesc -> MemContent -> SMT RiverObject
-mkGlobal _ _ tp (MemCell w v) = do
+mkGlobal :: Integer -> Map String [TypeDesc] -> TypeDesc -> Maybe MemContent -> SMT RiverObject
+mkGlobal _ _ tp (Just (MemCell w v)) = do
   obj <- defConstNamed "global" (constantAnn (BitVector v) w)
   return $ StaticObject tp [obj]
-mkGlobal pw _ tp MemNull = do
+mkGlobal pw _ tp (Just MemNull) = do
   obj <- defConstNamed "globalPtr" (constantAnn (BitVector 0) (pw*8))
   return $ StaticObject tp [obj]
-mkGlobal pw structs tp (MemArray els) = do
+{-mkGlobal pw structs tp (MemArray els) = do
+  let els' = fmap (\(MemCell w v) -> constantAnn (BitVector v) w
+                  ) els
+  return $ StaticObject tp els'-}
+mkGlobal pw structs tp (Just (MemArray els)) = do
   let w = case els of
         (MemCell w _):_ -> w
       tp' = case tp of
@@ -1025,6 +1028,23 @@ mkGlobal pw structs tp (MemArray els) = do
                                                       idx+(w `div` 8))
                        ) (obj,0) els
   unifyObject obj'
+mkGlobal pw structs tp (Just (MemStruct els)) = do
+  let tps = case tp of
+        StructType (Left name) -> structs!name
+        StructType (Right tps') -> tps'
+  objs <- mapM (\(el,tp') -> do
+                   StaticObject _ objs <- mkGlobal pw structs tp' (Just el)
+                   return objs
+               ) (zip els tps)
+  return (StaticObject tp (concat objs))
+mkGlobal pw structs (IntegerType w) Nothing = do
+  v <- varNamedAnn "global" w
+  return $ StaticObject (IntegerType w) [v]
+mkGlobal pw structs (ArrayType sz tp) Nothing = do
+  let w = typeWidth pw structs tp
+  arr <- varNamedAnn "global" (64,w*8)
+  return $ DynamicObject tp arr (Left sz)
+mkGlobal pw structs tp Nothing = error $ "Can't make empty global of type "++show tp
 
 offsetToExpr :: Integer -> Offset -> SMTExpr (BitVector BVUntyped)
 offsetToExpr width off
