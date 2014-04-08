@@ -903,6 +903,7 @@ stepUnrollCtx isFirst enqueue cfg cur = do
                                         , reInputs = inp
                                         , rePhis = phis
                                         , reStructs = unrollStructs cfg
+                                        , rePointerSize = unrollPointerWidth cfg
                                         , reInstrNums = unrollInstrNums cfg })
                         start_loc
                         (unrollNextMem env)

@@ -226,7 +226,7 @@ getProgram is_intr entry file = do
                     init <- globalVariableGetInitializer g
                     init' <- if init == nullPtr
                              then return Nothing
-                             else fmap Just (getConstant init)
+                             else fmap Just (getConstant dl init)
                     tp <- getType g >>= reifyType . castUp
                     return (g,(tp,init'))) >>=
            return . Map.fromList
@@ -243,8 +243,8 @@ getProgram is_intr entry file = do
       ITerminator _ -> [cur++[i]]
       _ -> mkSubBlocks (cur++[i]) is
 
-getConstant :: Ptr Constant -> IO MemContent
-getConstant val 
+getConstant :: Ptr DataLayout -> Ptr Constant -> IO MemContent
+getConstant dl val
   = mkSwitch
     [fmap (\ci -> do
               val <- constantIntGetValue ci
@@ -258,7 +258,7 @@ getConstant val
                               op <- getOperand carr i
                               case castDown op of
                                 Nothing -> error "Constant array operand isn't a constant"
-                                Just op' -> getConstant op'
+                                Just op' -> getConstant dl op'
                           ) [0..(sz-1)]
               return $ MemArray els
           ) (castDown val)
@@ -266,12 +266,12 @@ getConstant val
     ,fmap (\(arr::Ptr ConstantArray) -> do
               tp <- getType arr
               sz <- arrayTypeGetNumElements tp
-              els <- mapM (\i -> constantGetAggregateElement arr i >>= getConstant) [0..(sz-1)]
+              els <- mapM (\i -> constantGetAggregateElement arr i >>= getConstant dl) [0..(sz-1)]
               return $ MemArray els
           ) (castDown val)
     ,fmap (\(seq::Ptr ConstantDataSequential) -> do
               sz <- constantDataSequentialGetNumElements seq
-              els <- mapM (\i -> constantDataSequentialGetElementAsConstant seq i >>= getConstant) [0..(sz-1)]
+              els <- mapM (\i -> constantDataSequentialGetElementAsConstant seq i >>= getConstant dl) [0..(sz-1)]
               return $ MemArray els
           ) (castDown val)
     ,fmap (\(arr::Ptr ConstantAggregateZero) -> do
@@ -279,8 +279,22 @@ getConstant val
               case castDown tp of
                 Just arrTp -> do
                   sz <- arrayTypeGetNumElements arrTp
-                  els <- mapM (\i -> constantGetAggregateElement arr i >>= getConstant) [0..(sz-1)]
+                  els <- mapM (\i -> constantGetAggregateElement arr i >>= getConstant dl) [0..(sz-1)]
                   return $ MemArray els
+                Nothing -> case castDown tp of
+                  Just structTp -> do
+                    sz <- structTypeGetNumElements structTp
+                    els <- mapM (\i -> constantGetAggregateElement arr i >>= getConstant dl) [0..(sz-1)]
+                    return $ MemStruct els
+                  Nothing -> do
+                    typeDump tp
+                    error $ "Constant aggregate zero of type"
+          ) (castDown val)
+    ,fmap (\(struct::Ptr ConstantStruct) -> do
+              tp <- getType struct
+              sz <- structTypeGetNumElements tp
+              els <- mapM (\i -> constantGetAggregateElement struct i >>= getConstant dl) [0..(sz-1)]
+              return $ MemStruct els
           ) (castDown val)
     ]
     where

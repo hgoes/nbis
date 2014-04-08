@@ -11,6 +11,7 @@ import Value
 
 data MemContent = MemCell Integer Integer
                 | MemArray [MemContent]
+                | MemStruct [MemContent]
                 | MemNull
                 deriving (Show,Eq,Ord)
 

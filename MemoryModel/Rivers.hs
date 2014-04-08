@@ -1070,6 +1070,10 @@ loadObject act width (StaticObject _ obj) off = case dynamicOffset off of
     Nothing -> (Nothing,[(Overrun,act)])
     Just [w] -> (Just w,[])
     Just ws -> (Just $ foldl1 bvconcat ws,[])
+  Just dyn_off -> extractDynWord (bvadd (constantAnn (BitVector (staticOffset off))
+                                         (extractAnnotation dyn_off))
+                                  dyn_off)
+                  width obj
   where
     objSize = sum $ fmap extractAnnotation obj
     extractStart = (staticOffset off+width)*8
@@ -1098,6 +1102,25 @@ extractWord start len (w:ws)
     Nothing -> Nothing
   where
     wlen = extractAnnotation w
+extractWord _ _ [] = Nothing
+
+extractDynWord :: SMTExpr (BitVector BVUntyped) -> Integer -> [SMTExpr (BitVector BVUntyped)]
+                  -> (Maybe (SMTExpr (BitVector BVUntyped)),[(ErrorDesc,SMTExpr Bool)])
+extractDynWord start len els
+  = case cur of
+    Nothing -> (Nothing,[(Overrun,start `bvsge` (constantAnn (BitVector 0) bw))])
+    Just ws -> let ws' = foldl1 bvconcat ws
+               in case rest of
+                 Nothing -> (Just ws',errs_rest)
+                 Just rest' -> (Just $ ite (start .==. (constantAnn (BitVector 0) bw))
+                                ws' rest',errs_rest)
+  where
+    cur = extractWord 0 len els
+    cur_len = extractAnnotation (head els)
+    bw = extractAnnotation start
+    (rest,errs_rest) = extractDynWord (start `bvadd`
+                                       (constantAnn (BitVector (cur_len `div` 8)) bw)) len
+                       (tail els)
 
 storeWord :: Integer -> SMTExpr (BitVector BVUntyped) -> [SMTExpr (BitVector BVUntyped)] -> Maybe [SMTExpr (BitVector BVUntyped)]
 storeWord start bv = storeWords start [bv]
@@ -1137,10 +1160,11 @@ storeObject pw structs act word o@(StaticObject tp obj) off = case dynamicOffset
     Just nobj -> (StaticObject tp nobj,[])
   Just _ -> let (nobj,errs) = storeObject pw structs act word (toDynObj pw structs o) off
             in (toStaticObj nobj,errs)
-storeObject _ _ act word (DynamicObject tp arr limit) off = case compare el_width (extractAnnotation word) of
+storeObject _ _ act word (DynamicObject tp arr limit) off = case compare el_width word_size of
   EQ -> (DynamicObject tp (store arr off' word) limit,errs)
   _ -> error $ "Can't store object of size "++(show $ extractAnnotation word)++" to array with element size "++show el_width
   where
+    word_size = extractAnnotation word
     (idx_width,el_width) = extractAnnotation arr
     off' = (offsetToExpr (idx_width `div` 8) off) `bvudiv` (constantAnn (BitVector $ el_width `div` 8) idx_width)
     errs = checkLimits act (el_width `div` 8) idx_width limit off
@@ -1151,6 +1175,19 @@ setObject act byte (ConstValue len _) (StaticObject tp obj) off
     Nothing -> case setWord (staticOffset off*8) len (valValue byte) obj of
       Nothing -> (StaticObject tp obj,[(Overrun,boolValValue act)])
       Just nobj -> (StaticObject tp nobj,[])
+setObject act byte (ConstValue len _) (DynamicObject tp arr limit) off
+  = case compare el_width (extractAnnotation word) of
+    EQ -> (DynamicObject tp (foldl (\carr i -> store carr
+                                               (off' `bvadd` (constantAnn (BitVector i) idx_width))
+                                               word
+                                   ) arr [0..(len-1)]) limit,errs)
+
+  where
+    word = valValue byte
+    (idx_width,el_width) = extractAnnotation arr
+    off' = (offsetToExpr (idx_width `div` 8) off) `bvudiv` (constantAnn (BitVector $ el_width `div` 8) idx_width)
+    errs = checkLimits (boolValValue act) (el_width `div` 8) idx_width limit off
+setObject _ _ val obj _ = error $ "rivers: setObject unimplemented for "++show val++", "++show obj
 
 copyObject :: BoolVal -> CopyOptions -> RiverObject -> Offset -> RiverObject -> Offset -> (RiverObject,[(ErrorDesc,SMTExpr Bool)])
 copyObject act (CopyOpts { copySizeLimit = Just len
@@ -1177,6 +1214,7 @@ copyObject act (CopyOpts { copySizeLimit = Just len
            in if annSrc == annTrg
               then (DynamicObject tp nobj limTrg,[])
               else error "memcopy for different arrays not supported."
+  Nothing -> error "rivers: Can't copy memory of dynamic length yet."
 
 checkLimits :: SMTExpr Bool -> Integer -> Integer -> Either Integer (SMTExpr (BitVector BVUntyped)) -> Offset -> [(ErrorDesc,SMTExpr Bool)]
 checkLimits act elSize idx_width limit off

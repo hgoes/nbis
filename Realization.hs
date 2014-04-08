@@ -38,6 +38,7 @@ data RealizationEnv ptr
                    , reInputs :: Map (Either (Ptr Argument) (Ptr Instruction)) (Either Val ptr)
                    , rePhis :: Map (Ptr BasicBlock) (SMTExpr Bool)
                    , reStructs :: Map String [TypeDesc]
+                   , rePointerSize :: Integer
                    , reInstrNums :: Map (Ptr Instruction) Integer
                    }
 
@@ -247,6 +248,22 @@ argToExpr expr = reInject getType result
                           (argToExpr ptr) <*>
                           (reLift reNewPtr)
       ODUndef -> reUndef (operandType expr)
+      ODICmp op lhs rhs -> case operandType lhs of
+        PointerType _ -> reInject (\instr -> do
+                                      cond <- reMemInstr instr
+                                      return $ Left $ ConditionValue
+                                        (case op of
+                                            I_EQ -> cond
+                                            _ -> boolValNot cond
+                                        ) 1
+                                  ) $
+                         (\(Right lhs') (Right rhs')
+                          -> MICompare lhs' rhs') <$>
+                         (argToExpr lhs) <*>
+                         (argToExpr rhs)
+        _ -> (\(Left lhs') (Left rhs') -> Left $ ConditionValue (valIntComp op lhs' rhs') 1) <$>
+             (argToExpr lhs) <*>
+             (argToExpr rhs)
 
 data BlockFinalization ptr = Jump (CondList (Ptr BasicBlock))
                            | Return (Maybe (Either Val ptr))
@@ -461,6 +478,23 @@ realizeInstruction (assignInstr@(IAssign trg name expr),num)
                                        ConstValue bv _ -> Left bv
                                        DirectValue bv -> Right bv
                                    ) <$> argToExpr sz
+      IMalloc (Just tp) sz False -> reInject (\size -> do
+                                                ptr <- reNewPtr
+                                                loc <- reMemLoc
+                                                new_loc <- reNewMemLoc
+                                                env <- ask
+                                                let width = typeWidth (rePointerSize env) (reStructs env) tp
+                                                    rsz = case size of
+                                                      Left s -> Left $ s `div` width
+                                                      Right s -> Right $ s `bvudiv`
+                                                                 (constantAnn (BitVector width)
+                                                                  (extractAnnotation s))
+                                                reMemInstr (MIAlloc loc tp rsz ptr new_loc)
+                                                return $ Right ptr) $
+                                   (\(Left r) -> case r of
+                                       ConstValue bv _ -> Left bv
+                                       DirectValue bv -> Right bv
+                                   ) <$> argToExpr sz
       _ -> error $ "Unknown expression: "++show expr
 realizeInstruction (IStore val to,_)
   = reErrorAnn NullDeref *>
@@ -475,17 +509,20 @@ realizeInstruction (IStore val to,_)
      (\(Right ptr) val -> (ptr,val)) <$>
      (argToExpr to) <*>
      (argToExpr val))
-realizeInstruction (ITerminator (ICall trg _ f args),_) = case operandDesc f of
-  ODFunction rtp fn argtps -> let args' = traverse (\arg -> (\r -> (r,operandType arg)) <$> argToExpr arg) args
-                              in case intrinsics fn rtp argtps of
-                                Nothing -> reAddCall fn trg *> ((\args'' -> Just $ Call fn (fmap fst args'') trg) <$> args')
-                                Just (def,errs,intr) -> (traverse_ reErrorAnn errs) *>
-                                                        (if def
-                                                         then reDefineVar trg (fn++"Result") (reInject (\args'' -> do
-                                                                                                           Just res <- intr args''
-                                                                                                           return res) args')
-                                                         else reInject (\args'' -> intr args'' >> return ()) args') *> pure Nothing
-
+realizeInstruction (ITerminator (ICall trg _ f args),_)
+  = let (rtp,fn,argtps) = getFunction (operandDesc f)
+        args' = traverse (\arg -> (\r -> (r,operandType arg)) <$> argToExpr arg) args
+    in case intrinsics fn rtp argtps of
+      Nothing -> reAddCall fn trg *> ((\args'' -> Just $ Call fn (fmap fst args'') trg) <$> args')
+      Just (def,errs,intr) -> (traverse_ reErrorAnn errs) *>
+                              (if def
+                               then reDefineVar trg (fn++"Result") (reInject (\args'' -> do
+                                                                                 Just res <- intr args''
+                                                                                 return res) args')
+                               else reInject (\args'' -> intr args'' >> return ()) args') *> pure Nothing
+  where
+    getFunction (ODFunction rtp fn argtps) = (rtp,fn,argtps)
+    getFunction (ODBitcast op) = getFunction (operandDesc op)
 isIntrinsic :: String -> TypeDesc -> [TypeDesc] -> Bool
 isIntrinsic name rtp argtps
   = case intrinsics name rtp argtps
@@ -498,6 +535,8 @@ intrinsics :: (Enum ptr,Enum mloc)
               -> Maybe (Bool,[ErrorDesc],[(Either Val ptr,TypeDesc)] -> (forall mem . MemoryModel mem mloc ptr => RealizationMonad mem mloc ptr (Maybe (Either Val ptr))))
 intrinsics "llvm.memcpy.p0i8.p0i8.i64" _ _ = Just (True,[Overrun],intr_memcpy)
 intrinsics "llvm.memcpy.p0i8.p0i8.i32" _ _ = Just (True,[Overrun],intr_memcpy)
+intrinsics "llvm.memmove.p0i8.p0i8.i64" _ _ = Just (True,[Overrun],intr_memcpy)
+intrinsics "llvm.memmove.p0i8.p0i8.i32" _ _ = Just (True,[Overrun],intr_memcpy)
 intrinsics "llvm.memset.p0i8.i32" _ _ = Just (True,[Overrun],intr_memset)
 intrinsics "llvm.memset.p0i8.i64" _ _ = Just (True,[Overrun],intr_memset)
 intrinsics "llvm.stacksave" _ _ = Just (True,[],intr_stacksave)
@@ -508,9 +547,11 @@ intrinsics ('n':'b':'i':'s':'_':'n':'o':'n':'d':'e':'t':'_':tp) (IntegerType w) 
 intrinsics "nbis_watch" _ _ = Just (False,[],intr_watch)
 intrinsics "llvm.lifetime.start" _ _ = Just (False,[],intr_lifetime_start)
 intrinsics "llvm.lifetime.end" _ _ = Just (False,[],intr_lifetime_end)
-intrinsics "strlen" rtp _ = Just (True,[],intr_strlen (bitWidth' rtp))
+--intrinsics "strlen" rtp _ = Just (True,[],intr_strlen (bitWidth' rtp))
 intrinsics "malloc" _ _ = Just (True,[],intr_malloc)
+intrinsics "calloc" _ _ = Just (True,[],intr_calloc)
 intrinsics "free" _ _ = Just (False,[DoubleFree],intr_free)
+intrinsics "llvm.expect.i64" _ _ = Just (True,[],intr_expect)
 intrinsics _ _ _ = Nothing
 
 intr_memcpy [(Right to,_),(Right from,_),(Left len,_),_,_] = do
@@ -588,8 +629,23 @@ intr_malloc [(Left sz,_)] = do
   reMemInstr (MIAlloc loc (IntegerType 8) sz' ptr nloc)
   return (Just $ Right ptr)
 
+intr_calloc [(Left count,_),(Left el_sz,_)] = do
+  let el_sz' = case el_sz of
+        ConstValue l _ -> l
+      count' = case el_sz of
+        ConstValue l _ -> Left l
+        DirectValue l -> Right l
+  loc <- reMemLoc
+  nloc <- reNewMemLoc
+  ptr <- reNewPtr
+  reMemInstr (MIAlloc loc (IntegerType (el_sz'*8)) count' ptr nloc)
+  return (Just $ Right ptr)
+
+
 intr_free [(Right ptr,_)] = do
   loc <- reMemLoc
   nloc <- reNewMemLoc
   reMemInstr (MIFree loc ptr nloc)
   return Nothing
+
+intr_expect [(x,_),_] = return (Just x)
