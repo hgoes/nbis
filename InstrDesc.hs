@@ -253,7 +253,7 @@ reifyInstr tl dl ptr
     mkSwitch [] = do
       valueDump ptr
       error "Unknown instruction."
-
+#if HS_LLVM_VERSION >= 301
     unravelCase caseit = do
       val <- caseItGetCaseValue caseit >>= constantIntGetValue
       valVal <- apIntGetSExtValue val
@@ -271,6 +271,7 @@ reifyInstr tl dl ptr
                  nxt <- caseItNext caseit
                  xs <- unravelCases nxt end
                  return (x:xs))
+#endif
 
 getInstrType :: Map String [TypeDesc] -> InstrDesc Operand -> TypeDesc
 getInstrType structs (IAssign _ _ desc) = case desc of
