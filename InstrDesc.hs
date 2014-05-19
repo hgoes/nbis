@@ -222,10 +222,19 @@ reifyInstr tl dl ptr
             ) (castDown ptr)
       ,fmap (\switch -> do
                 cond <- switchInstGetCondition switch >>= reifyOperand
+#if HS_LLVM_VERSION >= 301
                 def_blk <- switchInstCaseDefault switch >>= caseItGetCaseSuccessor
                 begin <- switchInstCaseBegin switch
                 end <- switchInstCaseEnd switch
                 cases <- unravelCases begin end
+#else
+                def_blk <- switchInstGetDefaultDest switch
+                num <- terminatorInstGetNumSuccessors switch
+                cases <- mapM (\i -> do
+                                   blk <- terminatorInstGetSuccessor switch i
+                                   val <- switchInstGetCaseValue switch i
+                                   return (blk,val)) num
+#endif
                 return $ ITerminator (ISwitch cond def_blk cases)
             ) (castDown ptr)
       ,fmap (\(_::Ptr UnreachableInst) -> return $ ITerminator IUnreachable) (castDown ptr)
