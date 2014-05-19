@@ -23,6 +23,7 @@ import Language.SMTLib2.Yices
 import Language.SMTLib2.Internals.Optimize
 import Language.SMTLib2.Debug
 import qualified Data.Graph.Inductive as Gr
+import qualified Data.GraphViz as GrV
 import Data.Foldable (all)
 import Prelude hiding (mapM_,all)
 import System.Random
@@ -119,7 +120,7 @@ main = do
                 (result,info) <- contextQueueRun (incremental opts) (completeness opts)
                                  (Proxy::Proxy (RiverMemory Integer Integer))
                                  (Proxy::Proxy (Gr.Gr BlkInfo ())) cfg (entryPoint opts)
-                liftIO $ writeFile dumpFile (Gr.graphviz' info)
+                liftIO $ writeFile dumpFile (show $ GrV.toDot $ GrV.graphToDot GrV.nonClusteredParams info)
                 return result
               Nothing -> do
                 (result,_) <- contextQueueRun (incremental opts) (completeness opts)
