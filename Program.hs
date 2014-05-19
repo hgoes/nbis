@@ -245,7 +245,11 @@ getProgram is_intr entry file = do
       ITerminator _ -> [cur++[i]]
       _ -> mkSubBlocks (cur++[i]) is
 
+#if HS_LLVM_VERSION >= 302
 getConstant :: Ptr DataLayout -> Ptr Constant -> IO MemContent
+#else
+getConstant :: Ptr TargetData -> Ptr Constant -> IO MemContent
+#endif
 getConstant dl val
   = mkSwitch
     [fmap (\ci -> do
@@ -265,6 +269,7 @@ getConstant dl val
               return $ MemArray els
           ) (castDown val)
     ,fmap (\(pnull::Ptr ConstantPointerNull) -> return $ MemNull) (castDown val)
+#if HS_LLVM_VERSION >= 301
     ,fmap (\(arr::Ptr ConstantArray) -> do
               tp <- getType arr
               sz <- arrayTypeGetNumElements tp
@@ -298,6 +303,7 @@ getConstant dl val
               els <- mapM (\i -> constantGetAggregateElement struct i >>= getConstant dl) [0..(sz-1)]
               return $ MemStruct els
           ) (castDown val)
+#endif
     ]
     where
       mkSwitch ((Just act):_) = act
