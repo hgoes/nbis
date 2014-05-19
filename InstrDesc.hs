@@ -232,8 +232,12 @@ reifyInstr tl dl ptr
                 num <- terminatorInstGetNumSuccessors switch
                 cases <- mapM (\i -> do
                                    blk <- terminatorInstGetSuccessor switch i
-                                   val <- switchInstGetCaseValue switch i
-                                   return (blk,val)) num
+                                   val <- switchInstGetCaseValue switch i >>= constantIntGetValue
+                                   valVal <- apIntGetSExtValue val
+                                   valWidth <- apIntGetBitWidth val
+                                   return (Operand { operandType = IntegerType (fromIntegral valWidth)
+                                                   , operandDesc = ODInt (fromIntegral valVal)
+                                                   },blk)) [0..(fromIntegral num)-1]
 #endif
                 return $ ITerminator (ISwitch cond def_blk cases)
             ) (castDown ptr)
