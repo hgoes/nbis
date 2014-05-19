@@ -28,6 +28,7 @@ import qualified Data.Set as Set
 import qualified Data.List as List
 import Foreign.Ptr
 import qualified Data.Graph.Inductive as Gr
+import qualified Data.GraphViz as GrV
 import Data.Traversable
 import Data.Foldable
 import Data.Proxy
@@ -1408,7 +1409,7 @@ updateDistanceInfo'' gr (nd,newDist) = (gr { blockGraph = ngr },upds)
 
 dumpBlockGraph :: UnrollConfig mem mloc ptr -> IO ()
 dumpBlockGraph cfg = do
-  putStrLn $ Gr.graphviz' $ blockGraph $ unrollGraph cfg
+  putStrLn $ show $ GrV.toDot $ GrV.graphToDot GrV.nonClusteredParams $ blockGraph $ unrollGraph cfg
 
 getInstructionNumbers :: BlockGraph mem mloc ptr -> Map (Ptr Instruction) Integer
 getInstructionNumbers gr
