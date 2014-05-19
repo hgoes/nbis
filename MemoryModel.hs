@@ -21,6 +21,7 @@ data ErrorDesc = Custom
                | Underrun
                | FreeAccess
                | DoubleFree
+               | InternalError String
                deriving (Show,Eq,Ord)
 
 type DynNum = Either Integer (SMTExpr (BitVector BVUntyped))

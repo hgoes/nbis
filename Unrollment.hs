@@ -43,6 +43,7 @@ import Data.Tree
 import Data.Monoid
 
 import Debug.Trace
+import System.IO.Unsafe
 
 class UnrollInfo a where
   type UnrollNodeInfo a
@@ -61,7 +62,7 @@ data NodeId = NodeId { nodeIdFunction :: String
                      , nodeIdBlock :: Ptr BasicBlock
                      , nodeIdSubblock :: Integer
                      , nodeIdCallStack :: Maybe (NodeId,Ptr Instruction)
-                     } deriving (Eq,Ord,Show)
+                     } deriving (Eq,Ord)
 
 type MergeValueRef ptr = IORef (MergeValue ptr)
 
@@ -853,14 +854,14 @@ stepUnrollCtx :: (MemoryModel mem mloc ptr,UnrollInfo a,Eq ptr,Enum ptr,Eq mloc,
                  -> UnrollMonad a mem mloc ptr (UnrollContext a mloc ptr)
 stepUnrollCtx isFirst enqueue cfg cur = do
   (Edge trg inc createdMerges lvl,cur1) <- nextEdge cur
-  --trace ("Realizing "++show trg) (return ())
+  --trace ("Realizing "++show isFirst++" "++show trg) (return ())
   let mergeNode = Map.lookup trg (currentMergeNodes cur1)
       mergeNodeCreate = unrollDoMerge cfg (nodeIdFunction trg) (nodeIdBlock trg) (nodeIdSubblock trg)
       extensible = case mergeNode of
         Nothing -> mergeNodeCreate
         Just _ -> True
   case mergeNode of
-    Just mn -> connectMerge cur1 mn trg inc
+    Just mn -> {-trace "Merging into node" $-} connectMerge cur1 mn trg inc
     Nothing -> do
       let blockNode = (blockMap $ unrollGraph cfg)!(nodeIdBlock trg,nodeIdSubblock trg)
           Just blockInfo = Gr.lab (blockGraph $ unrollGraph cfg) blockNode
@@ -1216,7 +1217,7 @@ checkForErrors cfg = do
       bugs = filter (\(desc,_) -> unrollCheckedErrors cfg desc) $
              unrollGuards env ++ (memoryErrors (unrollMemory env) p1 p2)
   
-  lift $ stack $ do
+  lift $ do
     assert $ app or' [ cond | (desc,cond) <- bugs ]
     {-res <- checkSatUsing (AndThen [UsingParams (CustomTactic "simplify") []
                                   ,UsingParams (CustomTactic "tseitin-cnf") []
@@ -1441,3 +1442,15 @@ checkCompleteness cfg queue = stack $ do
                                     ,UsingParams (CustomTactic "bit-blast") []
                                     ,UsingParams (CustomTactic "sat") []])-}
 
+
+instance Show NodeId where
+  showsPrec p nd = showParen (p>10) $
+                   showString "NodeId {nodeIdFunction = " .
+                   showsPrec 0 (nodeIdFunction nd) .
+                   showString ", nodeIdBlock = " .
+                   showsPrec 0 (unsafePerformIO (getNameString (nodeIdBlock nd))) .
+                   showString ", nodeIdSubblock = " .
+                   showsPrec 0 (nodeIdSubblock nd) .
+                   showString ", nodeIdCallStack = " .
+                   showsPrec 0 (nodeIdCallStack nd) .
+                   showString "}"

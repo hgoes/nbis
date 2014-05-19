@@ -106,7 +106,9 @@ main = do
 #endif
 
     withBackend1 opts f = if debugSMT opts
-                          then withBackend0 opts (\b -> f $ debugBackend b)
+                          then withBackend0 opts (\b -> do
+                                                     b' <- debugBackend b
+                                                     f b')
                           else withBackend0 opts f
     actVerify opts cfg = do
       bug <- withBackend1 opts $ \b -> withSMTBackendExitCleanly (optimizeBackend b) $ do

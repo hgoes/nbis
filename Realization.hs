@@ -25,6 +25,9 @@ import LLVM.FFI.Instruction (Instruction,ICmpOp(..))
 import LLVM.FFI.BasicBlock
 import LLVM.FFI.Constant
 
+import Debug.Trace
+import Data.Proxy
+
 type Watchpoint = (String,SMTExpr Bool,[(TypeDesc,SMTExpr (BitVector BVUntyped))])
 
 type Guard = (ErrorDesc,SMTExpr Bool)
@@ -601,6 +604,9 @@ intr_watch ((Left (ConstValue bv _),_):exprs) = do
                                     | (Left val,tp) <- exprs ])] }
   return Nothing
 
+intr_nondet 1 [] = do
+  v <- lift $ varNamed "nondetVar"
+  return (Just $ Left $ ConditionValue (DirectBool v) 1)
 intr_nondet width [] = do
   v <- lift $ varNamedAnn "nondetVar" width
   return (Just $ Left $ DirectValue v)
