@@ -180,7 +180,11 @@ getProgram is_intr entry file = do
                 mod'' <- parseIR buf diag ctx
                 errs <- do
                   err <- cppStringEmpty
+#if HS_LLVM_VERSION >= 303
                   res <- linkerLinkInModule linker mod'' 0 err
+#else
+                  res <- linkerLinkInModule linker mod'' err
+#endif
                   res' <- if not res
                           then return Nothing
                           else (do
