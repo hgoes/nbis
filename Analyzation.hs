@@ -12,6 +12,8 @@ import LLVM.FFI.BasicBlock
 import LLVM.FFI.Value
 import Foreign.Ptr
 import qualified Data.Graph.Inductive as Gr
+import qualified Data.GraphViz as GrV
+import qualified Data.GraphViz.Printing as GrV
 
 foldInstrs :: (a -> Ptr BasicBlock -> Integer -> InstrDesc Operand -> a) -> a -> [(Ptr BasicBlock,[[InstrDesc Operand]])] -> a
 foldInstrs f = foldl (\x1 (blk,sblks) 
@@ -154,7 +156,8 @@ getVariableInfo f g gr = updateGraph (Gr.nmap (\(nd,reach) -> (nd,reach,Variable
 
 programGraphGraphviz :: Gr.DynGraph gr => ProgramGraph gr -> String
 programGraphGraphviz pgr
-  = Gr.graphviz' $
+  = show $ GrV.toDot $
+    GrV.graphToDot GrV.nonClusteredParams $
     Gr.emap (const ()) $
     Gr.nmap (\(blk,blk_name,sblk,instrs) -> (blk,sblk,case blk_name of
                                                 Nothing -> ""
