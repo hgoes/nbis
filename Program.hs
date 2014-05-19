@@ -172,14 +172,16 @@ getProgram is_intr entry file = do
       mapM_ (\f -> do
                 Just buf <- getFileMemoryBufferSimple f
                 mod'' <- parseIR buf diag ctx
-                errs <- alloca (\err -> do
-                                   res <- linkerLinkInModule linker mod'' 0 err
-                                   if not res
-                                     then return Nothing
-                                     else (do
-                                              err_str <- peek err >>= cppStringToString >>= peekCString
-                                              return (Just err_str))
-                               )
+                errs <- do
+                  err <- cppStringEmpty
+                  res <- linkerLinkInModule linker mod'' 0 err
+                  res' <- if not res
+                          then return Nothing
+                          else (do
+                                   err_str <- cppStringToString err >>= peekCString
+                                   return (Just err_str))
+                  cppStringDelete err
+                  return res'
                 case errs of
                   Nothing -> return ()
                   Just err -> error $ "Failed to link in "++f++": "++err
