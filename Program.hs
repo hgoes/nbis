@@ -168,7 +168,13 @@ getProgram is_intr entry file = do
   mod <- case tail file of
     [] -> return mod'
     xs -> do
+#if HS_LLVM_VERSION <= 302
+      nbis_str <- newStringRef "nbis"
+      linker <- newLinker nbis_str mod'
+      deleteStringRef nbis_str
+#else
       linker <- newLinker mod'
+#endif
       mapM_ (\f -> do
                 Just buf <- getFileMemoryBufferSimple f
                 mod'' <- parseIR buf diag ctx
