@@ -102,7 +102,9 @@ passes :: String -> MVar (Map String ([LoopDesc],Maybe DomTree)) -> [APass]
 passes entry var
   = [APass createPromoteMemoryToRegisterPass
     ,APass createConstantPropagationPass
+#if HS_LLVM_VERSION<=302
     ,APass createSimplifyLibCallsPass
+#endif
     ,APass createIndVarSimplifyPass
     ,APass createLoopSimplifyPass
     ,APass createCFGSimplificationPass
