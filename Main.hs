@@ -89,7 +89,8 @@ main = do
   where
     actVerify opts cfg = do
       backend <- case solver opts of
-            SMTLib2Solver name -> fmap AnyBackend $ createSMTPipe name
+            SMTLib2Solver name -> case words name of
+              solv:args -> fmap AnyBackend $ createSMTPipe solv args
 #ifdef WITH_STP
             STPSolver -> fmap AnyBackend stpBackend
 #endif

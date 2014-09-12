@@ -20,7 +20,6 @@ Executable nbis
   Main-Is:		Main.hs
   Extensions:           CPP,ScopedTypeVariables,GADTs,GeneralizedNewtypeDeriving,ParallelListComp,TypeFamilies,FlexibleInstances,RankNTypes,FlexibleContexts
   Other-Modules:
-    Abstraction
     MemoryModel
     MemoryModel.Untyped
     MemoryModel.Typed
